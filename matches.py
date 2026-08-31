@@ -4,6 +4,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urljoin, urlparse
 
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright, Page
@@ -36,7 +37,7 @@ BASE_DIR = Path(__file__).resolve().parent
 
 front_file_env = os.getenv(
     "MATCHES_FRONT_FILE",
-    "frontend/public/matches.json",
+    "front/frontend/public/matches.json",
 ).strip()
 
 FRONT_FILE = Path(front_file_env)
@@ -220,6 +221,8 @@ async def get_market_value(game, wanted_market: str):
             if not label:
                 label = await button.get_attribute("title")
             if not label:
+                label = await safe_text(button)
+            if not label:
                 continue
 
             label = clean_text(label)
@@ -253,7 +256,10 @@ def get_match_id(href: str | None):
     if not href:
         return None
 
-    result = re.search(r"/(\d+)-[^/]+$", href)
+    result = re.search(
+        r"/(\d+)(?:-[^/?#]+)?(?:[?#].*)?$",
+        href,
+    )
     return result.group(1) if result else None
 
 
@@ -271,9 +277,14 @@ async def parse_match(game, number: int):
     period = await safe_text(game.locator(PERIOD_SELECTOR))
     period_lower = period.lower()
 
-    finished = (
-        "завершена" in period_lower
-        or "завершен" in period_lower
+    finished = any(
+        marker in period_lower
+        for marker in (
+            "заверш",
+            "окончен",
+            "finished",
+            "full time",
+        )
     )
 
     # По текущему DOM будущие матчи имеют countdown MM:SS,
@@ -288,16 +299,11 @@ async def parse_match(game, number: int):
     odds_draw = await get_market_value(game, "Ничья")
     odds_team2 = await get_market_value(game, "П2")
 
-    score = await get_score(game)
+    score = await get_score(game) or "0:0"
     href = await get_match_href(game)
     match_id = get_match_id(href)
 
-    match_url = None
-    if href:
-        if href.startswith("/"):
-            match_url = "https://1xlite-02216.pro" + href
-        else:
-            match_url = href
+    match_url = urljoin(MATCHES_URL, href) if href else None
 
     return {
         "number": number,
@@ -443,7 +449,7 @@ async def open_nearest_match(page: Page, matches):
     print("=" * 70)
     print("БЛИЖАЙШИЙ МАТЧ")
     print("=" * 70)
-    print(f"Матч: {nearest['team1']} — {nearest['team2']}")
+    print(f"{nearest['team1']} — {nearest['team2']}")
     print(f"До начала: {nearest['time']}")
     print(f"П1: {nearest['odds_team1']}")
     print(f"X: {nearest['odds_draw']}")
@@ -486,12 +492,22 @@ async def open_nearest_match(page: Page, matches):
     except Exception:
         await page.wait_for_timeout(2500)
 
+    selected_url = nearest.get("url")
+    selected_path = urlparse(selected_url).path if selected_url else ""
+    current_path = urlparse(page.url).path
+
+    if selected_path and current_path.rstrip("/") != selected_path.rstrip("/"):
+        raise RuntimeError(
+            "После клика URL не соответствует выбранному матчу: "
+            f"ожидался {selected_url}, открыт {page.url}"
+        )
+
     print()
     print("=" * 70)
     print("ПЕРЕШЛИ В БЛИЖАЙШИЙ МАТЧ")
     print("=" * 70)
     print(f"{nearest['team1']} — {nearest['team2']}")
-    print(f"URL браузера: {page.url}")
+    print(f"URL: {page.url}")
     print("=" * 70)
     print()
 
@@ -581,6 +597,8 @@ async def main():
     print("THIS_MATCH")
     print("=" * 70)
     print()
+
+    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
     async with async_playwright() as playwright:
         context = await playwright.chromium.launch_persistent_context(

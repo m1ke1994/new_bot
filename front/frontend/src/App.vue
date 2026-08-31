@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
-const data = ref({
+const emptyData = () => ({
   ok: false,
   league: '',
   updated_at: null,
@@ -9,6 +9,8 @@ const data = ref({
   next_match: null,
   matches: [],
 })
+
+const data = ref(emptyData())
 
 const loading = ref(true)
 const error = ref('')
@@ -46,6 +48,7 @@ async function loadMatches() {
     error.value = ''
   } catch (err) {
     connected.value = false
+    data.value = emptyData()
 
     error.value =
       err instanceof Error
@@ -268,7 +271,7 @@ onBeforeUnmount(() => {
           <strong>
             {{
               connected
-                ? 'БОТ АКТИВЕН'
+                ? 'МОНИТОРИНГ АКТИВЕН'
                 : 'НЕТ ДАННЫХ'
             }}
           </strong>
@@ -367,7 +370,7 @@ onBeforeUnmount(() => {
       <!-- ================================================= -->
 
       <div
-        v-if="loading"
+        v-else-if="loading"
         class="empty"
       >
         Получаем информацию от автобота...
@@ -414,7 +417,7 @@ onBeforeUnmount(() => {
 
             <div class="active-top">
               <div class="match-id">
-                MATCH
+                ID МАТЧА
                 #{{ nextMatch.match_id || nextMatch.number }}
               </div>
 
@@ -548,7 +551,7 @@ onBeforeUnmount(() => {
                 </strong>
 
                 <strong v-else>
-                  Ожидание коэффициентов
+                  Аутсайдер не определён
                 </strong>
               </div>
 
@@ -672,18 +675,13 @@ onBeforeUnmount(() => {
               </div>
 
 
-              <div
-                v-if="getOutsider(match)"
-                class="queue-outsider"
-              >
+              <div class="queue-outsider">
                 <span>
                   АУТСАЙДЕР
                 </span>
 
                 <strong>
-                  {{
-                    getOutsider(match).team
-                  }}
+                  {{ getOutsider(match)?.team || 'Не определён' }}
                 </strong>
               </div>
             </article>
