@@ -1,0 +1,8 @@
+fastapi==0.115.6
+uvicorn==0.34.0
+playwright>=1.49,<2
+python-dotenv>=1.0,<2
+numpy>=2,<3
+opencv-python>=4.10,<6
+pytesseract>=0.3.13,<1
+rapidocr==3.9.2
