@@ -3,7 +3,9 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright, Page
+from playwright.async_api import Page
+
+from xbet_config import get_xbet_url
 
 
 # ============================================================
@@ -12,7 +14,7 @@ from playwright.async_api import async_playwright, Page
 
 load_dotenv()
 
-SITE_URL = os.getenv("XBET_URL", "").strip()
+SITE_URL = get_xbet_url()
 LOGIN = os.getenv("XBET_LOGIN", "").strip()
 PASSWORD = os.getenv("XBET_PASSWORD", "").strip()
 
@@ -80,7 +82,7 @@ async def check_balance(page: Page) -> bool:
     if await is_visible(
         page,
         BALANCE_SELECTOR,
-        timeout=5000,
+        timeout=2500,
     ):
         log("Баланс найден.")
         log("Пользователь авторизован.")
@@ -134,7 +136,7 @@ async def open_login(page: Page):
 
             await button.wait_for(
                 state="visible",
-                timeout=3000,
+                timeout=1200,
             )
 
             log(f"Кнопка найдена: {selector}")
@@ -449,7 +451,7 @@ async def check_captcha(page: Page) -> bool:
 # WAIT MANUAL CAPTCHA
 # ============================================================
 
-async def wait_manual_captcha(page: Page):
+async def wait_manual_captcha(page: Page, stop_event: asyncio.Event | None = None):
 
     print()
     print("=" * 60)
@@ -459,6 +461,9 @@ async def wait_manual_captcha(page: Page):
     print()
 
     while True:
+
+        if stop_event is not None and stop_event.is_set():
+            return False
 
         if await check_balance(page):
 
@@ -470,14 +475,20 @@ async def wait_manual_captcha(page: Page):
 
             return True
 
-        await asyncio.sleep(2)
+        if stop_event is None:
+            await asyncio.sleep(2)
+        else:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=2)
+            except TimeoutError:
+                pass
 
 
 # ============================================================
 # AUTH
 # ============================================================
 
-async def authorize(page: Page):
+async def authorize(page: Page, stop_event: asyncio.Event | None = None):
 
     # --------------------------------------------------------
     # 1. Открываем сайт
@@ -489,12 +500,15 @@ async def authorize(page: Page):
     # 2. Проверяем баланс ДО входа
     # --------------------------------------------------------
 
-    if await check_balance(page):
-
-        return {
-            "ok": True,
-            "status": "AUTHORIZED_ALREADY",
-        }
+    for attempt in range(1, 4):
+        if await check_balance(page):
+            return {
+                "ok": True,
+                "status": "AUTHORIZED_ALREADY",
+            }
+        if attempt < 3:
+            log(f"AUTH_CHECK_RETRY {attempt}/3")
+            await page.wait_for_timeout(700)
 
     # --------------------------------------------------------
     # 3. Баланса нет → ищем Вход
@@ -505,7 +519,20 @@ async def authorize(page: Page):
         "Переходим к форме входа."
     )
 
-    await open_login(page)
+    login_error = None
+    for attempt in range(1, 4):
+        if await check_balance(page):
+            return {"ok": True, "status": "AUTHORIZED_ALREADY"}
+        try:
+            await open_login(page)
+            login_error = None
+            break
+        except RuntimeError as error:
+            login_error = error
+            log(f"AUTH_CHECK_RETRY {attempt}/3: {error}")
+            await page.wait_for_timeout(700)
+    if login_error is not None:
+        return {"ok": False, "status": "LOGIN_BUTTON_NOT_READY"}
 
     # --------------------------------------------------------
     # 4. Ищем модальное окно
@@ -565,7 +592,10 @@ async def authorize(page: Page):
 
     if await check_captcha(page):
 
-        await wait_manual_captcha(page)
+        completed = await wait_manual_captcha(page, stop_event)
+
+        if not completed:
+            return {"ok": False, "status": "AUTH_STOPPED"}
 
         return {
             "ok": True,
@@ -602,38 +632,16 @@ async def main():
             "XBET_URL отсутствует в .env"
         )
 
-    PROFILE_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
     print()
     print("=" * 60)
     print("PLAYWRIGHT AUTH")
     print("=" * 60)
     print()
 
-    async with async_playwright() as playwright:
+    from backend.app.browser.manager import BROWSER_MANAGER
 
-        context = (
-            await playwright.chromium.launch_persistent_context(
-                user_data_dir=str(PROFILE_DIR),
-
-                headless=False,
-
-                viewport=None,
-            )
-        )
-
-        if context.pages:
-
-            page = context.pages[0]
-
-        else:
-
-            page = await context.new_page()
-
-        try:
+    page = await BROWSER_MANAGER.start()
+    try:
 
             result = await authorize(page)
 
@@ -655,7 +663,7 @@ async def main():
 
             await asyncio.to_thread(input)
 
-        except Exception as error:
+    except Exception as error:
 
             print()
             print("=" * 60)
@@ -672,9 +680,9 @@ async def main():
 
             await asyncio.to_thread(input)
 
-        finally:
-
-            await context.close()
+    finally:
+        # Standalone script termination is an explicit application shutdown.
+        await BROWSER_MANAGER.stop()
 
 
 # ============================================================

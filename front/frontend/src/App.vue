@@ -1,699 +1,459 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
-const emptyData = () => ({
-  ok: false,
-  league: '',
+const emptyStats = {
+  matches_processed: 0,
+  bets: 0,
+  wins: 0,
+  losses: 0,
+  total_amount: 0,
+  average_odds: null,
+  max_step: 0,
+  average_steps_to_win: null,
+}
+
+const state = ref({
+  running: false,
+  mode: 'DEMO',
+  status: 'STOPPED',
+  browser: { status: 'CLOSED', context: 'CLOSED', page: 'CLOSED' },
+  auth: { status: 'UNKNOWN' },
+  league: 'FC 25. 3x3. Лига Конференций',
+  message: 'Подключение к backend...',
+  error: null,
+  match: null,
+  scanner: { total: 0, started: 0, upcoming: 0, selected: null },
+  selected_team: null,
+  other_team: null,
+  selection_reason: null,
+  odds: {
+    selected: null,
+    opponent: null,
+    team1: null,
+    team2: null,
+    source: null,
+    backend: null,
+    confidence: null,
+    status: 'WAITING',
+  },
+  ocr: { status: 'WAITING', attempt: 0, max_attempts: 5, candidates: [] },
+  bet: { step: 0, max_steps: 11 },
+  last_change: null,
+  stats: emptyStats,
   updated_at: null,
-  matches_count: 0,
-  next_match: null,
-  matches: [],
 })
 
-const data = ref(emptyData())
-
-const loading = ref(true)
-const error = ref('')
-const connected = ref(false)
-
+const history = ref([])
+const logs = ref([])
+const backendError = ref('')
+const actionPending = ref(false)
+const initialLoading = ref(true)
 let timer = null
+let tick = 0
 
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+    ...options,
+  })
+  const contentType = response.headers.get('content-type') || ''
+  if (!contentType.includes('application/json')) {
+    throw new Error(`Backend вернул не JSON (${response.status})`)
+  }
+  const result = await response.json()
+  if (!response.ok) {
+    throw new Error(result.detail || `HTTP ${response.status}`)
+  }
+  return result
+}
 
-// ============================================================
-// ЗАГРУЗКА ДАННЫХ
-// ============================================================
-
-async function loadMatches() {
+async function loadState() {
   try {
-    const response = await fetch(
-      `/matches.json?t=${Date.now()}`,
-      {
-        cache: 'no-store',
-      },
-    )
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`)
-    }
-
-    const json = await response.json()
-
-    if (!json || !Array.isArray(json.matches)) {
-      throw new Error('Некорректный matches.json')
-    }
-
-    data.value = json
-
-    connected.value = true
-    error.value = ''
-  } catch (err) {
-    connected.value = false
-    data.value = emptyData()
-
-    error.value =
-      err instanceof Error
-        ? err.message
-        : String(err)
+    state.value = await api('/api/demo/state')
+    backendError.value = ''
+  } catch (error) {
+    backendError.value = error instanceof Error ? error.message : String(error)
   } finally {
-    loading.value = false
+    initialLoading.value = false
   }
 }
 
-
-// ============================================================
-// СОРТИРОВКА ПО ВРЕМЕНИ ДО НАЧАЛА
-// ============================================================
-
-const matches = computed(() => {
-  return [...data.value.matches].sort((a, b) => {
-    const aTime =
-      Number.isFinite(Number(a.time_seconds))
-        ? Number(a.time_seconds)
-        : Number.MAX_SAFE_INTEGER
-
-    const bTime =
-      Number.isFinite(Number(b.time_seconds))
-        ? Number(b.time_seconds)
-        : Number.MAX_SAFE_INTEGER
-
-    return aTime - bTime
-  })
-})
-
-
-// ============================================================
-// БЛИЖАЙШИЙ МАТЧ
-// ============================================================
-
-const nextMatch = computed(() => {
-  if (data.value.next_match) {
-    return data.value.next_match
+async function loadDetails() {
+  try {
+    const [historyData, logsData] = await Promise.all([
+      api('/api/demo/history?limit=500'),
+      api('/api/demo/logs?limit=500'),
+    ])
+    history.value = Array.isArray(historyData.items) ? historyData.items : []
+    logs.value = Array.isArray(logsData.items) ? logsData.items : []
+  } catch (error) {
+    backendError.value = error instanceof Error ? error.message : String(error)
   }
-
-  return matches.value[0] || null
-})
-
-
-// ============================================================
-// ОСТАЛЬНАЯ ОЧЕРЕДЬ
-// ============================================================
-
-const queueMatches = computed(() => {
-  if (!nextMatch.value) {
-    return matches.value
-  }
-
-  return matches.value.filter((match) => {
-    if (
-      match.match_id &&
-      nextMatch.value.match_id
-    ) {
-      return (
-        match.match_id !==
-        nextMatch.value.match_id
-      )
-    }
-
-    return (
-      match.number !==
-      nextMatch.value.number
-    )
-  })
-})
-
-
-// ============================================================
-// КОЭФФИЦИЕНТ
-// ============================================================
-
-function displayOdd(value) {
-  if (
-    value === null ||
-    value === undefined ||
-    value === ''
-  ) {
-    return '—'
-  }
-
-  return value
 }
 
-
-// ============================================================
-// АУТСАЙДЕР
-//
-// Чем БОЛЬШЕ коэффициент на победу,
-// тем команда считается аутсайдером.
-// ============================================================
-
-function getOutsider(match) {
-  if (!match) {
-    return null
+async function refresh() {
+  await loadState()
+  tick += 1
+  if (tick % 2 === 0) {
+    await loadDetails()
   }
-
-  const odd1 = Number(match.odds_team1)
-  const odd2 = Number(match.odds_team2)
-
-  if (
-    !Number.isFinite(odd1) ||
-    !Number.isFinite(odd2)
-  ) {
-    return null
-  }
-
-  if (odd1 > odd2) {
-    return {
-      team: match.team1,
-      odd: match.odds_team1,
-      side: 1,
-    }
-  }
-
-  if (odd2 > odd1) {
-    return {
-      team: match.team2,
-      odd: match.odds_team2,
-      side: 2,
-    }
-  }
-
-  return null
 }
 
+async function control(action) {
+  actionPending.value = true
+  try {
+    state.value = await api(`/api/demo/${action}`, { method: 'POST' })
+    backendError.value = ''
+    await loadDetails()
+  } catch (error) {
+    backendError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    actionPending.value = false
+  }
+}
 
-const nextOutsider = computed(() => {
-  return getOutsider(nextMatch.value)
+function show(value, fallback = '—') {
+  return value === null || value === undefined || value === '' ? fallback : value
+}
+
+function formatNumber(value, digits = 2) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '—'
+  return new Intl.NumberFormat('ru-RU', { maximumFractionDigits: digits }).format(number)
+}
+
+const match = computed(() => state.value.match || {})
+const bet = computed(() => state.value.bet || {})
+const stats = computed(() => ({ ...emptyStats, ...(state.value.stats || {}) }))
+const lastChange = computed(() => state.value.last_change || {})
+const scanner = computed(() => state.value.scanner || {})
+const ocr = computed(() => state.value.ocr || {})
+const reversedHistory = computed(() => [...history.value].reverse())
+const recentLogs = computed(() => logs.value.slice(-250))
+const scoreText = computed(() => {
+  if (match.value.score1 === null || match.value.score1 === undefined) return '— : —'
+  return `${match.value.score1} : ${match.value.score2}`
 })
-
-
-// ============================================================
-// ВРЕМЯ ОБНОВЛЕНИЯ
-// ============================================================
-
+const statusTone = computed(() => {
+  if (state.value.status === 'ERROR') return 'danger'
+  if (state.value.status === 'STOPPED') return 'neutral'
+  if (['WIN', 'GOAL_DETECTED'].includes(state.value.status)) return 'success'
+  if (['LOSE', 'SEQUENCE_EXHAUSTED'].includes(state.value.status)) return 'warning'
+  return 'active'
+})
+const confidencePercent = computed(() => {
+  const value = Number(state.value.odds?.confidence)
+  if (!Number.isFinite(value)) return '—'
+  return `${formatNumber(value <= 1 ? value * 100 : value)}%`
+})
 const updatedAt = computed(() => {
-  if (!data.value.updated_at) {
-    return '—'
-  }
-
-  const date = new Date(data.value.updated_at)
-
-  if (Number.isNaN(date.getTime())) {
-    return data.value.updated_at
-  }
-
-  return date.toLocaleTimeString(
-    'ru-RU',
-    {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    },
-  )
+  if (!state.value.updated_at) return '—'
+  const date = new Date(state.value.updated_at)
+  return Number.isNaN(date.getTime()) ? state.value.updated_at : date.toLocaleTimeString('ru-RU')
 })
-
-
-// ============================================================
-// START
-// ============================================================
 
 onMounted(async () => {
-  await loadMatches()
-
-  timer = setInterval(
-    loadMatches,
-    2000,
-  )
+  await Promise.all([loadState(), loadDetails()])
+  timer = setInterval(refresh, 750)
 })
 
-
-// ============================================================
-// STOP
-// ============================================================
-
 onBeforeUnmount(() => {
-  if (timer) {
-    clearInterval(timer)
-  }
+  if (timer) clearInterval(timer)
 })
 </script>
 
-
 <template>
-  <div class="app">
-    <!-- =================================================== -->
-    <!-- HEADER -->
-    <!-- =================================================== -->
-
-    <header class="header">
+  <div class="app-shell">
+    <header class="topbar">
       <div class="brand">
-        <div class="brand-logo">
-          AB
-        </div>
-
+        <div class="brand-mark">AB</div>
         <div>
-          <div class="brand-name">
-            AutoBet
-          </div>
-
-          <div class="brand-description">
-            FC 25 Match Automation
-          </div>
+          <div class="brand-title">DEMO MONITOR</div>
+          <div class="brand-subtitle">AutoBet · FC 25 Live Strategy</div>
         </div>
       </div>
 
-      <div
-        class="connection"
-        :class="connected ? 'online' : 'offline'"
-      >
-        <span class="connection-dot" />
-
-        <div>
-          <strong>
-            {{
-              connected
-                ? 'МОНИТОРИНГ АКТИВЕН'
-                : 'НЕТ ДАННЫХ'
-            }}
-          </strong>
-
-          <small>
-            {{
-              connected
-                ? 'Мониторинг матчей'
-                : 'Ожидание подключения'
-            }}
-          </small>
-        </div>
+      <div class="controls">
+        <div class="demo-chip">DEMO</div>
+        <button
+          class="button button-start"
+          :disabled="state.running || actionPending"
+          @click="control('start')"
+        >
+          Запустить демо
+        </button>
+        <button
+          class="button button-stop"
+          :disabled="!state.running || actionPending"
+          @click="control('stop')"
+        >
+          Остановить
+        </button>
       </div>
     </header>
 
-
-    <!-- =================================================== -->
-    <!-- CONTENT -->
-    <!-- =================================================== -->
-
-    <main class="main">
-      <!-- ================================================= -->
-      <!-- STATUS BAR -->
-      <!-- ================================================= -->
-
-      <section class="status-grid">
-        <div class="status-card">
-          <span class="status-label">
-            СОСТОЯНИЕ
-          </span>
-
-          <strong class="status-green">
-            {{
-              connected
-                ? 'Мониторинг'
-                : 'Ожидание'
-            }}
-          </strong>
-        </div>
-
-        <div class="status-card">
-          <span class="status-label">
-            ЛИГА
-          </span>
-
-          <strong>
-            {{
-              data.league ||
-              'FC 25. 3x3'
-            }}
-          </strong>
-        </div>
-
-        <div class="status-card">
-          <span class="status-label">
-            ГРЯДУЩИХ МАТЧЕЙ
-          </span>
-
-          <strong class="status-big">
-            {{ matches.length }}
-          </strong>
-        </div>
-
-        <div class="status-card">
-          <span class="status-label">
-            ОБНОВЛЕНО
-          </span>
-
-          <strong>
-            {{ updatedAt }}
-          </strong>
+    <main class="dashboard">
+      <section class="demo-notice">
+        <span class="notice-icon">D</span>
+        <div>
+          <strong>ДЕМО-РЕЖИМ</strong>
+          <span>Реальные ставки не отправляются. Все действия стратегии виртуальные.</span>
         </div>
       </section>
 
-
-      <!-- ================================================= -->
-      <!-- ERROR -->
-      <!-- ================================================= -->
-
-      <div
-        v-if="error"
-        class="error-box"
-      >
-        <strong>
-          Нет данных от автобота
-        </strong>
-
-        <span>
-          {{ error }}
-        </span>
+      <div v-if="backendError" class="alert alert-error">
+        <strong>Нет соединения с DEMO API</strong>
+        <span>{{ backendError }}</span>
       </div>
 
-
-      <!-- ================================================= -->
-      <!-- LOADING -->
-      <!-- ================================================= -->
-
-      <div
-        v-else-if="loading"
-        class="empty"
-      >
-        Получаем информацию от автобота...
+      <div v-if="state.error" class="alert alert-error">
+        <strong>{{ state.status }}</strong>
+        <span>{{ state.error }}</span>
       </div>
 
+      <section class="overview-grid">
+        <article class="metric-card">
+          <span>BROWSER</span>
+          <strong :class="state.browser?.status === 'OPEN' ? 'tone-success' : 'tone-danger'">
+            <i class="status-dot" />{{ show(state.browser?.status, 'CLOSED') }}
+          </strong>
+        </article>
+        <article class="metric-card">
+          <span>DEMO WORKER</span>
+          <strong :class="state.running ? 'tone-active' : 'tone-neutral'">
+            <i class="status-dot" />{{ state.running ? 'RUNNING' : 'STOPPED' }}
+          </strong>
+        </article>
+        <article class="metric-card">
+          <span>AUTH</span>
+          <strong>{{ show(state.auth?.status, 'UNKNOWN') }}</strong>
+        </article>
+        <article class="metric-card">
+          <span>STRATEGY STATE</span>
+          <strong :class="`tone-${statusTone}`"><i class="status-dot" />{{ state.status }}</strong>
+        </article>
+      </section>
+
+      <section class="status-line">
+        <span :class="`pulse tone-${statusTone}`" />
+        <strong>{{ state.message }}</strong>
+        <span class="status-context">{{ state.mode }} · {{ state.league }} · {{ updatedAt }}</span>
+      </section>
+
+      <div v-if="initialLoading" class="loading-card">Получаем состояние DEMO worker...</div>
 
       <template v-else>
-        <!-- =============================================== -->
-        <!-- NEXT MATCH -->
-        <!-- =============================================== -->
+        <section class="scanner-grid">
+          <article class="metric-card"><span>НАЙДЕНО ВСЕГО</span><strong>{{ scanner.total || 0 }}</strong></article>
+          <article class="metric-card"><span>УЖЕ ИДЁТ</span><strong>{{ scanner.started || 0 }}</strong></article>
+          <article class="metric-card"><span>ПРЕДСТОЯЩИХ</span><strong>{{ scanner.upcoming || 0 }}</strong></article>
+          <article class="metric-card scanner-selected">
+            <span>БЛИЖАЙШИЙ МАТЧ</span>
+            <strong v-if="scanner.selected">
+              {{ scanner.selected.team1 }} — {{ scanner.selected.team2 }} · {{ scanner.selected.time }}
+            </strong>
+            <strong v-else>—</strong>
+          </article>
+        </section>
 
-        <section class="section">
-          <div class="section-title">
-            <div>
-              <span class="section-label">
-                ВЫБРАН БОТОМ
-              </span>
-
-              <h2>
-                Ближайший матч
-              </h2>
-            </div>
-
-            <div
-              v-if="nextMatch"
-              class="countdown"
-            >
-              <span>
-                ДО НАЧАЛА
-              </span>
-
-              <strong>
-                {{ nextMatch.time || '—' }}
-              </strong>
-            </div>
-          </div>
-
-
-          <article
-            v-if="nextMatch"
-            class="active-match"
-          >
-            <!-- TOP -->
-
-            <div class="active-top">
-              <div class="match-id">
-                ID МАТЧА
-                #{{ nextMatch.match_id || nextMatch.number }}
-              </div>
-
-              <div class="waiting-badge">
-                ОЖИДАЕТ НАЧАЛА
-              </div>
-            </div>
-
-
-            <!-- TEAMS -->
-
-            <div class="active-content">
-              <!-- TEAM 1 -->
-
-              <div
-                class="active-team"
-                :class="{
-                  outsider:
-                    nextOutsider?.side === 1,
-                }"
-              >
-                <div
-                  v-if="nextOutsider?.side === 1"
-                  class="outsider-badge"
-                >
-                  АУТСАЙДЕР
-                </div>
-
-                <div class="team-side">
-                  КОМАНДА 1
-                </div>
-
-                <div class="active-team-name">
-                  {{ nextMatch.team1 }}
-                </div>
-
-                <div class="active-odd">
-                  <span>
-                    П1
-                  </span>
-
-                  <strong>
-                    {{
-                      displayOdd(
-                        nextMatch.odds_team1,
-                      )
-                    }}
-                  </strong>
-                </div>
-              </div>
-
-
-              <!-- DRAW -->
-
-              <div class="active-center">
-                <div class="vs">
-                  VS
-                </div>
-
-                <div class="draw">
-                  <span>
-                    НИЧЬЯ
-                  </span>
-
-                  <strong>
-                    {{
-                      displayOdd(
-                        nextMatch.odds_draw,
-                      )
-                    }}
-                  </strong>
-                </div>
-              </div>
-
-
-              <!-- TEAM 2 -->
-
-              <div
-                class="active-team"
-                :class="{
-                  outsider:
-                    nextOutsider?.side === 2,
-                }"
-              >
-                <div
-                  v-if="nextOutsider?.side === 2"
-                  class="outsider-badge"
-                >
-                  АУТСАЙДЕР
-                </div>
-
-                <div class="team-side">
-                  КОМАНДА 2
-                </div>
-
-                <div class="active-team-name">
-                  {{ nextMatch.team2 }}
-                </div>
-
-                <div class="active-odd">
-                  <span>
-                    П2
-                  </span>
-
-                  <strong>
-                    {{
-                      displayOdd(
-                        nextMatch.odds_team2,
-                      )
-                    }}
-                  </strong>
-                </div>
-              </div>
-            </div>
-
-
-            <!-- BOT DECISION -->
-
-            <div class="bot-decision">
-              <div class="decision-icon">
-                →
-              </div>
-
+        <section class="primary-grid">
+          <article class="panel match-panel">
+            <header class="panel-header">
               <div>
-                <span>
-                  ВЫБОР АВТОБОТА
-                </span>
-
-                <strong v-if="nextOutsider">
-                  {{ nextOutsider.team }}
-                </strong>
-
-                <strong v-else>
-                  Аутсайдер не определён
-                </strong>
+                <span class="eyebrow">LIVE SCOREBOARD</span>
+                <h2>Текущий матч</h2>
               </div>
+              <span class="timer">{{ show(match.timer) }}</span>
+            </header>
 
-              <div
-                v-if="nextOutsider"
-                class="decision-odd"
-              >
-                КФ {{ nextOutsider.odd }}
+            <div v-if="state.match" class="scoreboard">
+              <div class="team team-left">
+                <span>КОМАНДА 1</span>
+                <strong>{{ show(match.team1) }}</strong>
+              </div>
+              <div class="score">
+                <strong>{{ scoreText }}</strong>
+                <span>{{ show(match.state, show(match.period, 'LIVE')) }}</span>
+              </div>
+              <div class="team team-right">
+                <span>КОМАНДА 2</span>
+                <strong>{{ show(match.team2) }}</strong>
+              </div>
+            </div>
+            <div v-else class="panel-empty">Матч ещё не выбран</div>
+          </article>
+
+          <article class="panel selection-panel">
+            <header class="panel-header">
+              <div>
+                <span class="eyebrow amber">СТРАТЕГИЯ</span>
+                <h2>Выбранная команда</h2>
+              </div>
+            </header>
+            <div v-if="state.selected_team" class="selection-content">
+              <div class="selected-team">{{ state.selected_team }}</div>
+              <div class="reason">
+                <span>ПРИЧИНА ВЫБОРА</span>
+                <strong>{{ state.selection_reason }}</strong>
+              </div>
+              <div class="odds-compare">
+                <div>
+                  <span>{{ show(match.team1, 'TEAM 1') }}</span>
+                  <strong>{{ show(state.odds?.team1) }}</strong>
+                </div>
+                <div>
+                  <span>{{ show(match.team2, 'TEAM 2') }}</span>
+                  <strong>{{ show(state.odds?.team2) }}</strong>
+                </div>
+              </div>
+              <div class="selection-proof">Выбрано: max(nextGoalOdds)</div>
+            </div>
+            <div v-else class="panel-empty">Ожидаем коэффициенты рынка</div>
+
+            <div class="ocr-meta">
+              <div>
+                <span>РЫНОК</span>
+                <strong>{{ show(state.odds?.market, bet.market) }}</strong>
+              </div>
+              <div>
+                <span>ИСТОЧНИК</span>
+                <strong>{{ show(state.odds?.source, 'Canvas OCR') }}</strong>
+              </div>
+              <div>
+                <span>OCR BACKEND</span>
+                <strong>{{ show(state.odds?.backend, ocr.engine) }}</strong>
+              </div>
+              <div>
+                <span>УВЕРЕННОСТЬ</span>
+                <strong>{{ confidencePercent }}</strong>
+              </div>
+              <div class="ocr-status">
+                <span>OCR STATUS</span>
+                <strong>
+                  {{ show(ocr.status, state.odds?.status) }} · attempt {{ ocr.attempt || 0 }}/{{ ocr.max_attempts || 5 }}
+                  · canvas {{ show(ocr.canvas?.width) }}×{{ show(ocr.canvas?.height) }}
+                  · {{ show(ocr.latency_seconds) }}s
+                </strong>
+                <small>Candidates: {{ JSON.stringify(ocr.candidates || []) }}</small>
               </div>
             </div>
           </article>
+        </section>
 
+        <section class="secondary-grid">
+          <article class="panel bet-panel">
+            <header class="panel-header compact">
+              <div>
+                <span class="eyebrow">VIRTUAL BET</span>
+                <h2>Текущая ставка</h2>
+              </div>
+              <span class="step-badge">{{ bet.step || 0 }} / {{ bet.max_steps || 11 }}</span>
+            </header>
+            <div class="bet-grid">
+              <div><span>СУММА</span><strong>{{ show(bet.amount) }} <small>RUB</small></strong></div>
+              <div><span>РЫНОК</span><strong>{{ show(bet.market, 'Следующий гол') }}</strong></div>
+              <div><span>КОМАНДА</span><strong>{{ show(state.selected_team) }}</strong></div>
+              <div><span>КОЭФФИЦИЕНТ</span><strong class="green">{{ show(bet.odds) }}</strong></div>
+              <div><span>СЧЁТ ПЕРЕД СТАВКОЙ</span><strong>{{ show(bet.score_before) }}</strong></div>
+              <div><span>НОМЕР СЛЕДУЮЩЕГО ГОЛА</span><strong>{{ show(bet.next_goal_number) }}</strong></div>
+              <div><span>STATUS</span><strong>{{ show(bet.status, state.status) }}</strong></div>
+            </div>
+          </article>
 
-          <div
-            v-else
-            class="empty"
-          >
-            Грядущих матчей сейчас нет.
+          <article class="panel change-panel">
+            <header class="panel-header compact">
+              <div>
+                <span class="eyebrow">LAST EVENT</span>
+                <h2>Последнее изменение</h2>
+              </div>
+              <span
+                v-if="lastChange.result"
+                :class="['result-badge', String(lastChange.result).toLowerCase()]"
+              >{{ lastChange.result }}</span>
+            </header>
+            <div v-if="state.last_change" class="change-content">
+              <div class="score-change">
+                <span>{{ lastChange.before }}</span><i>→</i><strong>{{ lastChange.after }}</strong>
+              </div>
+              <div class="goal-scorer">
+                <span>КТО ЗАБИЛ</span>
+                <strong>{{ lastChange.scorer }}</strong>
+              </div>
+            </div>
+            <div v-else class="panel-empty">Изменений счёта пока нет</div>
+          </article>
+        </section>
+
+        <section class="stats-section">
+          <div class="section-heading">
+            <span class="eyebrow">DEMO ANALYTICS</span>
+            <h2>Статистика стратегии</h2>
+          </div>
+          <div class="stats-grid">
+            <article><span>Матчей обработано</span><strong>{{ stats.matches_processed }}</strong></article>
+            <article><span>Ставок сделано</span><strong>{{ stats.bets }}</strong></article>
+            <article><span>WIN</span><strong class="green">{{ stats.wins }}</strong></article>
+            <article><span>LOSE</span><strong class="red">{{ stats.losses }}</strong></article>
+            <article><span>Сумма demo-ставок</span><strong>{{ formatNumber(stats.total_amount) }} ₽</strong></article>
+            <article><span>Средний КФ</span><strong>{{ formatNumber(stats.average_odds, 3) }}</strong></article>
+            <article><span>Макс. шаг</span><strong>{{ stats.max_step }}</strong></article>
+            <article><span>Шагов до WIN</span><strong>{{ formatNumber(stats.average_steps_to_win) }}</strong></article>
           </div>
         </section>
 
-
-        <!-- =============================================== -->
-        <!-- QUEUE -->
-        <!-- =============================================== -->
-
-        <section class="section">
-          <div class="section-title">
-            <div>
-              <span class="section-label">
-                МОНИТОРИНГ
-              </span>
-
-              <h2>
-                Очередь матчей
-              </h2>
+        <section class="data-grid">
+          <article class="panel history-panel">
+            <header class="panel-header compact">
+              <div>
+                <span class="eyebrow">BET JOURNAL</span>
+                <h2>История ставок</h2>
+              </div>
+              <span class="counter">{{ history.length }}</span>
+            </header>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>№</th><th>Матч</th><th>Команда</th><th>Ставка</th><th>КФ</th>
+                    <th>Счёт до</th><th>Счёт после</th><th>Кто забил</th><th>Результат</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="item in reversedHistory" :key="`${item.cycle_id}-${item.step}`">
+                    <td>{{ item.step }}</td>
+                    <td>{{ item.match }}</td>
+                    <td>{{ item.selected_team }}</td>
+                    <td>{{ item.amount }} ₽</td>
+                    <td>{{ item.odds }}</td>
+                    <td>{{ item.score_before }}</td>
+                    <td>{{ item.score_after }}</td>
+                    <td>{{ item.scorer }}</td>
+                    <td><span :class="['table-result', String(item.result).toLowerCase()]">{{ item.result }}</span></td>
+                  </tr>
+                  <tr v-if="!history.length"><td colspan="9" class="empty-row">Виртуальных ставок пока нет</td></tr>
+                </tbody>
+              </table>
             </div>
+          </article>
 
-            <div class="queue-count">
-              {{ queueMatches.length }}
+          <article class="panel log-panel">
+            <header class="panel-header compact">
+              <div>
+                <span class="eyebrow">LIVE STREAM</span>
+                <h2>Живой лог</h2>
+              </div>
+              <span class="live-indicator"><i /> LIVE</span>
+            </header>
+            <div class="logs">
+              <div v-for="(item, index) in recentLogs" :key="`${item.timestamp}-${index}`" class="log-row">
+                <time>{{ item.time }}</time>
+                <span class="log-event">{{ item.event }}</span>
+                <p>{{ item.message }}</p>
+              </div>
+              <div v-if="!logs.length" class="panel-empty">Лог появится после запуска DEMO</div>
             </div>
-          </div>
-
-
-          <div
-            v-if="queueMatches.length"
-            class="queue"
-          >
-            <article
-              v-for="match in queueMatches"
-              :key="
-                match.match_id ||
-                match.number
-              "
-              class="queue-card"
-            >
-              <div class="queue-number">
-                <span>
-                  MATCH
-                </span>
-
-                <strong>
-                  {{ match.number }}
-                </strong>
-              </div>
-
-
-              <div class="queue-teams">
-                <div class="queue-team">
-                  <div>
-                    {{ match.team1 }}
-                  </div>
-
-                  <strong>
-                    {{
-                      displayOdd(
-                        match.odds_team1,
-                      )
-                    }}
-                  </strong>
-                </div>
-
-                <div class="queue-draw">
-                  <span>
-                    X
-                  </span>
-
-                  <strong>
-                    {{
-                      displayOdd(
-                        match.odds_draw,
-                      )
-                    }}
-                  </strong>
-                </div>
-
-                <div class="queue-team">
-                  <div>
-                    {{ match.team2 }}
-                  </div>
-
-                  <strong>
-                    {{
-                      displayOdd(
-                        match.odds_team2,
-                      )
-                    }}
-                  </strong>
-                </div>
-              </div>
-
-
-              <div class="queue-time">
-                <span>
-                  ДО НАЧАЛА
-                </span>
-
-                <strong>
-                  {{ match.time || '—' }}
-                </strong>
-              </div>
-
-
-              <div class="queue-outsider">
-                <span>
-                  АУТСАЙДЕР
-                </span>
-
-                <strong>
-                  {{ getOutsider(match)?.team || 'Не определён' }}
-                </strong>
-              </div>
-            </article>
-          </div>
-
-
-          <div
-            v-else
-            class="empty-small"
-          >
-            В очереди больше нет матчей.
-          </div>
+          </article>
         </section>
       </template>
     </main>

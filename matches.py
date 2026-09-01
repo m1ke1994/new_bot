@@ -7,9 +7,10 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright, Page
+from playwright.async_api import Page
 
 from auth import authorize, PROFILE_DIR
+from xbet_config import get_xbet_url, XBET_LEAGUE_PATH
 
 
 # ============================================================
@@ -18,11 +19,7 @@ from auth import authorize, PROFILE_DIR
 
 load_dotenv()
 
-MATCHES_URL = os.getenv(
-    "XBET_MATCHES_URL",
-    "https://1xlite-02216.pro/ru/live/fifa/"
-    "2860561-fc-25-3x3-conference-league",
-).strip()
+MATCHES_URL = get_xbet_url(XBET_LEAGUE_PATH)
 
 LEAGUE_NAME = os.getenv(
     "XBET_LEAGUE_NAME",
@@ -110,6 +107,23 @@ def time_to_seconds(value: str | None):
         return None
 
     return minutes * 60 + seconds
+
+
+def is_upcoming_match(
+    *,
+    period: str | None,
+    finished: bool,
+    time_seconds: int | None,
+) -> bool:
+    """Pure rule used by both the scanner and unit tests."""
+    return not finished and not clean_text(period) and time_seconds is not None
+
+
+def sort_upcoming_matches(matches):
+    return sorted(
+        (item for item in matches if item.get("is_upcoming")),
+        key=lambda item: item["time_seconds"],
+    )
 
 
 # ============================================================
@@ -289,10 +303,10 @@ async def parse_match(game, number: int):
 
     # По текущему DOM будущие матчи имеют countdown MM:SS,
     # но не имеют текста периода (1-й тайм / 2-й тайм / завершена).
-    is_upcoming = (
-        not finished
-        and not period
-        and time_seconds is not None
+    is_upcoming = is_upcoming_match(
+        period=period,
+        finished=finished,
+        time_seconds=time_seconds,
     )
 
     odds_team1 = await get_market_value(game, "П1")
@@ -357,13 +371,7 @@ async def get_upcoming_matches(page: Page):
         upcoming.append(match)
 
     # Чем меньше countdown, тем раньше матч начнётся.
-    upcoming.sort(
-        key=lambda item: (
-            item["time_seconds"]
-            if item["time_seconds"] is not None
-            else float("inf")
-        )
-    )
+    upcoming = sort_upcoming_matches(upcoming)
 
     # После сортировки номера на фронте должны быть 1,2,3...
     for number, match in enumerate(upcoming, start=1):
@@ -598,18 +606,10 @@ async def main():
     print("=" * 70)
     print()
 
-    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    from backend.app.browser.manager import BROWSER_MANAGER
 
-    async with async_playwright() as playwright:
-        context = await playwright.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
-            headless=False,
-            viewport=None,
-        )
-
-        page = context.pages[0] if context.pages else await context.new_page()
-
-        try:
+    page = await BROWSER_MANAGER.start()
+    try:
             print()
             print("=" * 70)
             print("ШАГ 1 — АВТОРИЗАЦИЯ")
@@ -648,11 +648,11 @@ async def main():
             print("Нажми ENTER для завершения.")
             await asyncio.to_thread(input)
 
-        except KeyboardInterrupt:
+    except KeyboardInterrupt:
             print()
             print("[SYSTEM] Остановка пользователем.")
 
-        except Exception as error:
+    except Exception as error:
             print()
             print("=" * 70)
             print("ОШИБКА THIS_MATCH")
@@ -663,8 +663,9 @@ async def main():
             print("Браузер оставлен открытым для диагностики.")
             await asyncio.to_thread(input)
 
-        finally:
-            await context.close()
+    finally:
+        # Standalone script termination is an explicit application shutdown.
+        await BROWSER_MANAGER.stop()
 
 
 if __name__ == "__main__":
