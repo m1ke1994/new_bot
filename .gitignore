@@ -1,7 +1,29 @@
+# Diagnostics
 backend/diagnostics/canvas/*.png
 backend/diagnostics/canvas/latest_analysis.json
 backend/diagnostics/canvas/*.json
 backend/data/*.jsonl
+
+# Python cache
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+
+# Browser / Playwright profile
+browser_profile/
+
+# Secrets
 .env
+
+# Frontend
+node_modules/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# Logs
+*.log
