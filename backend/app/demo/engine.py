@@ -2,6 +2,7 @@ import asyncio
 import traceback
 from contextlib import suppress
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
@@ -21,11 +22,14 @@ from .history import REPOSITORY
 from .models import DemoStatus, Scorer, ScoreboardSnapshot
 from .state import STATE
 from .strategy import (
-    BET_STEPS,
+    DEFAULT_STRATEGY_CONFIG,
+    ScoreProgression,
+    StrategyConfig,
     can_create_initial_bet,
     detect_scorer,
     odds_for_selected_side,
     select_team_with_higher_odds,
+    validate_score_progression,
 )
 
 
@@ -50,6 +54,42 @@ class DemoEngine:
         self._authorized_generation = -1
         self._auth_status = "UNKNOWN"
         self._budget = DemoBudget()
+        self._config = DEFAULT_STRATEGY_CONFIG
+
+    async def restore(self) -> None:
+        """Hydrate the in-memory dashboard from durable storage after a restart."""
+        await REPOSITORY.initialize()
+        config_data = await REPOSITORY.get_config()
+        self._config = StrategyConfig.from_payload(config_data)
+        budget = await REPOSITORY.get_budget()
+        self._budget.restore(budget["initial_budget"], budget["current_budget"])
+        sequence = await REPOSITORY.get_sequence()
+        active = await REPOSITORY.active_bet()
+        if active is not None:
+            # An interrupted ACTIVE bet is retained as history and never duplicated.
+            sequence = await REPOSITORY.save_sequence(status="RECOVERY_REQUIRED")
+        await STATE.restore(budget=budget, strategy_config=config_data, sequence=sequence, stats=await REPOSITORY.stats())
+        if active is not None:
+            await STATE.update(status=DemoStatus.RECOVERING.value, message="ACTIVE ставка ожидает ручной reconciliation после рестарта", bet={**active, "max_steps": self._config.max_steps})
+
+    async def save_strategy_config(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._task is not None and not self._task.done():
+            raise ValueError("Stop the strategy before changing its stake row")
+        saved = await REPOSITORY.save_config(payload)
+        self._config = StrategyConfig.from_payload(saved)
+        sequence = await REPOSITORY.get_sequence()
+        if int(sequence["current_step"]) > self._config.max_steps:
+            sequence = await REPOSITORY.reset_sequence()
+        await STATE.restore(budget=await REPOSITORY.get_budget(), strategy_config=saved, sequence=sequence, stats=await REPOSITORY.stats())
+        return saved
+
+    async def reset_sequence(self) -> dict[str, Any]:
+        if self._task is not None and not self._task.done():
+            raise ValueError("Stop the strategy before resetting the sequence")
+        sequence = await REPOSITORY.reset_sequence()
+        await self.restore()
+        await STATE.update(status=DemoStatus.STOPPED.value, event="SEQUENCE_RESET", message="Новая серия готова")
+        return await STATE.snapshot()
 
     @property
     def task(self) -> asyncio.Task[None] | None:
@@ -63,16 +103,25 @@ class DemoEngine:
                 return await STATE.snapshot()
 
             CONFIG.validate()
-            await REPOSITORY.clear_session()
+            await self.restore()
+            sequence = await REPOSITORY.get_sequence()
+            if sequence["status"] in {"SEQUENCE_EXHAUSTED", "RECOVERY_REQUIRED"}:
+                await STATE.update(
+                    status=DemoStatus.SEQUENCE_EXHAUSTED.value if sequence["status"] == "SEQUENCE_EXHAUSTED" else DemoStatus.RECOVERING.value,
+                    event=sequence["status"],
+                    message="Серия требует явного сброса или reconciliation ACTIVE ставки",
+                )
+                return await STATE.snapshot()
             self._stop_event.clear()
             self._authorized_generation = -1
             self._auth_status = "UNKNOWN"
-            self._budget.reset()
-            await STATE.reset_for_start(await REPOSITORY.stats())
+            await REPOSITORY.save_sequence(status="WAITING_FOR_MATCH")
             await STATE.update(
                 status=DemoStatus.STARTING.value,
                 browser=await self.browser_manager.snapshot(),
                 budget=self._budget.snapshot(),
+                strategy_config=(await REPOSITORY.get_config()),
+                sequence=(await REPOSITORY.get_sequence()),
             )
             await REPOSITORY.log("DEMO_START", "Запущен background DEMO worker")
             self._task = asyncio.create_task(self._run_guarded(), name="demo-worker")
@@ -235,7 +284,7 @@ class DemoEngine:
             selection_reason=None,
             bet={
                 "step": 0,
-                "max_steps": len(BET_STEPS),
+                "max_steps": self._config.max_steps,
                 "amount": None,
                 "market": "Следующий гол",
                 "odds": None,
@@ -288,7 +337,8 @@ class DemoEngine:
         if selected_match is None or self._stop_event.is_set():
             return
 
-        cycle_id = uuid4().hex
+        sequence = await REPOSITORY.get_sequence()
+        cycle_id = sequence["sequence_id"]
         match_name = f"{selected_match['team1']} — {selected_match['team2']}"
         match_state = {
             "id": selected_match.get("match_id"),
@@ -346,10 +396,21 @@ class DemoEngine:
         await REPOSITORY.log(
             "TEAM_SELECTED", f"{selection.selected_team} @ {selection.selected_odds} / HIGHER_ODDS"
         )
+        await REPOSITORY.save_sequence(
+            status="ACTIVE",
+            current_match_id=selected_match.get("match_id"),
+            selected_team=selection.selected_team,
+        )
 
         won = False
         ambiguous_cycle = False
-        for step, amount in enumerate(BET_STEPS, start=1):
+        start_step = int(sequence["current_step"])
+        previous_settlement_score = None
+        if sequence["status"] == "SEQUENCE_EXHAUSTED":
+            await self._status(DemoStatus.SEQUENCE_EXHAUSTED, "Серия исчерпана; выполните явный сброс", "SEQUENCE_EXHAUSTED")
+            return
+        for step in range(start_step, self._config.max_steps + 1):
+            amount = float(self._config.stakes[step - 1])
             if self._stop_event.is_set():
                 return
             if step == 1:
@@ -359,6 +420,11 @@ class DemoEngine:
                 if odds_result is None:
                     return
                 snapshot, current_odds = odds_result
+                if previous_settlement_score is not None and validate_score_progression(
+                    previous_settlement_score, snapshot.score, expected_goals=0
+                ) != ScoreProgression.UNCHANGED:
+                    await self._skip_match_for_missed_event(selected_match, step, snapshot)
+                    return
             browser = MatchBrowser(await self.browser_manager.ensure_page())
             snapshot = await self._read_fresh_score(browser, selected_match, snapshot)
             if step == 1 and not can_create_initial_bet(snapshot.score):
@@ -413,7 +479,7 @@ class DemoEngine:
                 "next_goal_number": current_odds.next_goal_number,
                 "created_at": created_at,
                 "resolved_at": None,
-                "budget_before": self._budget.current_budget,
+                "budget_before": float(self._budget.current_budget),
                 "budget_change": None,
                 "budget_after": None,
             }
@@ -430,7 +496,7 @@ class DemoEngine:
                 bet={
                     "id": bet_id,
                     "step": step,
-                    "max_steps": len(BET_STEPS),
+                    "max_steps": self._config.max_steps,
                     "amount": amount,
                     "selected_team": selection.selected_team,
                     "selected_side": selection.selected_side.value,
@@ -446,7 +512,7 @@ class DemoEngine:
                         else "WAITING_FOR_GOAL"
                     ),
                     "created_at": created_at,
-                    "budget_before": self._budget.current_budget,
+                    "budget_before": float(self._budget.current_budget),
                 },
                 budget=self._budget.snapshot(),
                 stats=await REPOSITORY.stats(),
@@ -490,7 +556,7 @@ class DemoEngine:
                         "scorer": "Не определён",
                         "result": "AMBIGUOUS",
                         "budget_change": 0,
-                        "budget_after": self._budget.current_budget,
+                        "budget_after": float(self._budget.current_budget),
                     }
                 )
                 await REPOSITORY.log(
@@ -507,28 +573,17 @@ class DemoEngine:
                     },
                     stats=await REPOSITORY.stats(),
                     budget=self._budget.snapshot(),
-                    bet={**record, "max_steps": len(BET_STEPS)},
+                    bet={**record, "max_steps": self._config.max_steps},
                 )
                 snapshot = new_snapshot
-                if step < len(BET_STEPS):
-                    await self._status(
-                        DemoStatus.NEXT_STEP,
-                        f"Неоднозначный score delta; безопасный переход к шагу {step + 1}",
-                        "NEXT_STEP",
-                    )
-                    await self._publish_pending_bet(
-                        selection,
-                        match_name,
-                        step + 1,
-                        new_snapshot,
-                    )
-                continue
+                await self._skip_match_for_missed_event(selected_match, step, new_snapshot)
+                return
 
             scorer_name = (
                 new_snapshot.team1 if scorer == Scorer.TEAM_1 else new_snapshot.team2
             )
             result = "WIN" if scorer == selection.selected_side else "LOSE"
-            budget_change = self._budget.settle(bet_id, result, amount)
+            budget_change = self._budget.settle(bet_id, result, amount, selected_odd)
             if budget_change is None:
                 await REPOSITORY.log(
                     "DEMO_BUDGET_DUPLICATE_IGNORED", f"bet_id={bet_id}"
@@ -543,6 +598,16 @@ class DemoEngine:
                     **budget_change,
                 }
             )
+            await REPOSITORY.save_budget(self._budget.snapshot())
+            sequence_after_result = await REPOSITORY.get_sequence()
+            sequence_pnl = Decimal(str(sequence_after_result["cumulative_pnl"])) + Decimal(str(budget_change["pnl"]))
+            sequence_losses = Decimal(str(sequence_after_result["cumulative_losses"]))
+            if result == "LOSE":
+                sequence_losses += Decimal(str(amount))
+            await REPOSITORY.save_sequence(
+                cumulative_pnl=str(sequence_pnl.quantize(Decimal("0.01"))),
+                cumulative_losses=str(sequence_losses.quantize(Decimal("0.01"))),
+            )
             await REPOSITORY.log(
                 "SCORE_CHANGED", f"{score_before.text()} → {new_snapshot.score.text()}"
             )
@@ -551,7 +616,7 @@ class DemoEngine:
             await REPOSITORY.log(
                 "DEMO_BUDGET",
                 f"result={result} stake={amount} before={budget_change['budget_before']} "
-                f"change={budget_change['budget_change']:+d} after={budget_change['budget_after']}",
+                f"change={budget_change['budget_change']:+.2f} after={budget_change['budget_after']}",
             )
             await STATE.update(
                 status=(DemoStatus.WIN if result == "WIN" else DemoStatus.LOSE).value,
@@ -565,7 +630,8 @@ class DemoEngine:
                 },
                 stats=await REPOSITORY.stats(),
                 budget=self._budget.snapshot(),
-                bet={**record, "max_steps": len(BET_STEPS)},
+                sequence=await REPOSITORY.get_sequence(),
+                bet={**record, "max_steps": self._config.max_steps},
             )
             snapshot = new_snapshot
             if result == "WIN":
@@ -574,16 +640,29 @@ class DemoEngine:
                     {"cycle_id": cycle_id, "match": match_name, "result": "WIN", "steps": step}
                 )
                 await REPOSITORY.log("STRATEGY_CYCLE_WON", match_name)
-                await STATE.update(stats=await REPOSITORY.stats())
+                await REPOSITORY.reset_sequence()
+                await STATE.update(stats=await REPOSITORY.stats(), sequence=await REPOSITORY.get_sequence())
                 break
-            if step < len(BET_STEPS):
+            if step < self._config.max_steps:
+                next_step = step + 1
+                await REPOSITORY.save_sequence(
+                    current_step=next_step,
+                    status="ACTIVE",
+                    cumulative_pnl=str((await REPOSITORY.get_sequence())["cumulative_pnl"]),
+                )
+                # Read the scoreboard again before exposing/creating the next bet.
+                fresh_after_settlement = await self._read_fresh_score(browser, selected_match, new_snapshot)
+                if validate_score_progression(new_snapshot.score, fresh_after_settlement.score, expected_goals=0) != ScoreProgression.UNCHANGED:
+                    await self._skip_match_for_missed_event(selected_match, next_step, fresh_after_settlement)
+                    return
+                previous_settlement_score = new_snapshot.score
                 await self._status(
-                    DemoStatus.NEXT_STEP, f"Переход к шагу {step + 1}", "NEXT_STEP"
+                    DemoStatus.NEXT_STEP, f"Переход к шагу {next_step}", "NEXT_STEP"
                 )
                 await self._publish_pending_bet(
                     selection,
                     match_name,
-                    step + 1,
+                    next_step,
                     new_snapshot,
                 )
 
@@ -593,7 +672,7 @@ class DemoEngine:
                     "cycle_id": cycle_id,
                     "match": match_name,
                     "result": "SEQUENCE_EXHAUSTED",
-                    "steps": len(BET_STEPS),
+                    "steps": self._config.max_steps,
                     "had_ambiguous": ambiguous_cycle,
                 }
             )
@@ -604,6 +683,7 @@ class DemoEngine:
                 stats=await REPOSITORY.stats(),
             )
             await REPOSITORY.log("SEQUENCE_EXHAUSTED", match_name)
+            await REPOSITORY.save_sequence(current_step=self._config.max_steps, status="SEQUENCE_EXHAUSTED", current_match_id=selected_match.get("match_id"))
 
         if not self._stop_event.is_set():
             await self._status(
@@ -819,8 +899,8 @@ class DemoEngine:
         await STATE.update(
             bet={
                 "step": step,
-                "max_steps": len(BET_STEPS),
-                "amount": BET_STEPS[step - 1],
+                "max_steps": self._config.max_steps,
+                "amount": float(self._config.stakes[step - 1]),
                 "selected_team": selection.selected_team,
                 "selected_side": selection.selected_side.value,
                 "side_label": side_label,
@@ -830,9 +910,37 @@ class DemoEngine:
                 "score_before": snapshot.score.text(),
                 "next_goal_number": snapshot.score.team1 + snapshot.score.team2 + 1,
                 "status": "WAITING_FOR_MARKET",
-                "budget_before": self._budget.current_budget,
+                "budget_before": float(self._budget.current_budget),
             }
         )
+
+    async def _skip_match_for_missed_event(
+        self,
+        selected_match: dict[str, Any],
+        next_step: int,
+        snapshot: ScoreboardSnapshot,
+    ) -> None:
+        """Close only the current match; preserve the pending series step."""
+        await REPOSITORY.save_sequence(
+            current_step=next_step,
+            status="WAITING_NEXT_MATCH",
+            current_match_id=None,
+            selected_team=None,
+        )
+        await self._status(
+            DemoStatus.WAITING_NEXT_MATCH,
+            "Матч закрыт: scoreboard изменился до новой ставки; серия продолжится на следующем матче",
+            "MATCH_SKIPPED_MISSED_EVENT",
+            sequence=await REPOSITORY.get_sequence(),
+            bet={
+                "step": next_step,
+                "max_steps": self._config.max_steps,
+                "amount": float(self._config.stakes[next_step - 1]),
+                "score_before": snapshot.score.text(),
+                "status": "WAITING_NEXT_MATCH",
+            },
+        )
+        await REPOSITORY.log("MATCH_SKIPPED_MISSED_EVENT", snapshot.score.text())
 
     async def _read_fresh_score(
         self,

@@ -12,6 +12,7 @@ from backend.app.routes.demo import router as demo_router
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    await ENGINE.restore()
     try:
         yield
     finally:

@@ -1,137 +1,192 @@
 import asyncio
 import json
-from datetime import datetime
+import sqlite3
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+from .budget import DEMO_START_BUDGET
 from .config import CONFIG
+from .strategy import DEFAULT_STRATEGY_CONFIG, StrategyConfig
 
 
 def local_now() -> str:
-    return datetime.now().astimezone().isoformat()
+    return datetime.now(timezone.utc).astimezone().isoformat()
 
 
 class DemoRepository:
+    """SQLite-backed source of truth for configuration, series, money and history."""
+
     def __init__(self, data_dir: Path | None = None) -> None:
         self.data_dir = data_dir or CONFIG.data_dir
-        self.history_file = self.data_dir / "demo_history.jsonl"
-        self.logs_file = self.data_dir / "demo_logs.jsonl"
-        self.cycles_file = self.data_dir / "demo_cycles.jsonl"
+        self.database_file = self.data_dir / "demo.sqlite3"
         self._lock = asyncio.Lock()
-        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self._ready = False
 
-    @staticmethod
-    def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-        if not path.exists():
-            return []
-        result = []
-        for raw_line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                result.append(json.loads(raw_line))
-            except (json.JSONDecodeError, TypeError):
-                continue
+    @contextmanager
+    def _connection(self):
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(self.database_file)
+        connection.row_factory = sqlite3.Row
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _initialize_sync(self) -> None:
+        if self._ready:
+            return
+        with self._connection() as db:
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS strategy_config (
+                    id INTEGER PRIMARY KEY CHECK(id = 1), payload TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS budget_state (
+                    id INTEGER PRIMARY KEY CHECK(id = 1), initial_budget TEXT NOT NULL, current_budget TEXT NOT NULL, total_pnl TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS sequence_state (
+                    id INTEGER PRIMARY KEY CHECK(id = 1), sequence_id TEXT NOT NULL, current_step INTEGER NOT NULL, status TEXT NOT NULL,
+                    cumulative_pnl TEXT NOT NULL, cumulative_losses TEXT NOT NULL, current_match_id TEXT, selected_team TEXT, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS bet_history (id TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at TEXT NOT NULL, settled_at TEXT);
+                CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL, timestamp TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS cycles (id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL, timestamp TEXT NOT NULL);
+            """)
+            now = local_now()
+            db.execute("INSERT OR IGNORE INTO strategy_config VALUES (1, ?, ?, ?)", (json.dumps(DEFAULT_STRATEGY_CONFIG.to_dict()), now, now))
+            db.execute("INSERT OR IGNORE INTO budget_state VALUES (1, ?, ?, ?, ?)", (str(DEMO_START_BUDGET), str(DEMO_START_BUDGET), "0.00", now))
+            db.execute("INSERT OR IGNORE INTO sequence_state VALUES (1, ?, 1, 'WAITING_FOR_MATCH', '0.00', '0.00', NULL, NULL, ?)", (uuid4().hex, now))
+        self._ready = True
+
+    async def initialize(self) -> None:
+        async with self._lock:
+            self._initialize_sync()
+
+    async def get_config(self) -> dict[str, Any]:
+        await self.initialize()
+        async with self._lock:
+            with self._connection() as db:
+                row = db.execute("SELECT payload, created_at, updated_at FROM strategy_config WHERE id = 1").fetchone()
+        result = json.loads(row["payload"])
+        result.update(created_at=row["created_at"], updated_at=row["updated_at"])
         return result
 
-    @staticmethod
-    def _append_jsonl(path: Path, item: dict[str, Any]) -> None:
-        with path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(item, ensure_ascii=False) + "\n")
+    async def save_config(self, payload: dict[str, Any]) -> dict[str, Any]:
+        config = StrategyConfig.from_payload(payload)
+        await self.initialize()
+        now = local_now()
+        async with self._lock:
+            with self._connection() as db:
+                created = db.execute("SELECT created_at FROM strategy_config WHERE id=1").fetchone()["created_at"]
+                db.execute("UPDATE strategy_config SET payload=?, updated_at=? WHERE id=1", (json.dumps(config.to_dict()), now))
+        result = config.to_dict()
+        result.update(created_at=created, updated_at=now)
+        return result
 
-    @staticmethod
-    def _write_jsonl(path: Path, items: list[dict[str, Any]]) -> None:
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        payload = "".join(
-            json.dumps(item, ensure_ascii=False) + "\n" for item in items
-        )
-        temporary.write_text(payload, encoding="utf-8")
-        temporary.replace(path)
+    async def get_budget(self) -> dict[str, Any]:
+        await self.initialize()
+        async with self._lock:
+            with self._connection() as db:
+                row = db.execute("SELECT * FROM budget_state WHERE id=1").fetchone()
+        return {"initial_budget": float(row["initial_budget"]), "current_budget": float(row["current_budget"]), "session_profit": float(row["total_pnl"]), "total_pnl": float(row["total_pnl"]), "updated_at": row["updated_at"]}
+
+    async def save_budget(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        await self.initialize()
+        now = local_now()
+        async with self._lock:
+            with self._connection() as db:
+                db.execute("UPDATE budget_state SET initial_budget=?, current_budget=?, total_pnl=?, updated_at=? WHERE id=1", (str(snapshot["initial_budget"]), str(snapshot["current_budget"]), str(snapshot["session_profit"]), now))
+        return await self.get_budget()
+
+    async def get_sequence(self) -> dict[str, Any]:
+        await self.initialize()
+        async with self._lock:
+            with self._connection() as db:
+                row = db.execute("SELECT * FROM sequence_state WHERE id=1").fetchone()
+        return dict(row)
+
+    async def save_sequence(self, **changes: Any) -> dict[str, Any]:
+        current = await self.get_sequence()
+        current.update(changes, updated_at=local_now())
+        columns = ("sequence_id", "current_step", "status", "cumulative_pnl", "cumulative_losses", "current_match_id", "selected_team", "updated_at")
+        async with self._lock:
+            with self._connection() as db:
+                db.execute(f"UPDATE sequence_state SET {', '.join(f'{column}=?' for column in columns)} WHERE id=1", tuple(current[column] for column in columns))
+        return await self.get_sequence()
+
+    async def reset_sequence(self) -> dict[str, Any]:
+        return await self.save_sequence(sequence_id=uuid4().hex, current_step=1, status="WAITING_FOR_MATCH", cumulative_pnl="0.00", cumulative_losses="0.00", current_match_id=None, selected_team=None)
+
+    async def save_bet(self, item: dict[str, Any]) -> dict[str, Any]:
+        await self.initialize()
+        now = local_now()
+        record = {"timestamp": item.get("resolved_at") or item.get("created_at") or now, "created_at": item.get("created_at") or now, **item}
+        bet_id = record.get("id") or uuid4().hex
+        record["id"] = bet_id
+        async with self._lock:
+            with self._connection() as db:
+                existing = db.execute("SELECT payload FROM bet_history WHERE id=?", (bet_id,)).fetchone()
+                if existing:
+                    record = {**json.loads(existing["payload"]), **record}
+                db.execute("INSERT INTO bet_history(id,payload,created_at,settled_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, settled_at=excluded.settled_at", (bet_id, json.dumps(record, ensure_ascii=False), record["created_at"], record.get("resolved_at")))
+        return record
 
     async def add_bet(self, item: dict[str, Any]) -> dict[str, Any]:
         return await self.save_bet(item)
 
-    async def save_bet(self, item: dict[str, Any]) -> dict[str, Any]:
-        """Create or update one journal row without duplicating a DEMO bet."""
-        now = local_now()
-        record = {
-            "timestamp": item.get("resolved_at") or item.get("created_at") or now,
-            "created_at": item.get("created_at") or now,
-            **item,
-        }
+    async def history(self, limit: int = 500) -> list[dict[str, Any]]:
+        await self.initialize()
         async with self._lock:
-            bets = self._read_jsonl(self.history_file)
-            bet_id = record.get("id")
-            existing_index = next(
-                (
-                    index
-                    for index, existing in enumerate(bets)
-                    if bet_id is not None and existing.get("id") == bet_id
-                ),
-                None,
-            )
-            if existing_index is None:
-                bets.append(record)
-            else:
-                record = {**bets[existing_index], **record}
-                bets[existing_index] = record
-            self._write_jsonl(self.history_file, bets)
-        return record
+            with self._connection() as db:
+                rows = db.execute("SELECT payload FROM bet_history ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return list(reversed([json.loads(row["payload"]) for row in rows]))
 
-    async def add_cycle(self, item: dict[str, Any]) -> dict[str, Any]:
-        record = {"timestamp": local_now(), **item}
-        async with self._lock:
-            self._append_jsonl(self.cycles_file, record)
-        return record
-
-    async def clear_session(self) -> None:
-        """Start a clean DEMO session without touching unrelated diagnostics."""
-        async with self._lock:
-            self._write_jsonl(self.history_file, [])
-            self._write_jsonl(self.logs_file, [])
-            self._write_jsonl(self.cycles_file, [])
+    async def active_bet(self) -> dict[str, Any] | None:
+        for item in reversed(await self.history(5000)):
+            if item.get("result") == "ACTIVE":
+                return item
+        return None
 
     async def log(self, event: str, message: str) -> dict[str, Any]:
-        record = {
-            "timestamp": local_now(),
-            "time": datetime.now().astimezone().strftime("%H:%M:%S"),
-            "event": event,
-            "message": message,
-        }
+        await self.initialize()
+        record = {"timestamp": local_now(), "time": datetime.now().astimezone().strftime("%H:%M:%S"), "event": event, "message": message}
         async with self._lock:
-            self._append_jsonl(self.logs_file, record)
+            with self._connection() as db:
+                db.execute("INSERT INTO logs(payload,timestamp) VALUES(?,?)", (json.dumps(record, ensure_ascii=False), record["timestamp"]))
         print(f"[{record['time']}] {event}: {message}")
         return record
 
-    async def history(self, limit: int = 500) -> list[dict[str, Any]]:
-        async with self._lock:
-            return self._read_jsonl(self.history_file)[-limit:]
-
     async def logs(self, limit: int = 500) -> list[dict[str, Any]]:
+        await self.initialize()
         async with self._lock:
-            return self._read_jsonl(self.logs_file)[-limit:]
+            with self._connection() as db:
+                rows = db.execute("SELECT payload FROM logs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return list(reversed([json.loads(row["payload"]) for row in rows]))
+
+    async def add_cycle(self, item: dict[str, Any]) -> dict[str, Any]:
+        await self.initialize()
+        record = {"timestamp": local_now(), **item}
+        async with self._lock:
+            with self._connection() as db:
+                db.execute("INSERT INTO cycles(payload,timestamp) VALUES(?,?)", (json.dumps(record, ensure_ascii=False), record["timestamp"]))
+        return record
 
     async def stats(self) -> dict[str, Any]:
+        bets, cycles = await self.history(5000), []
+        await self.initialize()
         async with self._lock:
-            bets = self._read_jsonl(self.history_file)
-            cycles = self._read_jsonl(self.cycles_file)
-
-        odds = [float(item["odds"]) for item in bets if item.get("odds") is not None]
-        won_cycles = [item for item in cycles if item.get("result") == "WIN"]
-        steps_to_win = [int(item["steps"]) for item in won_cycles if item.get("steps")]
-
-        return {
-            "matches_processed": len(cycles),
-            "bets": len(bets),
-            "wins": sum(item.get("result") == "WIN" for item in bets),
-            "losses": sum(item.get("result") == "LOSE" for item in bets),
-            "total_amount": sum(float(item.get("amount") or 0) for item in bets),
-            "average_odds": round(sum(odds) / len(odds), 3) if odds else None,
-            "max_step": max((int(item.get("step") or 0) for item in bets), default=0),
-            "average_steps_to_win": (
-                round(sum(steps_to_win) / len(steps_to_win), 2)
-                if steps_to_win
-                else None
-            ),
-        }
+            with self._connection() as db:
+                cycles = [json.loads(row["payload"]) for row in db.execute("SELECT payload FROM cycles").fetchall()]
+        settled = [item for item in bets if item.get("result") in {"WIN", "LOSE"}]
+        odds = [float(item["odds"]) for item in settled if item.get("odds") is not None]
+        wins = [item for item in settled if item["result"] == "WIN"]
+        return {"matches_processed": len(cycles), "bets": len(bets), "wins": len(wins), "losses": sum(item["result"] == "LOSE" for item in settled), "total_amount": round(sum(float(item.get("amount") or 0) for item in settled), 2), "average_odds": round(sum(odds) / len(odds), 3) if odds else None, "max_step": max((int(item.get("step") or 0) for item in bets), default=0), "average_steps_to_win": round(sum(int(item.get("steps") or 0) for item in cycles if item.get("result") == "WIN") / len(wins), 2) if wins else None}
 
 
 REPOSITORY = DemoRepository()

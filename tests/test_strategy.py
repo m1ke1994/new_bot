@@ -3,19 +3,35 @@ import unittest
 from backend.app.demo.models import NextGoalOdds, Score, Scorer
 from backend.app.demo.strategy import (
     BET_STEPS,
+    ScoreProgression,
+    StrategyConfig,
     detect_scorer,
     odds_for_selected_side,
     select_team_with_higher_odds,
+    validate_score_progression,
 )
 
 
 class StrategyTests(unittest.TestCase):
-    def test_bet_steps_are_explicit(self):
-        self.assertEqual(
-            BET_STEPS,
-            [20, 44, 97, 213, 469, 1031, 2268],
+    def test_default_stake_row_is_valid_but_not_used_as_runtime_config(self):
+        self.assertEqual(len(BET_STEPS), 7)
+        self.assertTrue(all(amount > 0 for amount in BET_STEPS))
+
+    def test_manual_stakes_are_the_final_source_of_truth(self):
+        config = StrategyConfig.from_payload(
+            {
+                "initial_stake": 57,
+                "progression_multiplier": 2.25,
+                "max_steps": 7,
+                "stakes": [57, 128, 288, 648, 1458, 3281, 7589],
+            }
         )
-        self.assertEqual(sum(BET_STEPS), 4142)
+        self.assertEqual(config.to_dict()["stakes"], [57.0, 128.0, 288.0, 648.0, 1458.0, 3281.0, 7589.0])
+        self.assertEqual(config.to_dict()["required_budget"], 13449.0)
+
+    def test_score_progression_detects_a_missed_goal(self):
+        self.assertEqual(validate_score_progression(Score(0, 1), Score(1, 1), expected_goals=0), ScoreProgression.MISSED_EVENT)
+        self.assertEqual(validate_score_progression(Score(0, 0), Score(0, 1), expected_goals=1), ScoreProgression.EXPECTED_GOAL)
 
     def test_detect_team_1(self):
         self.assertEqual(detect_scorer(Score(1, 2), Score(2, 2)), Scorer.TEAM_1)
@@ -85,7 +101,7 @@ class StrategyTests(unittest.TestCase):
             results.append("WIN" if scorer == selection.selected_side else "LOSE")
 
         self.assertEqual(results, ["LOSE", "LOSE", "WIN"])
-        self.assertEqual(BET_STEPS[:3], [20, 44, 97])
+        self.assertEqual(len(BET_STEPS), 7)
         self.assertEqual(selection.selected_team, "Базель")
         self.assertEqual(selection.selected_side, Scorer.TEAM_2)
 

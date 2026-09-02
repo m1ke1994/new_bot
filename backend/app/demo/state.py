@@ -5,6 +5,7 @@ from typing import Any
 
 from .config import CONFIG
 from .budget import DEMO_START_BUDGET
+from .strategy import DEFAULT_STRATEGY_CONFIG
 from .models import DemoStatus
 
 
@@ -58,7 +59,7 @@ def initial_state() -> dict[str, Any]:
         },
         "bet": {
             "step": 0,
-            "max_steps": 7,
+            "max_steps": DEFAULT_STRATEGY_CONFIG.max_steps,
             "amount": None,
             "market": "Следующий гол",
             "odds": None,
@@ -66,9 +67,16 @@ def initial_state() -> dict[str, Any]:
             "next_goal_number": None,
         },
         "budget": {
-            "initial_budget": DEMO_START_BUDGET,
-            "current_budget": DEMO_START_BUDGET,
+            "initial_budget": float(DEMO_START_BUDGET),
+            "current_budget": float(DEMO_START_BUDGET),
             "session_profit": 0,
+        },
+        "strategy_config": DEFAULT_STRATEGY_CONFIG.to_dict(),
+        "sequence": {
+            "current_step": 1,
+            "status": "WAITING_FOR_MATCH",
+            "cumulative_pnl": 0,
+            "cumulative_losses": 0,
         },
         "last_change": None,
         "stats": {
@@ -102,6 +110,17 @@ class DemoStateStore:
                 status=DemoStatus.OPENING_LEAGUE.value,
                 message="Запуск DEMO worker",
                 stats=deepcopy(stats),
+                updated_at=utc_now(),
+            )
+
+    async def restore(self, *, budget: dict[str, Any], strategy_config: dict[str, Any], sequence: dict[str, Any], stats: dict[str, Any]) -> None:
+        async with self._lock:
+            self._state.update(
+                budget=deepcopy(budget),
+                strategy_config=deepcopy(strategy_config),
+                sequence=deepcopy(sequence),
+                stats=deepcopy(stats),
+                bet={**self._state["bet"], "step": int(sequence["current_step"]), "max_steps": strategy_config["max_steps"], "amount": strategy_config["stakes"][int(sequence["current_step"]) - 1] if int(sequence["current_step"]) <= strategy_config["max_steps"] else None},
                 updated_at=utc_now(),
             )
 

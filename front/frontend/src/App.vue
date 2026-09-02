@@ -47,6 +47,7 @@ const state = ref({
 
 const history = ref([])
 const logs = ref([])
+const strategyConfig = ref({ initial_stake: 20, progression_multiplier: 2.2, max_steps: 7, stakes: [20, 44, 97, 213, 469, 1031, 2268], required_budget: 4142 })
 const backendError = ref('')
 const actionPending = ref(false)
 const initialLoading = ref(true)
@@ -94,6 +95,38 @@ async function loadDetails() {
   }
 }
 
+async function loadStrategyConfig() {
+  const config = await api('/api/demo/strategy-config')
+  strategyConfig.value = { ...config, stakes: [...config.stakes] }
+}
+
+function regenerateStakes() {
+  const initial = Number(strategyConfig.value.initial_stake)
+  const multiplier = Number(strategyConfig.value.progression_multiplier)
+  const steps = Number(strategyConfig.value.max_steps)
+  if (!Number.isFinite(initial) || !Number.isFinite(multiplier) || !Number.isInteger(steps) || initial <= 0 || multiplier <= 1 || steps < 1) return
+  const stakes = [Math.round(initial * 100) / 100]
+  while (stakes.length < steps) stakes.push(Math.floor(stakes[stakes.length - 1] * multiplier))
+  strategyConfig.value.stakes = stakes
+}
+
+function updateStake(index, event) {
+  strategyConfig.value.stakes[index] = Number(event.target.value)
+}
+
+async function saveStrategy() {
+  actionPending.value = true
+  try {
+    const saved = await api('/api/demo/strategy-config', { method: 'PUT', body: JSON.stringify(strategyConfig.value) })
+    strategyConfig.value = { ...saved, stakes: [...saved.stakes] }
+    await loadState()
+  } catch (error) {
+    backendError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    actionPending.value = false
+  }
+}
+
 async function refresh() {
   await loadState()
   tick += 1
@@ -132,6 +165,12 @@ const lastChange = computed(() => state.value.last_change || {})
 const scanner = computed(() => state.value.scanner || {})
 const marketReader = computed(() => state.value.market_reader || {})
 const budget = computed(() => state.value.budget || {})
+const sequence = computed(() => state.value.sequence || {})
+const strategyBudget = computed(() => strategyConfig.value.stakes.reduce((total, amount) => total + (Number(amount) || 0), 0))
+const configInvalid = computed(() => {
+  const config = strategyConfig.value
+  return !(Number(config.initial_stake) > 0) || !(Number(config.progression_multiplier) > 1) || !Number.isInteger(Number(config.max_steps)) || Number(config.max_steps) < 1 || config.stakes.length !== Number(config.max_steps) || config.stakes.some((amount) => !Number.isFinite(Number(amount)) || Number(amount) <= 0)
+})
 const reversedHistory = computed(() => [...history.value].reverse())
 const recentLogs = computed(() => logs.value.slice(-250))
 const profitTone = computed(() => Number(budget.value.session_profit || 0) >= 0 ? 'green' : 'red')
@@ -185,7 +224,7 @@ const updatedAt = computed(() => {
 })
 
 onMounted(async () => {
-  await Promise.all([loadState(), loadDetails()])
+  await Promise.all([loadState(), loadDetails(), loadStrategyConfig()])
   timer = setInterval(refresh, 750)
 })
 
@@ -209,7 +248,7 @@ onBeforeUnmount(() => {
         <div class="demo-chip">DEMO</div>
         <button
           class="button button-start"
-          :disabled="state.running || actionPending"
+          :disabled="state.running || actionPending || configInvalid"
           @click="control('start')"
         >
           Запустить бота
@@ -221,6 +260,7 @@ onBeforeUnmount(() => {
         >
           Остановить
         </button>
+        <button class="button" :disabled="state.running || actionPending" @click="control('reset')">Новая серия</button>
       </div>
     </header>
 
@@ -253,6 +293,26 @@ onBeforeUnmount(() => {
         <strong>{{ state.status }}</strong>
         <span>{{ state.error }}</span>
       </div>
+
+      <section class="strategy-config panel">
+        <header class="panel-header compact">
+          <div><span class="eyebrow amber">STRATEGY</span><h2>Настройка стратегии</h2></div>
+          <strong :class="configInvalid ? 'red' : 'green'">{{ configInvalid ? 'Проверьте значения' : `Бюджет ряда: ${formatNumber(strategyBudget)} ₽` }}</strong>
+        </header>
+        <div class="strategy-config-body">
+          <label>Первоначальная ставка<input v-model.number="strategyConfig.initial_stake" type="number" min="0.01" step="0.01" @change="regenerateStakes"></label>
+          <label>Множитель следующей ставки<input v-model.number="strategyConfig.progression_multiplier" type="number" min="1.01" step="0.01" @change="regenerateStakes"></label>
+          <label>Количество шагов<input v-model.number="strategyConfig.max_steps" type="number" min="1" step="1" @change="regenerateStakes"></label>
+          <button class="button" :disabled="state.running || actionPending" @click="regenerateStakes">Рассчитать ряд</button>
+        </div>
+        <div class="stake-row">
+          <label v-for="(stake, index) in strategyConfig.stakes" :key="index">Шаг {{ index + 1 }}<input :value="stake" type="number" min="0.01" step="0.01" @input="updateStake(index, $event)"></label>
+        </div>
+        <footer class="strategy-config-footer">
+          <span>Сохранённый ряд применяется при следующем запуске. Вручную изменённые суммы имеют приоритет.</span>
+          <button class="button button-start" :disabled="state.running || actionPending || configInvalid" @click="saveStrategy">Сохранить настройки</button>
+        </footer>
+      </section>
 
       <section class="overview-grid">
         <article class="metric-card">
@@ -443,6 +503,10 @@ onBeforeUnmount(() => {
           <article>
             <span>РЕЗУЛЬТАТ СЕССИИ</span>
             <strong :class="profitTone">{{ signedProfit }} ₽</strong>
+          </article>
+          <article>
+            <span>P&L ТЕКУЩЕЙ СЕРИИ · ШАГ {{ sequence.current_step || 1 }}</span>
+            <strong :class="Number(sequence.cumulative_pnl || 0) >= 0 ? 'green' : 'red'">{{ Number(sequence.cumulative_pnl || 0) >= 0 ? '+' : '' }}{{ formatNumber(sequence.cumulative_pnl || 0) }} ₽</strong>
           </article>
         </section>
 

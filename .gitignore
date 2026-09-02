@@ -3,6 +3,8 @@ backend/diagnostics/canvas/*.png
 backend/diagnostics/canvas/latest_analysis.json
 backend/diagnostics/canvas/*.json
 backend/data/*.jsonl
+backend/data/*.sqlite3
+backend/data/*.sqlite3-*
 
 # Python cache
 __pycache__/
