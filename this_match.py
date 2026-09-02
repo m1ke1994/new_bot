@@ -6,7 +6,7 @@
 
 import asyncio
 
-# Эти зависимости намеренно остаются частью публичной связки this_match/auth.
+# Эти зависимости остаются частью публичной связки this_match/auth.
 from auth import PROFILE_DIR, authorize  # noqa: F401
 from matches import main
 

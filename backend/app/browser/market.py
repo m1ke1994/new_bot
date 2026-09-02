@@ -12,13 +12,19 @@ from .canvas_vision import (
     CANVAS_SELECTOR,
     CanvasVisionError,
     analyze_market_canvas,
-    get_next_goal_odds,
 )
 
 
 Logger = Callable[[str, str], Awaitable[Any]]
 GOALS_TEXT = "Голы"
 GOALS_FILTER_SELECTOR = ".game-toolbar-filter-switch"
+NEXT_GOAL_SEARCH_SELECTOR = "input.game-search__input"
+MARKET_GROUP_SELECTOR = ".game-markets-group"
+MARKET_GROUP_TITLE_SELECTOR = ".game-markets-group-header-title"
+MARKET_BUTTON_SELECTOR = "button.game-markets-group__market"
+MARKET_NAME_SELECTOR = ".ui-market__name"
+MARKET_VALUE_SELECTOR = ".ui-market__value"
+NEXT_GOAL_TEXT = "Следующий гол"
 MARKET_KEYWORDS = (
     "market",
     "odds",
@@ -63,6 +69,32 @@ class MarketDomRequired(MarketReadError):
 async def _log(logger: Logger | None, event: str, message: str) -> None:
     if logger is not None:
         await logger(event, message)
+
+
+def _clean_text(value: str) -> str:
+    return " ".join(value.replace("ё", "е").strip().lower().split())
+
+
+def parse_next_goal_market_name(value: str) -> tuple[int, int] | None:
+    """Return (team side, goal number) for a team outcome, ignoring no-goal rows."""
+    normalized = _clean_text(value).replace("–", "-").replace("—", "-")
+    if "не будет" in normalized or "гол" not in normalized:
+        return None
+    match = re.search(r"команда\s*([12])\s*-\s*(\d+)\s*-?\s*[йяе]?\s*гол", normalized)
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def parse_dom_odds(value: str) -> float:
+    normalized = value.replace("\xa0", " ").replace(",", ".")
+    match = re.search(r"\d+(?:\.\d+)?", normalized)
+    if match is None:
+        raise ValueError(f"Коэффициент не найден в {value!r}")
+    odds = float(match.group(0))
+    if odds <= 0:
+        raise ValueError(f"Некорректный коэффициент: {value!r}")
+    return odds
 
 
 def _redact(value: Any, depth: int = 0) -> Any:
@@ -295,53 +327,102 @@ async def read_next_goal_odds(
     page: Page,
     team1: str,
     team2: str,
+    score1: int,
+    score2: int,
     logger: Logger | None = None,
 ) -> NextGoalOdds:
-    preparation = await open_goals_filter(page, logger)
-    await _log(logger, "CANVAS_CAPTURE", "Capturing canvas")
-    await _log(logger, "OCR_RUNNING", "Running OCR")
+    next_goal_number = score1 + score2 + 1
+    search_input = page.locator(NEXT_GOAL_SEARCH_SELECTOR).first
     try:
-        result = await get_next_goal_odds(page, team1, team2)
-    except CanvasVisionError as error:
-        raise MarketReadError(
-            str(error),
-            status=error.status,
-            details={"source": "CANVAS_OCR", **preparation},
+        await search_input.wait_for(state="visible", timeout=5_000)
+        await search_input.fill("следующий гол")
+    except Exception as error:
+        raise MarketDomRequired(
+            "Поле поиска рынков пока недоступно.",
+            status="ELEMENT_NOT_READY",
+            details={"source": "DOM_PLAYWRIGHT"},
         ) from error
 
-    result["network_candidates"] = preparation["network_candidates"]
-    result["js_state_candidates"] = preparation["js_state_candidates"]
-    result["goals_selector"] = preparation["selector"]
-    await _log(
-        logger,
-        "OCR_NUMERIC_CANDIDATES",
-        str([item["value"] for item in result.get("analysis", {}).get("numbers", [])]),
-    )
+    groups = page.locator(MARKET_GROUP_SELECTOR)
+    try:
+        await groups.first.wait_for(state="attached", timeout=5_000)
+    except Exception as error:
+        raise MarketNotAvailable(
+            "Группа рынка «Следующий гол» пока не появилась.",
+            status="MARKET_NOT_FOUND",
+            details={"source": "DOM_PLAYWRIGHT"},
+        ) from error
 
-    analysis = result.get("analysis", {})
-    await _log(logger, "OCR_ENGINE", str(analysis.get("ocr_backend") or "NONE"))
-
-    if not result.get("ok"):
-        raise MarketReadError(
-            f"{result.get('status')}: коэффициенты нельзя использовать автоматически.",
-            status=result.get("status", "ODDS_MAPPING_UNCERTAIN"),
-            details=result,
+    target_group = None
+    for index in range(await groups.count()):
+        group = groups.nth(index)
+        title = group.locator(MARKET_GROUP_TITLE_SELECTOR).first
+        if await title.count() == 0:
+            continue
+        if _clean_text(await title.inner_text()) == _clean_text(NEXT_GOAL_TEXT):
+            target_group = group
+            break
+    if target_group is None:
+        raise MarketNotAvailable(
+            "Точная группа рынка «Следующий гол» не найдена.",
+            status="MARKET_NOT_FOUND",
+            details={"source": "DOM_PLAYWRIGHT"},
         )
 
-    team1_odd = result["team1"]["odds"]
-    team2_odd = result["team2"]["odds"]
-    await _log(logger, "NEXT_GOAL_MARKET_FOUND", result.get("market", "Следующий гол"))
-    await _log(logger, "ODDS_MAPPED", "Odds candidates mapped")
-    await _log(logger, "TEAM1_ODDS", f"Team1 odds: {team1_odd}")
-    await _log(logger, "TEAM2_ODDS", f"Team2 odds: {team2_odd}")
-    await _log(logger, "ODDS_SOURCE", f"Odds source: {result['source']}")
+    values: dict[int, float] = {}
+    locked_sides: set[int] = set()
+    buttons = target_group.locator(MARKET_BUTTON_SELECTOR)
+    for index in range(await buttons.count()):
+        button = buttons.nth(index)
+        name_locator = button.locator(MARKET_NAME_SELECTOR).first
+        if await name_locator.count() == 0:
+            continue
+        parsed = parse_next_goal_market_name(await name_locator.inner_text())
+        if parsed is None:
+            continue
+        side, goal_number = parsed
+        if goal_number != next_goal_number:
+            continue
+
+        classes = (await button.get_attribute("class") or "").lower()
+        if await button.is_disabled() or "ui-market--locked" in classes:
+            locked_sides.add(side)
+            continue
+        value_locator = button.locator(MARKET_VALUE_SELECTOR).first
+        if await value_locator.count() == 0:
+            continue
+        try:
+            values[side] = parse_dom_odds(await value_locator.inner_text())
+        except ValueError:
+            continue
+
+    if 1 not in values or 2 not in values:
+        status = "MARKET_LOCKED" if locked_sides else "ODDS_NOT_FOUND"
+        raise MarketNotAvailable(
+            f"Коэффициенты обеих команд для гола №{next_goal_number} пока недоступны.",
+            status=status,
+            details={
+                "source": "DOM_PLAYWRIGHT",
+                "next_goal_number": next_goal_number,
+                "available_sides": sorted(values),
+                "locked_sides": sorted(locked_sides),
+            },
+        )
+
+    team1_odd = values[1]
+    team2_odd = values[2]
+    market = f"Следующий гол №{next_goal_number}"
+    await _log(logger, "NEXT_GOAL_MARKET_FOUND", market)
+    await _log(logger, "TEAM1_ODDS", f"Команда 1 / {team1} = {team1_odd}")
+    await _log(logger, "TEAM2_ODDS", f"Команда 2 / {team2} = {team2_odd}")
+    await _log(logger, "ODDS_SOURCE", "DOM / Playwright")
     await _log(logger, "ODDS_READY", f"{team1_odd} / {team2_odd}")
     return NextGoalOdds(
         team1=float(team1_odd),
         team2=float(team2_odd),
-        market=result.get("market", "Следующий гол"),
-        next_goal_number=result.get("next_goal_number"),
-        source=result.get("source", "CANVAS_OCR"),
-        ocr_backend=result.get("ocr_backend"),
-        confidence=result.get("confidence"),
+        market=market,
+        next_goal_number=next_goal_number,
+        source="DOM_PLAYWRIGHT",
+        ocr_backend=None,
+        confidence=None,
     )

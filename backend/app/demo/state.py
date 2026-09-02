@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .config import CONFIG
+from .budget import DEMO_START_BUDGET
 from .models import DemoStatus
 
 
@@ -25,6 +26,8 @@ def initial_state() -> dict[str, Any]:
         "match": None,
         "scanner": {"total": 0, "started": 0, "upcoming": 0, "selected": None},
         "selected_team": None,
+        "selected_side": None,
+        "initial_selected_odds": None,
         "other_team": None,
         "selection_reason": None,
         "odds": {
@@ -38,7 +41,7 @@ def initial_state() -> dict[str, Any]:
             "status": "WAITING",
         },
         "ocr": {
-            "status": "WAITING",
+            "status": "NOT_USED_FOR_NEXT_GOAL",
             "attempt": 0,
             "max_attempts": CONFIG.ocr_max_attempts,
             "canvas": None,
@@ -47,14 +50,25 @@ def initial_state() -> dict[str, Any]:
             "candidates": [],
             "market_bbox": None,
         },
+        "market_reader": {
+            "source": "DOM / Playwright",
+            "status": "WAITING",
+            "attempt": 0,
+            "next_goal_number": None,
+        },
         "bet": {
             "step": 0,
-            "max_steps": 11,
+            "max_steps": 7,
             "amount": None,
             "market": "Следующий гол",
             "odds": None,
             "score_before": None,
             "next_goal_number": None,
+        },
+        "budget": {
+            "initial_budget": DEMO_START_BUDGET,
+            "current_budget": DEMO_START_BUDGET,
+            "session_profit": 0,
         },
         "last_change": None,
         "stats": {

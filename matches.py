@@ -7,9 +7,9 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 from dotenv import load_dotenv
-from playwright.async_api import Page
+from playwright.async_api import Locator, Page
 
-from auth import authorize, PROFILE_DIR
+from auth import authorize
 from xbet_config import get_xbet_url, XBET_LEAGUE_PATH
 
 
@@ -46,16 +46,21 @@ if not FRONT_FILE.is_absolute():
 # SELECTORS
 # ============================================================
 
-LEAGUE_TITLE_SELECTOR = ".dashboard-champ-name__caption"
-MATCH_SELECTOR = "li.dashboard-champ__game"
-TEAM_SELECTOR = ".dashboard-game-team-info__name"
-TIME_SELECTOR = ".dashboard-game-info__time"
-PERIOD_SELECTOR = ".dashboard-game-info__period"
-MARKET_SELECTOR = ".dashboard-markets__market"
-MARKET_BUTTON_SELECTOR = "button.ui-market__toggle"
+MATCH_SELECTOR = "article.ui-game-card"
+TEAM_SELECTOR = ".ui-game-card-scoreboard__name"
+TIME_SELECTOR = ".ui-game-card__data"
+PERIOD_SELECTOR = ".ui-game-card__period"
+MARKET_SELECTOR = "button.game-card-market"
+MARKET_NAME_SELECTOR = ".ui-market__name"
 MARKET_VALUE_SELECTOR = ".ui-market__value"
-MATCH_LINK_SELECTOR = "a.dashboard-game-block__link"
-SCORE_SELECTOR = ".ui-game-scores__item--total .ui-game-scores__num"
+MATCH_LINK_SELECTOR = "a.ui-game-card__link"
+SCORE_SELECTOR = ".ui-game-card-scoreboard__score"
+
+LEAGUE_PATH = urlparse(MATCHES_URL).path.rstrip("/")
+LEAGUE_MATCH_HREF_FRAGMENT = f"{LEAGUE_PATH}/"
+LEAGUE_MATCH_LINK_SELECTOR = (
+    f'{MATCH_LINK_SELECTOR}[href*="{LEAGUE_MATCH_HREF_FRAGMENT}"]'
+)
 
 
 # ============================================================
@@ -126,6 +131,26 @@ def sort_upcoming_matches(matches):
     )
 
 
+def is_league_match_href(href: str | None) -> bool:
+    return bool(href and LEAGUE_MATCH_HREF_FRAGMENT in href)
+
+
+def league_match_links(scope: Page | Locator) -> Locator:
+    return scope.locator(LEAGUE_MATCH_LINK_SELECTOR)
+
+
+def match_card_for_link(link: Locator) -> Locator:
+    return link.locator(
+        "xpath=ancestor::article["
+        "contains(concat(' ', normalize-space(@class), ' '), ' ui-game-card ')"
+        "][1]"
+    ).first
+
+
+def exact_match_link_selector(href: str) -> str:
+    return f"{MATCH_LINK_SELECTOR}[href={json.dumps(href)}]"
+
+
 # ============================================================
 # OPEN / CHECK LEAGUE
 # ============================================================
@@ -151,48 +176,14 @@ async def open_matches_page(page: Page):
 
 
 async def find_league_container(page: Page):
-    log("Ищем нужную лигу...")
+    current_path = urlparse(page.url).path.rstrip("/")
+    if current_path != LEAGUE_PATH:
+        log(f"Открыт другой путь: {current_path or '/'}")
+        return None
 
-    titles = page.locator(LEAGUE_TITLE_SELECTOR)
-    count = await titles.count()
-    log(f"Найдено заголовков: {count}")
-
-    for index in range(count):
-        title = titles.nth(index)
-
-        try:
-            if not await title.is_visible():
-                continue
-
-            text = clean_text(await title.inner_text())
-
-            if text != LEAGUE_NAME:
-                continue
-
-            container = title.locator(
-                "xpath=ancestor::li[contains(@class,'dashboard-champ-body')]"
-            ).first
-
-            await container.wait_for(
-                state="visible",
-                timeout=10_000,
-            )
-
-            print()
-            print("=" * 70)
-            print("НУЖНАЯ ЛИГА НАЙДЕНА")
-            print("=" * 70)
-            print(f"Лига: {text}")
-            print(f"URL: {page.url}")
-            print("=" * 70)
-            print()
-
-            return container
-
-        except Exception as error:
-            log(f"Ошибка проверки заголовка: {error}")
-
-    return None
+    container = page.locator("body")
+    await container.wait_for(state="attached", timeout=10_000)
+    return container
 
 
 async def check_correct_page(page: Page):
@@ -228,19 +219,14 @@ async def get_market_value(game, wanted_market: str):
 
     for index in range(count):
         market = markets.nth(index)
-        button = market.locator(MARKET_BUTTON_SELECTOR).first
 
         try:
-            label = await button.get_attribute("aria-label")
-            if not label:
-                label = await button.get_attribute("title")
-            if not label:
-                label = await safe_text(button)
+            label = await safe_text(market.locator(MARKET_NAME_SELECTOR))
             if not label:
                 continue
 
             label = clean_text(label)
-            if label != wanted_market:
+            if label.casefold() != wanted_market.casefold():
                 continue
 
             value = await safe_text(
@@ -319,6 +305,9 @@ async def parse_match(game, number: int):
 
     match_url = urljoin(MATCHES_URL, href) if href else None
 
+    print(f"[MATCH] {team1} — {team2}")
+    print(f"[MATCH] URL: {match_url or '<не найден>'}")
+
     return {
         "number": number,
         "match_id": match_id,
@@ -348,13 +337,14 @@ async def get_upcoming_matches(page: Page):
     if league_container is None:
         raise RuntimeError("Контейнер нужной лиги не найден.")
 
-    games = league_container.locator(MATCH_SELECTOR)
-    count = await games.count()
+    links = league_match_links(league_container)
+    count = await links.count()
+    print(f"[SELECTOR] Найдено матчей: {count}")
 
     upcoming = []
 
     for index in range(count):
-        game = games.nth(index)
+        game = match_card_for_link(links.nth(index))
 
         try:
             match = await parse_match(game, index + 1)
@@ -471,10 +461,7 @@ async def open_nearest_match(page: Page, matches):
         raise RuntimeError("У ближайшего матча не найдена ссылка href.")
 
     # Ищем именно ссылку выбранного матча, а не первую ссылку на странице.
-    href_css_value = json.dumps(href)
-    link = page.locator(
-        f"a.dashboard-game-block__link[href={href_css_value}]"
-    ).first
+    link = page.locator(exact_match_link_selector(href)).first
 
     await link.wait_for(
         state="visible",
@@ -626,7 +613,10 @@ async def main():
 
             print()
             print("=" * 70)
-            print("АВТОРИЗАЦИЯ ПОДТВЕРЖДЕНА")
+            if auth_result.get("status") == "AUTHORIZED":
+                print("АВТОРИЗАЦИЯ ПОДТВЕРЖДЕНА")
+            else:
+                print("ТАЙМАУТ АВТОРИЗАЦИИ — ПРОДОЛЖАЕМ РАБОТУ")
             print("=" * 70)
             print()
 

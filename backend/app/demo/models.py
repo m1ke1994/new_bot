@@ -7,7 +7,9 @@ class DemoStatus(StrEnum):
     STOPPED = "STOPPED"
     STARTING = "STARTING"
     AUTH_CHECK = "AUTH_CHECK"
+    WAITING_MANUAL_LOGIN = "WAITING_MANUAL_LOGIN"
     AUTHORIZED = "AUTHORIZED"
+    AUTH_TIMEOUT = "AUTH_TIMEOUT"
     OPENING_LEAGUE = "OPENING_LEAGUE"
     SCANNING_MATCHES = "SCANNING_UPCOMING_MATCHES"
     NO_UPCOMING_MATCHES = "NO_UPCOMING_MATCHES"
@@ -20,6 +22,7 @@ class DemoStatus(StrEnum):
     WAITING_FOR_CANVAS = "WAITING_FOR_CANVAS"
     READING_ODDS = "READING_ODDS"
     WAITING_FOR_ODDS = "WAITING_FOR_ODDS"
+    WAITING_FOR_MARKET = "WAITING_FOR_MARKET"
     ODDS_READY = "ODDS_READY"
     TEAM_SELECTED = "TEAM_SELECTED"
     BET_SIMULATED = "BET_SIMULATED"
@@ -75,7 +78,7 @@ class NextGoalOdds:
     team2: float
     market: str = "Следующий гол"
     next_goal_number: int | None = None
-    source: str = "CANVAS_OCR"
+    source: str = "DOM_PLAYWRIGHT"
     ocr_backend: str | None = None
     confidence: float | None = None
 

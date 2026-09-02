@@ -4,6 +4,7 @@ from backend.app.demo.models import NextGoalOdds, Score, Scorer
 from backend.app.demo.strategy import (
     BET_STEPS,
     detect_scorer,
+    odds_for_selected_side,
     select_team_with_higher_odds,
 )
 
@@ -12,8 +13,9 @@ class StrategyTests(unittest.TestCase):
     def test_bet_steps_are_explicit(self):
         self.assertEqual(
             BET_STEPS,
-            [8, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 5904],
+            [20, 44, 97, 213, 469, 1031, 2268],
         )
+        self.assertEqual(sum(BET_STEPS), 4142)
 
     def test_detect_team_1(self):
         self.assertEqual(detect_scorer(Score(1, 2), Score(2, 2)), Scorer.TEAM_1)
@@ -54,6 +56,38 @@ class StrategyTests(unittest.TestCase):
                 "B",
                 NextGoalOdds(team1=2.0, team2=2.0),
             )
+
+    def test_selected_side_stays_fixed_when_later_odds_reverse(self):
+        selection = select_team_with_higher_odds(
+            "Лилль",
+            "Базель",
+            NextGoalOdds(team1=1.784, team2=1.984),
+        )
+        selected, opponent = odds_for_selected_side(
+            NextGoalOdds(team1=2.10, team2=1.80),
+            selection.selected_side,
+        )
+        self.assertEqual(selection.selected_team, "Базель")
+        self.assertEqual(selection.selected_side, Scorer.TEAM_2)
+        self.assertEqual((selected, opponent), (1.80, 2.10))
+
+    def test_reference_lose_lose_win_series_keeps_team_and_steps(self):
+        selection = select_team_with_higher_odds(
+            "Лилль",
+            "Базель",
+            NextGoalOdds(team1=1.784, team2=1.984),
+        )
+        scores = [Score(0, 0), Score(1, 0), Score(2, 0), Score(2, 1)]
+        results = []
+
+        for previous, current in zip(scores[:-1], scores[1:], strict=True):
+            scorer = detect_scorer(previous, current)
+            results.append("WIN" if scorer == selection.selected_side else "LOSE")
+
+        self.assertEqual(results, ["LOSE", "LOSE", "WIN"])
+        self.assertEqual(BET_STEPS[:3], [20, 44, 97])
+        self.assertEqual(selection.selected_team, "Базель")
+        self.assertEqual(selection.selected_side, Scorer.TEAM_2)
 
 
 if __name__ == "__main__":

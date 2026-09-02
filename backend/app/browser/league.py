@@ -1,12 +1,13 @@
-import json
 import re
 from typing import Any
 
 from playwright.async_api import Page
 
 from matches import (
-    MATCH_SELECTOR,
+    exact_match_link_selector,
     find_league_container,
+    league_match_links,
+    match_card_for_link,
     open_matches_page,
     parse_match,
     sort_upcoming_matches,
@@ -35,12 +36,14 @@ class LeagueBrowser:
         if container is None:
             raise RuntimeError("Контейнер целевой лиги не найден.")
 
-        games = container.locator(MATCH_SELECTOR)
+        links = league_match_links(container)
+        total = await links.count()
+        print(f"[SELECTOR] Найдено матчей: {total}")
         upcoming: list[dict[str, Any]] = []
         started: list[dict[str, Any]] = []
 
-        for index in range(await games.count()):
-            item = await parse_match(games.nth(index), index + 1)
+        for index in range(total):
+            item = await parse_match(match_card_for_link(links.nth(index)), index + 1)
             if not item or item["finished"]:
                 continue
             if item["is_upcoming"]:
@@ -54,7 +57,7 @@ class LeagueBrowser:
         await write_front(upcoming)
         self.skipped_started = started
         self.last_scan_stats = {
-            "total": await games.count(),
+            "total": total,
             "started": len(started),
             "upcoming": len(upcoming),
         }
@@ -64,15 +67,9 @@ class LeagueBrowser:
         href = match.get("href")
         if not href:
             raise RuntimeError("У выбранного матча отсутствует href.")
-        href_value = json.dumps(href)
-        link = self.page.locator(
-            f"a.dashboard-game-block__link[href={href_value}]"
-        ).first
+        link = self.page.locator(exact_match_link_selector(href)).first
         await link.wait_for(state="attached", timeout=10_000)
-        block = link.locator(
-            "xpath=ancestor::li[contains(concat(' ', normalize-space(@class), ' '), "
-            "' dashboard-champ__game ')][1]"
-        )
+        block = match_card_for_link(link)
         current = await parse_match(block, int(match.get("number") or 1))
         if current is None or not current.get("is_upcoming"):
             period = (current or {}).get("period") or ""
@@ -85,14 +82,11 @@ class LeagueBrowser:
         match = await self.revalidate_upcoming(match)
         href = match["href"]
 
-        href_value = json.dumps(href)
-        link = self.page.locator(
-            f"a.dashboard-game-block__link[href={href_value}]"
-        ).first
+        link = self.page.locator(exact_match_link_selector(href)).first
         await link.wait_for(state="visible", timeout=10_000)
         await link.scroll_into_view_if_needed()
         await link.click()
-        selector = "a.dashboard-game-block__link"
+        selector = "a.ui-game-card__link"
 
         try:
             if match.get("match_id"):

@@ -3,19 +3,10 @@ from collections.abc import Sequence
 from .models import NextGoalOdds, Score, Scorer, TeamSelection
 
 
-BET_STEPS = [
-    8,
-    8,
-    16,
-    32,
-    64,
-    128,
-    256,
-    512,
-    1024,
-    2048,
-    5904,
-]
+STAKE_STEPS = [25, 56, 126, 284, 639, 1438, 3348]
+
+# Backwards-compatible name used by the existing worker and API tests.
+BET_STEPS = STAKE_STEPS
 
 
 def detect_scorer(
@@ -37,6 +28,11 @@ def detect_scorer(
     if delta2 > 0:
         return Scorer.TEAM_2
     return Scorer.UNKNOWN
+
+
+def can_create_initial_bet(score: Score, *, has_active_bet: bool = False) -> bool:
+    """The first bet is allowed once, only while the scoreboard is exactly 0:0."""
+    return not has_active_bet and score.team1 == 0 and score.team2 == 0
 
 
 def select_team_with_higher_odds(

@@ -37,16 +37,43 @@ class DemoRepository:
         with path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(item, ensure_ascii=False) + "\n")
 
+    @staticmethod
+    def _write_jsonl(path: Path, items: list[dict[str, Any]]) -> None:
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        payload = "".join(
+            json.dumps(item, ensure_ascii=False) + "\n" for item in items
+        )
+        temporary.write_text(payload, encoding="utf-8")
+        temporary.replace(path)
+
     async def add_bet(self, item: dict[str, Any]) -> dict[str, Any]:
+        return await self.save_bet(item)
+
+    async def save_bet(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Create or update one journal row without duplicating a DEMO bet."""
         now = local_now()
         record = {
-            "timestamp": item.get("resolved_at") or now,
+            "timestamp": item.get("resolved_at") or item.get("created_at") or now,
             "created_at": item.get("created_at") or now,
-            "resolved_at": item.get("resolved_at") or now,
             **item,
         }
         async with self._lock:
-            self._append_jsonl(self.history_file, record)
+            bets = self._read_jsonl(self.history_file)
+            bet_id = record.get("id")
+            existing_index = next(
+                (
+                    index
+                    for index, existing in enumerate(bets)
+                    if bet_id is not None and existing.get("id") == bet_id
+                ),
+                None,
+            )
+            if existing_index is None:
+                bets.append(record)
+            else:
+                record = {**bets[existing_index], **record}
+                bets[existing_index] = record
+            self._write_jsonl(self.history_file, bets)
         return record
 
     async def add_cycle(self, item: dict[str, Any]) -> dict[str, Any]:
@@ -54,6 +81,13 @@ class DemoRepository:
         async with self._lock:
             self._append_jsonl(self.cycles_file, record)
         return record
+
+    async def clear_session(self) -> None:
+        """Start a clean DEMO session without touching unrelated diagnostics."""
+        async with self._lock:
+            self._write_jsonl(self.history_file, [])
+            self._write_jsonl(self.logs_file, [])
+            self._write_jsonl(self.cycles_file, [])
 
     async def log(self, event: str, message: str) -> dict[str, Any]:
         record = {

@@ -36,8 +36,10 @@ const state = ref({
     confidence: null,
     status: 'WAITING',
   },
-  ocr: { status: 'WAITING', attempt: 0, max_attempts: 5, candidates: [] },
-  bet: { step: 0, max_steps: 11 },
+  ocr: { status: 'NOT_USED_FOR_NEXT_GOAL', attempt: 0, max_attempts: 0, candidates: [] },
+  market_reader: { source: 'DOM / Playwright', status: 'WAITING', attempt: 0 },
+  bet: { step: 0, max_steps: 7 },
+  budget: { initial_budget: 4142, current_budget: 4142, session_profit: 0 },
   last_change: null,
   stats: emptyStats,
   updated_at: null,
@@ -128,9 +130,41 @@ const bet = computed(() => state.value.bet || {})
 const stats = computed(() => ({ ...emptyStats, ...(state.value.stats || {}) }))
 const lastChange = computed(() => state.value.last_change || {})
 const scanner = computed(() => state.value.scanner || {})
-const ocr = computed(() => state.value.ocr || {})
+const marketReader = computed(() => state.value.market_reader || {})
+const budget = computed(() => state.value.budget || {})
 const reversedHistory = computed(() => [...history.value].reverse())
 const recentLogs = computed(() => logs.value.slice(-250))
+const profitTone = computed(() => Number(budget.value.session_profit || 0) >= 0 ? 'green' : 'red')
+const signedProfit = computed(() => {
+  const value = Number(budget.value.session_profit)
+  if (!Number.isFinite(value)) return '—'
+  return `${value >= 0 ? '+' : ''}${formatNumber(value)}`
+})
+const authStatus = computed(() => state.value.auth?.status || 'UNKNOWN')
+const authStage = computed(() => {
+  if (authStatus.value === 'AUTHORIZED') {
+    return {
+      tone: 'authorized',
+      title: 'Авторизация выполнена',
+      message: 'Вход подтверждён по блоку баланса. Бот продолжил работу автоматически.',
+      status: 'Авторизован',
+    }
+  }
+  if (authStatus.value === 'WAITING_MANUAL_LOGIN') {
+    return {
+      tone: 'waiting',
+      title: 'Авторизация',
+      message: 'Браузер открыт. Войдите на сайте вручную.',
+      status: 'Ожидание входа',
+    }
+  }
+  return {
+    tone: 'checking',
+    title: 'Авторизация',
+    message: 'Открываем сайт и проверяем сохранённую сессию.',
+    status: 'Проверка авторизации',
+  }
+})
 const scoreText = computed(() => {
   if (match.value.score1 === null || match.value.score1 === undefined) return '— : —'
   return `${match.value.score1} : ${match.value.score2}`
@@ -138,14 +172,11 @@ const scoreText = computed(() => {
 const statusTone = computed(() => {
   if (state.value.status === 'ERROR') return 'danger'
   if (state.value.status === 'STOPPED') return 'neutral'
+  if (state.value.status === 'WAITING_MANUAL_LOGIN') return 'warning'
+  if (state.value.status === 'AUTHORIZED') return 'success'
   if (['WIN', 'GOAL_DETECTED'].includes(state.value.status)) return 'success'
   if (['LOSE', 'SEQUENCE_EXHAUSTED'].includes(state.value.status)) return 'warning'
   return 'active'
-})
-const confidencePercent = computed(() => {
-  const value = Number(state.value.odds?.confidence)
-  if (!Number.isFinite(value)) return '—'
-  return `${formatNumber(value <= 1 ? value * 100 : value)}%`
 })
 const updatedAt = computed(() => {
   if (!state.value.updated_at) return '—'
@@ -181,7 +212,7 @@ onBeforeUnmount(() => {
           :disabled="state.running || actionPending"
           @click="control('start')"
         >
-          Запустить демо
+          Запустить бота
         </button>
         <button
           class="button button-stop"
@@ -200,6 +231,17 @@ onBeforeUnmount(() => {
           <strong>ДЕМО-РЕЖИМ</strong>
           <span>Реальные ставки не отправляются. Все действия стратегии виртуальные.</span>
         </div>
+      </section>
+
+      <section
+        v-if="state.running"
+        :class="['auth-stage', `auth-stage-${authStage.tone}`]"
+      >
+        <div>
+          <strong>{{ authStage.title }}</strong>
+          <span>{{ authStage.message }}</span>
+        </div>
+        <small>Статус: {{ authStage.status }}</small>
       </section>
 
       <div v-if="backendError" class="alert alert-error">
@@ -307,7 +349,13 @@ onBeforeUnmount(() => {
                   <strong>{{ show(state.odds?.team2) }}</strong>
                 </div>
               </div>
-              <div class="selection-proof">Выбрано: max(nextGoalOdds)</div>
+              <div class="selection-details">
+                <span>{{ state.selected_side === 'TEAM_1' ? 'Команда 1 / левая' : 'Команда 2 / правая' }}</span>
+                <span>КФ при выборе: {{ show(state.initial_selected_odds) }}</span>
+                <span>Шаг: {{ bet.step || 1 }} / {{ bet.max_steps || 7 }}</span>
+                <span>Ставка: {{ show(bet.amount, 20) }} ₽</span>
+              </div>
+              <div class="selection-proof">Команда зафиксирована по большему начальному КФ</div>
             </div>
             <div v-else class="panel-empty">Ожидаем коэффициенты рынка</div>
 
@@ -318,24 +366,20 @@ onBeforeUnmount(() => {
               </div>
               <div>
                 <span>ИСТОЧНИК</span>
-                <strong>{{ show(state.odds?.source, 'Canvas OCR') }}</strong>
+                <strong>{{ show(marketReader.source, 'DOM / Playwright') }}</strong>
               </div>
               <div>
-                <span>OCR BACKEND</span>
-                <strong>{{ show(state.odds?.backend, ocr.engine) }}</strong>
+                <span>СТАТУС РЫНКА</span>
+                <strong>{{ show(marketReader.status, state.odds?.status) }}</strong>
               </div>
               <div>
-                <span>УВЕРЕННОСТЬ</span>
-                <strong>{{ confidencePercent }}</strong>
+                <span>СЛЕДУЮЩИЙ ГОЛ</span>
+                <strong>№{{ show(marketReader.next_goal_number, bet.next_goal_number) }}</strong>
               </div>
               <div class="ocr-status">
-                <span>OCR STATUS</span>
-                <strong>
-                  {{ show(ocr.status, state.odds?.status) }} · attempt {{ ocr.attempt || 0 }}/{{ ocr.max_attempts || 5 }}
-                  · canvas {{ show(ocr.canvas?.width) }}×{{ show(ocr.canvas?.height) }}
-                  · {{ show(ocr.latency_seconds) }}s
-                </strong>
-                <small>Candidates: {{ JSON.stringify(ocr.candidates || []) }}</small>
+                <span>ЧТЕНИЕ</span>
+                <strong>Playwright DOM · попытка {{ marketReader.attempt || 0 }}</strong>
+                <small>Canvas/OCR для рынка «Следующий гол» не используется.</small>
               </div>
             </div>
           </article>
@@ -348,12 +392,14 @@ onBeforeUnmount(() => {
                 <span class="eyebrow">VIRTUAL BET</span>
                 <h2>Текущая ставка</h2>
               </div>
-              <span class="step-badge">{{ bet.step || 0 }} / {{ bet.max_steps || 11 }}</span>
+              <span class="step-badge">{{ bet.step || 0 }} / {{ bet.max_steps || 7 }}</span>
             </header>
             <div class="bet-grid">
               <div><span>СУММА</span><strong>{{ show(bet.amount) }} <small>RUB</small></strong></div>
+              <div><span>МАТЧ</span><strong>{{ show(bet.match, state.match ? `${match.team1} — ${match.team2}` : null) }}</strong></div>
               <div><span>РЫНОК</span><strong>{{ show(bet.market, 'Следующий гол') }}</strong></div>
               <div><span>КОМАНДА</span><strong>{{ show(state.selected_team) }}</strong></div>
+              <div><span>СТОРОНА</span><strong>{{ show(bet.side_label) }}</strong></div>
               <div><span>КОЭФФИЦИЕНТ</span><strong class="green">{{ show(bet.odds) }}</strong></div>
               <div><span>СЧЁТ ПЕРЕД СТАВКОЙ</span><strong>{{ show(bet.score_before) }}</strong></div>
               <div><span>НОМЕР СЛЕДУЮЩЕГО ГОЛА</span><strong>{{ show(bet.next_goal_number) }}</strong></div>
@@ -382,6 +428,21 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <div v-else class="panel-empty">Изменений счёта пока нет</div>
+          </article>
+        </section>
+
+        <section class="budget-section">
+          <article>
+            <span>НАЧАЛЬНЫЙ БЮДЖЕТ</span>
+            <strong>{{ formatNumber(budget.initial_budget) }} ₽</strong>
+          </article>
+          <article>
+            <span>ТЕКУЩИЙ БЮДЖЕТ</span>
+            <strong>{{ formatNumber(budget.current_budget) }} ₽</strong>
+          </article>
+          <article>
+            <span>РЕЗУЛЬТАТ СЕССИИ</span>
+            <strong :class="profitTone">{{ signedProfit }} ₽</strong>
           </article>
         </section>
 
@@ -416,22 +477,29 @@ onBeforeUnmount(() => {
                 <thead>
                   <tr>
                     <th>№</th><th>Матч</th><th>Команда</th><th>Ставка</th><th>КФ</th>
-                    <th>Счёт до</th><th>Счёт после</th><th>Кто забил</th><th>Результат</th>
+                    <th>Шаг</th><th>Счёт до</th><th>Счёт после</th><th>Кто забил</th><th>Результат</th>
+                    <th>Бюджет до</th><th>Изменение</th><th>Бюджет после</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="item in reversedHistory" :key="`${item.cycle_id}-${item.step}`">
-                    <td>{{ item.step }}</td>
+                  <tr v-for="(item, index) in reversedHistory" :key="item.id || `${item.cycle_id}-${item.step}`">
+                    <td>{{ history.length - index }}</td>
                     <td>{{ item.match }}</td>
                     <td>{{ item.selected_team }}</td>
                     <td>{{ item.amount }} ₽</td>
                     <td>{{ item.odds }}</td>
+                    <td>{{ item.step }}</td>
                     <td>{{ item.score_before }}</td>
-                    <td>{{ item.score_after }}</td>
-                    <td>{{ item.scorer }}</td>
+                    <td>{{ show(item.score_after) }}</td>
+                    <td>{{ show(item.scorer) }}</td>
                     <td><span :class="['table-result', String(item.result).toLowerCase()]">{{ item.result }}</span></td>
+                    <td>{{ formatNumber(item.budget_before) }} ₽</td>
+                    <td :class="Number(item.budget_change) >= 0 ? 'green' : 'red'">
+                      {{ item.budget_change === null || item.budget_change === undefined ? '—' : `${Number(item.budget_change) >= 0 ? '+' : ''}${formatNumber(item.budget_change)} ₽` }}
+                    </td>
+                    <td>{{ item.budget_after === null || item.budget_after === undefined ? '—' : `${formatNumber(item.budget_after)} ₽` }}</td>
                   </tr>
-                  <tr v-if="!history.length"><td colspan="9" class="empty-row">Виртуальных ставок пока нет</td></tr>
+                  <tr v-if="!history.length"><td colspan="13" class="empty-row">Виртуальных ставок пока нет</td></tr>
                 </tbody>
               </table>
             </div>

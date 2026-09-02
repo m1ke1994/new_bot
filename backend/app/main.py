@@ -13,13 +13,10 @@ from backend.app.routes.demo import router as demo_router
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     try:
-        await BROWSER_MANAGER.start()
-    except Exception as error:
-        # Keep API diagnostics available after a temporary profile lock.
-        await ENGINE.report_browser_start_error(error)
-    yield
-    await ENGINE.stop()
-    await BROWSER_MANAGER.stop()
+        yield
+    finally:
+        await ENGINE.stop()
+        await BROWSER_MANAGER.stop()
 
 
 app = FastAPI(

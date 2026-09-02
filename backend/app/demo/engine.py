@@ -8,37 +8,25 @@ from uuid import uuid4
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from auth import authorize
-from backend.app.browser.canvas_vision import VISION, load_latest_analysis
+from backend.app.browser.canvas_vision import load_latest_analysis
 from backend.app.browser.league import LeagueBrowser, MatchAlreadyStarted
 from backend.app.browser.manager import BROWSER_MANAGER, BrowserManager
 from backend.app.browser.market import MarketReadError, market_canvas_debug, read_next_goal_odds
 from backend.app.browser.match import MatchBrowser
 from backend.app.browser.scoreboard import ScoreReadError
 
+from .budget import DemoBudget
 from .config import CONFIG
 from .history import REPOSITORY
 from .models import DemoStatus, Scorer, ScoreboardSnapshot
 from .state import STATE
 from .strategy import (
     BET_STEPS,
+    can_create_initial_bet,
     detect_scorer,
     odds_for_selected_side,
     select_team_with_higher_odds,
 )
-
-
-RECOVERABLE_MARKET_STATUSES = {
-    "CANVAS_NOT_READY",
-    "CANVAS_NOT_VISIBLE",
-    "CANVAS_CAPTURE_INVALID",
-    "OCR_EMPTY",
-    "OCR_FAILED",
-    "ODDS_NOT_FOUND",
-    "ODDS_MAPPING_UNCERTAIN",
-    "ODDS_UNSTABLE",
-    "ELEMENT_NOT_READY",
-    "PAGE_LOADING",
-}
 
 
 class RecoverableDemoError(RuntimeError):
@@ -60,20 +48,12 @@ class DemoEngine:
         self.browser_manager = browser_manager
         self.browser_manager.set_logger(REPOSITORY.log)
         self._authorized_generation = -1
+        self._auth_status = "UNKNOWN"
+        self._budget = DemoBudget()
 
     @property
     def task(self) -> asyncio.Task[None] | None:
         return self._task
-
-    async def report_browser_start_error(self, error: Exception) -> None:
-        await REPOSITORY.log(
-            "BROWSER_START_ERROR",
-            f"{type(error).__name__}: {error}",
-        )
-        await STATE.update(
-            browser=await self.browser_manager.snapshot(),
-            error="Chromium пока не запущен; используйте /api/browser/start для повтора.",
-        )
 
     async def start(self) -> dict[str, Any]:
         async with self._control_lock:
@@ -83,11 +63,16 @@ class DemoEngine:
                 return await STATE.snapshot()
 
             CONFIG.validate()
+            await REPOSITORY.clear_session()
             self._stop_event.clear()
+            self._authorized_generation = -1
+            self._auth_status = "UNKNOWN"
+            self._budget.reset()
             await STATE.reset_for_start(await REPOSITORY.stats())
             await STATE.update(
                 status=DemoStatus.STARTING.value,
                 browser=await self.browser_manager.snapshot(),
+                budget=self._budget.snapshot(),
             )
             await REPOSITORY.log("DEMO_START", "Запущен background DEMO worker")
             self._task = asyncio.create_task(self._run_guarded(), name="demo-worker")
@@ -158,14 +143,12 @@ class DemoEngine:
                 await STATE.update(running=False)
 
     async def _run(self) -> None:
-        backends = await asyncio.to_thread(VISION.backend_status)
-        await REPOSITORY.log("OCR_BACKENDS", str(backends))
-
         while not self._stop_event.is_set():
             try:
                 page = await self.browser_manager.ensure_page()
                 await STATE.update(browser=await self.browser_manager.snapshot())
-                await self._ensure_authorized(page)
+                if not await self._ensure_authorized(page):
+                    continue
                 await self._process_next_match(page)
             except asyncio.CancelledError:
                 raise
@@ -181,22 +164,62 @@ class DemoEngine:
                 )
                 await self._recover("RECOVERING", f"{type(error).__name__}: {error}")
 
-    async def _ensure_authorized(self, page: Page) -> None:
+    async def _ensure_authorized(self, page: Page) -> bool:
         generation = self.browser_manager.generation
         if generation == self._authorized_generation:
-            await STATE.update(auth={"status": "AUTHORIZED_ALREADY"})
-            return
+            await STATE.update(auth={"status": self._auth_status})
+            return True
+
+        async def publish_waiting_status() -> None:
+            await STATE.update(auth={"status": "WAITING_MANUAL_LOGIN"})
+            await self._status(
+                DemoStatus.WAITING_MANUAL_LOGIN,
+                "Браузер открыт. Войдите на сайте вручную.",
+                "WAITING_MANUAL_LOGIN",
+            )
+            await REPOSITORY.log(
+                "WAITING_MANUAL_LOGIN",
+                "Browser is open; waiting for the user to sign in manually",
+            )
+
+        async def publish_authorized_status() -> None:
+            await STATE.update(auth={"status": "AUTHORIZED"})
+            await self._status(
+                DemoStatus.AUTHORIZED,
+                "Авторизация выполнена",
+                "AUTHORIZED",
+            )
+            await REPOSITORY.log(
+                "AUTHORIZED",
+                "Authorized browser session is ready",
+            )
+
         await self._status(DemoStatus.AUTH_CHECK, "Проверяем авторизацию", "AUTH_CHECK")
-        result = await authorize(page, self._stop_event)
+        result = await authorize(
+            page,
+            self._stop_event,
+            publish_waiting_status,
+            publish_authorized_status,
+        )
         if self._stop_event.is_set():
-            return
-        status = result.get("status", "AUTH_NOT_CONFIRMED")
+            return False
+        status = result.get("status", "WAITING_MANUAL_LOGIN")
         await STATE.update(auth={"status": status})
         if not result.get("ok"):
-            raise RecoverableDemoError(status, "Авторизация пока не подтверждена")
+            return False
         self._authorized_generation = generation
-        await self._status(DemoStatus.AUTHORIZED, "Авторизация подтверждена", status)
-        await REPOSITORY.log(status, "Authorized browser session is ready")
+        self._auth_status = status
+        if status == "AUTH_TIMEOUT":
+            await self._status(
+                DemoStatus.AUTH_TIMEOUT,
+                "Авторизация не подтверждена за 40 секунд. Продолжаем работу.",
+                "AUTH_TIMEOUT",
+            )
+            await REPOSITORY.log(
+                "AUTH_TIMEOUT",
+                "RUB was not detected; continuing the existing flow",
+            )
+        return True
 
     async def _process_next_match(self, page: Page) -> None:
         page = await self.browser_manager.ensure_page()
@@ -204,6 +227,24 @@ class DemoEngine:
         await self._status(DemoStatus.OPENING_LEAGUE, "Открываем страницу лиги", "LEAGUE_OPENING")
         await league.open()
         await REPOSITORY.log("LEAGUE_OPENED", CONFIG.league_name)
+        await STATE.update(
+            selected_team=None,
+            selected_side=None,
+            initial_selected_odds=None,
+            other_team=None,
+            selection_reason=None,
+            bet={
+                "step": 0,
+                "max_steps": len(BET_STEPS),
+                "amount": None,
+                "market": "Следующий гол",
+                "odds": None,
+                "score_before": None,
+                "next_goal_number": None,
+                "status": "WAITING",
+            },
+            budget=self._budget.snapshot(),
+        )
 
         selected_match = None
         while selected_match is None and not self._stop_event.is_set():
@@ -276,22 +317,28 @@ class DemoEngine:
             await REPOSITORY.log("MATCH_ALREADY_STARTED", str(error))
             return
         await REPOSITORY.log("MATCH_OPENED", opened["url"])
-        VISION.invalidate_layout()
 
-        snapshot = await self._wait_for_match_start(selected_match)
+        snapshot = await self._wait_for_initial_zero_score(selected_match)
         if snapshot is None:
             return
-        browser = MatchBrowser(await self.browser_manager.ensure_page())
-        initial_odds = await self._wait_for_odds(snapshot)
-        if initial_odds is None:
+        odds_result = await self._wait_for_odds(snapshot, selected_match)
+        if odds_result is None:
             return
-        snapshot = await self._read_fresh_score(browser, selected_match, snapshot)
+        snapshot, initial_odds = odds_result
+        if not can_create_initial_bet(snapshot.score):
+            await REPOSITORY.log(
+                "INITIAL_BET_SKIPPED",
+                f"Счёт изменился до создания первой ставки: {snapshot.score.text()}",
+            )
+            return
         selection = select_team_with_higher_odds(snapshot.team1, snapshot.team2, initial_odds)
         await STATE.update(
             status=DemoStatus.TEAM_SELECTED.value,
             message=f"Выбрана команда {selection.selected_team}: коэффициент выше",
             event="TEAM_SELECTED",
             selected_team=selection.selected_team,
+            selected_side=selection.selected_side.value,
+            initial_selected_odds=selection.selected_odds,
             other_team=selection.other_team,
             selection_reason="HIGHER_ODDS",
             odds=self._odds_state(initial_odds, selection.selected_odds, selection.other_odds),
@@ -308,21 +355,77 @@ class DemoEngine:
             if step == 1:
                 current_odds = initial_odds
             else:
-                current_odds = await self._wait_for_odds(snapshot)
-                if current_odds is None:
+                odds_result = await self._wait_for_odds(snapshot, selected_match)
+                if odds_result is None:
                     return
+                snapshot, current_odds = odds_result
             browser = MatchBrowser(await self.browser_manager.ensure_page())
             snapshot = await self._read_fresh_score(browser, selected_match, snapshot)
+            if step == 1 and not can_create_initial_bet(snapshot.score):
+                await REPOSITORY.log(
+                    "INITIAL_BET_SKIPPED",
+                    f"Счёт изменился до фиксации ставки: {snapshot.score.text()}",
+                )
+                return
+            while (
+                current_odds.next_goal_number
+                != snapshot.score.team1 + snapshot.score.team2 + 1
+            ):
+                await REPOSITORY.log(
+                    "STALE_MARKET_IGNORED",
+                    "Счёт изменился до создания ставки; читаем коэффициент нового гола.",
+                )
+                odds_result = await self._wait_for_odds(snapshot, selected_match)
+                if odds_result is None:
+                    return
+                snapshot, current_odds = odds_result
             selected_odd, opponent_odd = odds_for_selected_side(
                 current_odds, selection.selected_side
             )
             score_before = snapshot.score
             created_at = local_now()
-            bet_id = uuid4().hex
+            bet_id = f"{cycle_id}:{step}:{score_before.text()}"
+            selected_side_label = (
+                "Команда 1" if selection.selected_side == Scorer.TEAM_1 else "Команда 2"
+            )
+            waiting_for_match_start = step == 1 and not snapshot.period
+            active_status = (
+                "WAITING_FOR_MATCH_START" if waiting_for_match_start else "ACTIVE"
+            )
+            active_record = {
+                "id": bet_id,
+                "cycle_id": cycle_id,
+                "match_id": selected_match.get("match_id"),
+                "match": match_name,
+                "selected_team": selection.selected_team,
+                "selected_side": selection.selected_side.value,
+                "side_label": selected_side_label,
+                "step": step,
+                "amount": amount,
+                "odds": selected_odd,
+                "score_before": score_before.text(),
+                "score_after": None,
+                "scorer": None,
+                "result": "ACTIVE",
+                "status": active_status,
+                "settled": False,
+                "market": current_odds.market,
+                "next_goal_number": current_odds.next_goal_number,
+                "created_at": created_at,
+                "resolved_at": None,
+                "budget_before": self._budget.current_budget,
+                "budget_change": None,
+                "budget_after": None,
+            }
+            await REPOSITORY.save_bet(active_record)
             await STATE.update(
-                status=DemoStatus.BET_SIMULATED.value,
+                status=(
+                    DemoStatus.WAITING_FOR_MATCH_START.value
+                    if waiting_for_match_start
+                    else DemoStatus.BET_SIMULATED.value
+                ),
                 message=f"DEMO BET #{step}: {amount} RUB @ {selected_odd}",
-                event="BET_SIMULATED",
+                event="DEMO_BET_CREATED",
                 odds=self._odds_state(current_odds, selected_odd, opponent_odd),
                 bet={
                     "id": bet_id,
@@ -330,44 +433,65 @@ class DemoEngine:
                     "max_steps": len(BET_STEPS),
                     "amount": amount,
                     "selected_team": selection.selected_team,
+                    "selected_side": selection.selected_side.value,
+                    "side_label": selected_side_label,
+                    "match": match_name,
                     "market": current_odds.market,
                     "odds": selected_odd,
                     "score_before": score_before.text(),
                     "next_goal_number": current_odds.next_goal_number,
-                    "status": "WAITING_FOR_NEXT_GOAL",
+                    "status": (
+                        "WAITING_FOR_MATCH_START"
+                        if waiting_for_match_start
+                        else "WAITING_FOR_GOAL"
+                    ),
                     "created_at": created_at,
+                    "budget_before": self._budget.current_budget,
                 },
+                budget=self._budget.snapshot(),
+                stats=await REPOSITORY.stats(),
             )
             await REPOSITORY.log(
-                "BET_SIMULATED",
+                "DEMO_BET_CREATED",
                 f"#{step}: {selection.selected_team}, {amount} RUB @ {selected_odd}, score={score_before.text()}",
             )
+
+            if waiting_for_match_start:
+                started_snapshot = await self._wait_for_match_start(selected_match)
+                if started_snapshot is None:
+                    return
+                await REPOSITORY.log("ACTIVE_BET_RESUMED", f"existing bet_id={bet_id}")
+                current_state = await STATE.snapshot()
+                await STATE.update(
+                    event="ACTIVE_BET_RESUMED",
+                    bet={
+                        **current_state.get("bet", {}),
+                        "status": "WAITING_FOR_GOAL",
+                    },
+                )
 
             goal = await self._wait_for_goal(browser, selected_match, snapshot)
             if goal is None:
                 return
             new_snapshot, scorer = goal
             common_record = {
-                "id": bet_id,
-                "cycle_id": cycle_id,
-                "match_id": selected_match.get("match_id"),
-                "match": match_name,
-                "selected_team": selection.selected_team,
-                "step": step,
-                "amount": amount,
-                "odds": selected_odd,
-                "score_before": score_before.text(),
+                **active_record,
                 "score_after": new_snapshot.score.text(),
-                "market": current_odds.market,
-                "next_goal_number": current_odds.next_goal_number,
-                "created_at": created_at,
                 "resolved_at": local_now(),
+                "status": "SETTLED",
+                "settled": True,
             }
 
             if scorer == Scorer.AMBIGUOUS_SCORE_CHANGE:
                 ambiguous_cycle = True
-                record = await REPOSITORY.add_bet(
-                    {**common_record, "scorer": "Не определён", "result": "AMBIGUOUS"}
+                record = await REPOSITORY.save_bet(
+                    {
+                        **common_record,
+                        "scorer": "Не определён",
+                        "result": "AMBIGUOUS",
+                        "budget_change": 0,
+                        "budget_after": self._budget.current_budget,
+                    }
                 )
                 await REPOSITORY.log(
                     "AMBIGUOUS_SCORE_CHANGE",
@@ -382,6 +506,8 @@ class DemoEngine:
                         "result": "AMBIGUOUS",
                     },
                     stats=await REPOSITORY.stats(),
+                    budget=self._budget.snapshot(),
+                    bet={**record, "max_steps": len(BET_STEPS)},
                 )
                 snapshot = new_snapshot
                 if step < len(BET_STEPS):
@@ -390,20 +516,43 @@ class DemoEngine:
                         f"Неоднозначный score delta; безопасный переход к шагу {step + 1}",
                         "NEXT_STEP",
                     )
+                    await self._publish_pending_bet(
+                        selection,
+                        match_name,
+                        step + 1,
+                        new_snapshot,
+                    )
                 continue
 
             scorer_name = (
                 new_snapshot.team1 if scorer == Scorer.TEAM_1 else new_snapshot.team2
             )
             result = "WIN" if scorer == selection.selected_side else "LOSE"
-            record = await REPOSITORY.add_bet(
-                {**common_record, "scorer": scorer_name, "result": result}
+            budget_change = self._budget.settle(bet_id, result, amount)
+            if budget_change is None:
+                await REPOSITORY.log(
+                    "DEMO_BUDGET_DUPLICATE_IGNORED", f"bet_id={bet_id}"
+                )
+                snapshot = new_snapshot
+                continue
+            record = await REPOSITORY.save_bet(
+                {
+                    **common_record,
+                    "scorer": scorer_name,
+                    "result": result,
+                    **budget_change,
+                }
             )
             await REPOSITORY.log(
                 "SCORE_CHANGED", f"{score_before.text()} → {new_snapshot.score.text()}"
             )
             await REPOSITORY.log("GOAL_DETECTED", scorer_name)
             await REPOSITORY.log(result, selection.selected_team)
+            await REPOSITORY.log(
+                "DEMO_BUDGET",
+                f"result={result} stake={amount} before={budget_change['budget_before']} "
+                f"change={budget_change['budget_change']:+d} after={budget_change['budget_after']}",
+            )
             await STATE.update(
                 status=(DemoStatus.WIN if result == "WIN" else DemoStatus.LOSE).value,
                 message=f"Результат виртуальной ставки: {result}",
@@ -415,6 +564,8 @@ class DemoEngine:
                     "result": result,
                 },
                 stats=await REPOSITORY.stats(),
+                budget=self._budget.snapshot(),
+                bet={**record, "max_steps": len(BET_STEPS)},
             )
             snapshot = new_snapshot
             if result == "WIN":
@@ -423,10 +574,17 @@ class DemoEngine:
                     {"cycle_id": cycle_id, "match": match_name, "result": "WIN", "steps": step}
                 )
                 await REPOSITORY.log("STRATEGY_CYCLE_WON", match_name)
+                await STATE.update(stats=await REPOSITORY.stats())
                 break
             if step < len(BET_STEPS):
                 await self._status(
                     DemoStatus.NEXT_STEP, f"Переход к шагу {step + 1}", "NEXT_STEP"
+                )
+                await self._publish_pending_bet(
+                    selection,
+                    match_name,
+                    step + 1,
+                    new_snapshot,
                 )
 
         if not won and not self._stop_event.is_set():
@@ -441,7 +599,7 @@ class DemoEngine:
             )
             await self._status(
                 DemoStatus.SEQUENCE_EXHAUSTED,
-                "Все 11 шагов исчерпаны",
+                "Все 7 шагов исчерпаны",
                 "SEQUENCE_EXHAUSTED",
                 stats=await REPOSITORY.stats(),
             )
@@ -455,6 +613,39 @@ class DemoEngine:
                 stats=await REPOSITORY.stats(),
             )
             await REPOSITORY.log("RETURNING_TO_LEAGUE", CONFIG.league_url)
+
+    async def _wait_for_initial_zero_score(
+        self, selected_match: dict[str, Any]
+    ) -> ScoreboardSnapshot | None:
+        await self._status(
+            DemoStatus.WAITING_FOR_MATCH_START,
+            "Ожидаем валидный начальный счёт 0:0",
+            "WAITING_FOR_INITIAL_SCORE",
+        )
+        retries = 0
+        while not self._stop_event.is_set():
+            page = await self.browser_manager.ensure_page()
+            try:
+                snapshot = await MatchBrowser(page).snapshot()
+                match_state = "LIVE" if snapshot.period else "UPCOMING"
+                await self._publish_snapshot(snapshot, selected_match, state=match_state)
+                if can_create_initial_bet(snapshot.score):
+                    await REPOSITORY.log(
+                        "PREMATCH_SCORE_READY",
+                        f"{snapshot.score.text()} / {match_state}",
+                    )
+                    return snapshot
+                await REPOSITORY.log(
+                    "INITIAL_SCORE_NOT_ZERO",
+                    f"Первая ставка запрещена при счёте {snapshot.score.text()}",
+                )
+                return None
+            except ScoreReadError as error:
+                retries += 1
+                if retries == 1 or retries % 20 == 0:
+                    await REPOSITORY.log("SCORE_TEMPORARILY_UNAVAILABLE", str(error))
+                await self._sleep_or_stop(CONFIG.score_poll_interval)
+        return None
 
     async def _wait_for_match_start(
         self, selected_match: dict[str, Any]
@@ -473,7 +664,11 @@ class DemoEngine:
                     await self._publish_snapshot(snapshot, selected_match, state="UPCOMING")
                     await self._sleep_or_stop(CONFIG.score_poll_interval)
                     continue
-                await self._publish_snapshot(snapshot, selected_match, state="LIVE")
+                await self._publish_snapshot(
+                    snapshot,
+                    selected_match,
+                    state="LIVE" if snapshot.period else "UPCOMING",
+                )
                 await self._status(
                     DemoStatus.MATCH_STARTED,
                     f"Матч начался: {snapshot.score.text()}",
@@ -488,74 +683,154 @@ class DemoEngine:
                 await self._sleep_or_stop(CONFIG.score_poll_interval)
         return None
 
-    async def _wait_for_odds(self, snapshot: ScoreboardSnapshot):
-        for attempt in range(1, CONFIG.ocr_max_attempts + 1):
-            if self._stop_event.is_set():
-                return None
+    async def _wait_for_odds(
+        self,
+        snapshot: ScoreboardSnapshot,
+        selected_match: dict[str, Any],
+    ):
+        """Wait for current DOM odds without losing the active match or score."""
+        attempt = 0
+        while not self._stop_event.is_set():
+            attempt += 1
+            page = await self.browser_manager.ensure_page()
+            browser = MatchBrowser(page)
+            try:
+                fresh = await browser.snapshot()
+                if fresh.team1 != snapshot.team1 or fresh.team2 != snapshot.team2:
+                    raise RecoverableDemoError(
+                        "SCOREBOARD_TEAMS_CHANGED",
+                        "Порядок или названия команд в scoreboard изменились.",
+                    )
+                snapshot = fresh
+                await self._publish_snapshot(snapshot, selected_match, state="LIVE")
+            except ScoreReadError as error:
+                if attempt == 1 or attempt % 20 == 0:
+                    await REPOSITORY.log("SCORE_TEMPORARILY_UNAVAILABLE", str(error))
+                await self._sleep_or_stop(CONFIG.score_poll_interval)
+                continue
+
+            next_goal_number = snapshot.score.team1 + snapshot.score.team2 + 1
+            if attempt == 1:
+                await REPOSITORY.log(
+                    "MARKET_READING", f"Следующий гол №{next_goal_number}"
+                )
             await self._status(
-                DemoStatus.WAITING_FOR_ODDS,
-                f"OCR attempt {attempt}/{CONFIG.ocr_max_attempts}",
-                "OCR_ATTEMPT",
+                DemoStatus.WAITING_FOR_MARKET,
+                f"Ждём DOM-рынок следующего гола №{next_goal_number}",
+                "WAITING_FOR_MARKET",
             )
             await STATE.update(
-                ocr={
-                    "status": "RUNNING",
+                market_reader={
+                    "source": "DOM / Playwright",
+                    "status": "READING",
                     "attempt": attempt,
-                    "max_attempts": CONFIG.ocr_max_attempts,
+                    "next_goal_number": next_goal_number,
+                },
+                odds={
+                    "selected": None,
+                    "opponent": None,
+                    "team1": None,
+                    "team2": None,
+                    "market": f"Следующий гол №{next_goal_number}",
+                    "source": "DOM_PLAYWRIGHT",
+                    "backend": None,
+                    "confidence": None,
+                    "status": "WAITING_FOR_MARKET",
+                },
+                ocr={
+                    "status": "NOT_USED_FOR_NEXT_GOAL",
+                    "attempt": 0,
+                    "max_attempts": 0,
                     "canvas": None,
                     "engine": None,
                     "latency_seconds": None,
                     "candidates": [],
                     "market_bbox": None,
-                }
-            )
-            await REPOSITORY.log(
-                "OCR_ATTEMPT", f"{attempt}/{CONFIG.ocr_max_attempts}"
+                },
             )
             try:
-                page = await self.browser_manager.ensure_page()
                 async with self._market_lock:
                     odds = await read_next_goal_odds(
-                        page, snapshot.team1, snapshot.team2, REPOSITORY.log
+                        page,
+                        snapshot.team1,
+                        snapshot.team2,
+                        snapshot.score.team1,
+                        snapshot.score.team2,
+                        REPOSITORY.log,
                     )
-                analysis = load_latest_analysis() or {}
-                await self._publish_ocr(analysis, "READY", attempt)
+
+                verified = await browser.snapshot()
+                if verified.team1 != snapshot.team1 or verified.team2 != snapshot.team2:
+                    raise RecoverableDemoError(
+                        "SCOREBOARD_TEAMS_CHANGED",
+                        "Порядок или названия команд в scoreboard изменились.",
+                    )
+                await self._publish_snapshot(
+                    verified,
+                    selected_match,
+                    state="LIVE" if verified.period else "UPCOMING",
+                )
+                if verified.score != snapshot.score:
+                    await REPOSITORY.log(
+                        "SCORE_CHANGED_WHILE_READING_MARKET",
+                        f"{snapshot.score.text()} → {verified.score.text()}; читаем новый N",
+                    )
+                    snapshot = verified
+                    continue
+
+                await STATE.update(
+                    market_reader={
+                        "source": "DOM / Playwright",
+                        "status": "READY",
+                        "attempt": attempt,
+                        "next_goal_number": odds.next_goal_number,
+                    }
+                )
                 await self._status(
                     DemoStatus.ODDS_READY,
-                    f"Коэффициенты готовы: {odds.team1} / {odds.team2}",
+                    f"DOM-коэффициенты готовы: {odds.team1} / {odds.team2}",
                     "ODDS_READY",
                 )
-                return odds
+                return snapshot, odds
             except MarketReadError as error:
-                analysis = error.details.get("analysis") or load_latest_analysis() or {}
-                await self._publish_ocr(analysis, error.status, attempt)
-                event = error.status if error.status in RECOVERABLE_MARKET_STATUSES else "OCR_FAILED"
-                await REPOSITORY.log(event, str(error))
-                if attempt < CONFIG.ocr_max_attempts:
-                    await REPOSITORY.log("OCR_RETRY", f"Следующая попытка {attempt + 1}")
-                    await self._sleep_or_stop(CONFIG.ocr_retry_delay)
-
-        await self._status(
-            DemoStatus.RECOVERING,
-            "Коэффициенты недоступны после серии OCR попыток; возвращаемся к scan",
-            "ODDS_UNAVAILABLE",
-        )
-        await REPOSITORY.log("ODDS_UNAVAILABLE", "OCR attempts exhausted")
+                await STATE.update(
+                    market_reader={
+                        "source": "DOM / Playwright",
+                        "status": error.status,
+                        "attempt": attempt,
+                        "next_goal_number": next_goal_number,
+                    }
+                )
+                if attempt == 1 or attempt % 10 == 0:
+                    await REPOSITORY.log(error.status, str(error))
+                await self._sleep_or_stop(CONFIG.ocr_retry_delay)
         return None
 
-    async def _publish_ocr(
-        self, analysis: dict[str, Any], status: str, attempt: int
+    async def _publish_pending_bet(
+        self,
+        selection,
+        match_name: str,
+        step: int,
+        snapshot: ScoreboardSnapshot,
     ) -> None:
+        side_label = (
+            "Команда 1" if selection.selected_side == Scorer.TEAM_1 else "Команда 2"
+        )
         await STATE.update(
-            ocr={
-                "status": status,
-                "attempt": attempt,
-                "max_attempts": CONFIG.ocr_max_attempts,
-                "canvas": analysis.get("canvas"),
-                "engine": analysis.get("ocr_backend"),
-                "latency_seconds": analysis.get("latency_seconds"),
-                "candidates": [item.get("value") for item in analysis.get("numbers", [])],
-                "market_bbox": analysis.get("market_bbox"),
+            bet={
+                "step": step,
+                "max_steps": len(BET_STEPS),
+                "amount": BET_STEPS[step - 1],
+                "selected_team": selection.selected_team,
+                "selected_side": selection.selected_side.value,
+                "side_label": side_label,
+                "match": match_name,
+                "market": f"Следующий гол №{snapshot.score.team1 + snapshot.score.team2 + 1}",
+                "odds": None,
+                "score_before": snapshot.score.text(),
+                "next_goal_number": snapshot.score.team1 + snapshot.score.team2 + 1,
+                "status": "WAITING_FOR_MARKET",
+                "budget_before": self._budget.current_budget,
             }
         )
 
@@ -575,7 +850,11 @@ class DemoEngine:
                         "SCOREBOARD_TEAMS_CHANGED",
                         "Порядок или названия команд в scoreboard изменились.",
                     )
-                await self._publish_snapshot(current, selected_match, state="LIVE")
+                await self._publish_snapshot(
+                    current,
+                    selected_match,
+                    state="LIVE" if current.period else "UPCOMING",
+                )
                 return current
             except ScoreReadError:
                 if attempt == 0:

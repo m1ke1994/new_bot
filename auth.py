@@ -1,6 +1,7 @@
 import asyncio
-import os
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 from playwright.async_api import Page
@@ -8,686 +9,158 @@ from playwright.async_api import Page
 from xbet_config import get_xbet_url
 
 
-# ============================================================
-# ENV
-# ============================================================
-
 load_dotenv()
 
 SITE_URL = get_xbet_url()
-LOGIN = os.getenv("XBET_LOGIN", "").strip()
-PASSWORD = os.getenv("XBET_PASSWORD", "").strip()
-
-BALANCE_SELECTOR = os.getenv(
-    "XBET_BALANCE_SELECTOR",
-    '[class*="balance"]',
-).strip()
-
-CAPTCHA_SELECTOR = os.getenv(
-    "XBET_CAPTCHA_SELECTOR",
-    ".swal2-popup",
-).strip()
-
-
-# ============================================================
-# SETTINGS
-# ============================================================
+BALANCE_SELECTOR = ".balance__currency"
+BALANCE_CURRENCY = "RUB"
 
 BASE_DIR = Path(__file__).resolve().parent
 PROFILE_DIR = BASE_DIR / "browser_profile"
 
 PAGE_TIMEOUT = 60_000
+MANUAL_LOGIN_POLL_INTERVAL = 2.0
+MANUAL_LOGIN_TIMEOUT = 40.0
+AUTHORIZED_CONTINUE_DELAY = 25.0
+
+WaitingCallback = Callable[[], Awaitable[None]]
 
 
-# ============================================================
-# LOG
-# ============================================================
-
-def log(message: str):
+def log(message: str) -> None:
     print(f"[AUTH] {message}")
 
 
-# ============================================================
-# CHECK ELEMENT
-# ============================================================
-
-async def is_visible(
-    page: Page,
-    selector: str,
-    timeout: int = 3000,
-) -> bool:
-
-    try:
-        locator = page.locator(selector).first
-
-        await locator.wait_for(
-            state="visible",
-            timeout=timeout,
-        )
-
-        return True
-
-    except Exception:
-        return False
-
-
-# ============================================================
-# CHECK BALANCE
-# ============================================================
-
 async def check_balance(page: Page) -> bool:
-
-    log("Проверяем баланс...")
-
-    if await is_visible(
-        page,
-        BALANCE_SELECTOR,
-        timeout=2500,
-    ):
-        log("Баланс найден.")
-        log("Пользователь авторизован.")
-
-        return True
-
-    log("Баланс НЕ найден.")
-
+    """Confirm authorization only by .balance__currency with exact RUB text."""
+    try:
+        currencies = page.locator(BALANCE_SELECTOR)
+        for index in range(await currencies.count()):
+            text = await currencies.nth(index).text_content()
+            if text and text.strip() == BALANCE_CURRENCY:
+                return True
+    except Exception:
+        pass
     return False
 
 
-# ============================================================
-# OPEN SITE
-# ============================================================
+async def open_site(page: Page, url: str = SITE_URL) -> None:
+    """Open only the configured site; login remains entirely manual."""
+    if not url:
+        raise RuntimeError("XBET_URL отсутствует в .env")
 
-async def open_site(page: Page):
-
-    log(f"Открываем сайт: {SITE_URL}")
-
+    log(f"Открываем сайт: {url}")
     await page.goto(
-        SITE_URL,
+        url,
         wait_until="domcontentloaded",
         timeout=PAGE_TIMEOUT,
     )
-
-    log("Сайт открыт.")
-
-    # Ждём загрузку интерфейса сайта.
     await page.wait_for_timeout(3000)
-
-
-# ============================================================
-# OPEN LOGIN
-# ============================================================
-
-async def open_login(page: Page):
-
-    log("Ищем кнопку «Вход»...")
-
-    selectors = [
-        'span.ui-caption:has-text("Вход")',
-        'button:has-text("Вход")',
-        'a:has-text("Вход")',
-        'text="Вход"',
-    ]
-
-    for selector in selectors:
-
-        try:
-            button = page.locator(selector).first
-
-            await button.wait_for(
-                state="visible",
-                timeout=1200,
-            )
-
-            log(f"Кнопка найдена: {selector}")
-
-            await button.click()
-
-            log("Нажали «Вход».")
-
-            await page.wait_for_timeout(1500)
-
-            return
-
-        except Exception:
-            continue
-
-    raise RuntimeError(
-        "Не удалось найти кнопку «Вход»."
-    )
-
-
-# ============================================================
-# FIND LOGIN FORM
-# ============================================================
-
-async def find_login_form(page: Page):
-
-    log("Ищем модальное окно авторизации...")
-
-    selectors = [
-        '[role="dialog"]',
-        '[class*="auth-form"]',
-        '.auth-form',
-        '[class*="modal"]',
-        '.modal',
-    ]
-
-    for selector in selectors:
-
-        try:
-            containers = page.locator(selector)
-
-            count = await containers.count()
-
-            for i in range(count):
-
-                container = containers.nth(i)
-
-                try:
-                    if not await container.is_visible():
-                        continue
-
-                    inputs = container.locator("input")
-
-                    input_count = await inputs.count()
-
-                    visible_count = 0
-
-                    for x in range(input_count):
-
-                        try:
-                            if await inputs.nth(x).is_visible():
-                                visible_count += 1
-                        except Exception:
-                            pass
-
-                    if visible_count >= 2:
-
-                        log(
-                            f"Форма найдена. "
-                            f"Видимых input: {visible_count}"
-                        )
-
-                        return container
-
-                except Exception:
-                    continue
-
-        except Exception:
-            continue
-
-    raise RuntimeError(
-        "Модальное окно авторизации "
-        "с двумя input не найдено."
-    )
-
-
-# ============================================================
-# GET INPUTS
-# ============================================================
-
-async def get_inputs(container):
-
-    inputs = container.locator("input")
-
-    count = await inputs.count()
-
-    visible_inputs = []
-
-    for i in range(count):
-
-        locator = inputs.nth(i)
-
-        try:
-
-            if await locator.is_visible():
-                visible_inputs.append(locator)
-
-        except Exception:
-            continue
-
-    if len(visible_inputs) < 2:
-
-        raise RuntimeError(
-            "Не найдено два видимых поля ввода."
-        )
-
-    login_input = visible_inputs[0]
-    password_input = visible_inputs[1]
-
-    return login_input, password_input
-
-
-# ============================================================
-# FILL FIELD
-# ============================================================
-
-async def fill_field(
-    locator,
-    value: str,
-    field_name: str,
-):
-
-    await locator.wait_for(
-        state="visible",
-        timeout=5000,
-    )
-
-    await locator.click()
-
-    await locator.fill("")
-
-    await locator.fill(value)
-
-    try:
-        current_value = await locator.input_value()
-    except Exception:
-        current_value = ""
-
-    if current_value == value:
-
-        log(f"{field_name} заполнен.")
-
-        return
-
-    log(
-        f"{field_name}: обычный fill не подтвердился."
-    )
-
-    await locator.click()
-
-    await locator.press("Control+A")
-    await locator.press("Backspace")
-
-    await locator.type(
-        value,
-        delay=50,
-    )
-
-    current_value = await locator.input_value()
-
-    if current_value != value:
-
-        raise RuntimeError(
-            f"Не удалось заполнить {field_name}."
-        )
-
-    log(f"{field_name} заполнен.")
-
-
-# ============================================================
-# FILL LOGIN + PASSWORD
-# ============================================================
-
-async def fill_credentials(container):
-
-    if not LOGIN:
-
-        raise RuntimeError(
-            "XBET_LOGIN отсутствует в .env"
-        )
-
-    if not PASSWORD:
-
-        raise RuntimeError(
-            "XBET_PASSWORD отсутствует в .env"
-        )
-
-    login_input, password_input = (
-        await get_inputs(container)
-    )
-
-    log(
-        "Первый input найден → ID / E-mail."
-    )
-
-    await fill_field(
-        login_input,
-        LOGIN,
-        "LOGIN",
-    )
-
-    log(
-        "Второй input найден → пароль."
-    )
-
-    await fill_field(
-        password_input,
-        PASSWORD,
-        "PASSWORD",
-    )
-
-
-# ============================================================
-# CLICK "ВОЙТИ"
-# ============================================================
-
-async def submit_login(container):
-
-    log("Ищем кнопку «Войти»...")
-
-    selectors = [
-        'button:has-text("Войти")',
-        'button:has-text("Вход")',
-        'button[type="submit"]',
-        'input[type="submit"]',
-    ]
-
-    for selector in selectors:
-
-        try:
-
-            button = container.locator(
-                selector
-            ).first
-
-            await button.wait_for(
-                state="visible",
-                timeout=3000,
-            )
-
-            log(
-                f"Кнопка найдена: {selector}"
-            )
-
-            await button.click()
-
-            log("Нажали «Войти».")
-
-            return
-
-        except Exception:
-            continue
-
-    raise RuntimeError(
-        "Кнопка «Войти» не найдена."
-    )
-
-
-# ============================================================
-# CAPTCHA
-# ============================================================
-
-async def check_captcha(page: Page) -> bool:
-
-    log("Проверяем CAPTCHA...")
-
-    if await is_visible(
-        page,
-        CAPTCHA_SELECTOR,
-        timeout=5000,
-    ):
-
-        log("CAPTCHA найдена.")
-
+    log("Сайт открыт")
+
+
+async def _wait_poll_interval(
+    stop_event: asyncio.Event | None,
+    timeout: float,
+) -> bool:
+    """Wait for the next check and return False when a stop was requested."""
+    if stop_event is None:
+        await asyncio.sleep(timeout)
         return True
 
-    extra_selectors = [
-        'text=/captcha/i',
-        'text=/капч/i',
-        'text=/Подтвердите/i',
-        'text=/проверку/i',
-    ]
-
-    for selector in extra_selectors:
-
-        if await is_visible(
-            page,
-            selector,
-            timeout=1000,
-        ):
-
-            log("CAPTCHA / проверка найдена.")
-
-            return True
-
-    log("CAPTCHA не найдена.")
-
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=timeout)
+    except TimeoutError:
+        return True
     return False
 
 
-# ============================================================
-# WAIT MANUAL CAPTCHA
-# ============================================================
+async def wait_for_manual_login(
+    page: Page,
+    stop_event: asyncio.Event | None = None,
+    on_authorized: WaitingCallback | None = None,
+) -> dict[str, Any]:
+    """Observe RUB for at most 40 seconds without touching the login form."""
+    started_at = asyncio.get_running_loop().time()
 
-async def wait_manual_captcha(page: Page, stop_event: asyncio.Event | None = None):
-
-    print()
-    print("=" * 60)
-    print("CAPTCHA НАЙДЕНА")
-    print("Пройди CAPTCHA вручную в браузере.")
-    print("=" * 60)
-    print()
-
-    while True:
-
+    while asyncio.get_running_loop().time() - started_at < MANUAL_LOGIN_TIMEOUT:
         if stop_event is not None and stop_event.is_set():
-            return False
-
-        if await check_balance(page):
-
-            print()
-            print("=" * 60)
-            print("АВТОРИЗАЦИЯ УСПЕШНА")
-            print("=" * 60)
-            print()
-
-            return True
-
-        if stop_event is None:
-            await asyncio.sleep(2)
-        else:
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=2)
-            except TimeoutError:
-                pass
-
-
-# ============================================================
-# AUTH
-# ============================================================
-
-async def authorize(page: Page, stop_event: asyncio.Event | None = None):
-
-    # --------------------------------------------------------
-    # 1. Открываем сайт
-    # --------------------------------------------------------
-
-    await open_site(page)
-
-    # --------------------------------------------------------
-    # 2. Проверяем баланс ДО входа
-    # --------------------------------------------------------
-
-    for attempt in range(1, 4):
-        if await check_balance(page):
-            return {
-                "ok": True,
-                "status": "AUTHORIZED_ALREADY",
-            }
-        if attempt < 3:
-            log(f"AUTH_CHECK_RETRY {attempt}/3")
-            await page.wait_for_timeout(700)
-
-    # --------------------------------------------------------
-    # 3. Баланса нет → ищем Вход
-    # --------------------------------------------------------
-
-    log(
-        "Авторизация отсутствует. "
-        "Переходим к форме входа."
-    )
-
-    login_error = None
-    for attempt in range(1, 4):
-        if await check_balance(page):
-            return {"ok": True, "status": "AUTHORIZED_ALREADY"}
-        try:
-            await open_login(page)
-            login_error = None
-            break
-        except RuntimeError as error:
-            login_error = error
-            log(f"AUTH_CHECK_RETRY {attempt}/3: {error}")
-            await page.wait_for_timeout(700)
-    if login_error is not None:
-        return {"ok": False, "status": "LOGIN_BUTTON_NOT_READY"}
-
-    # --------------------------------------------------------
-    # 4. Ищем модальное окно
-    # --------------------------------------------------------
-
-    container = await find_login_form(page)
-
-    # --------------------------------------------------------
-    # 5. Заполняем первый и второй input
-    # --------------------------------------------------------
-
-    await fill_credentials(container)
-
-    # --------------------------------------------------------
-    # 6. Нажимаем Войти
-    # --------------------------------------------------------
-
-    await submit_login(container)
-
-    # --------------------------------------------------------
-    # 7. Ждём ответ сайта
-    # --------------------------------------------------------
-
-    log("Ждём результат авторизации...")
-
-    await page.wait_for_timeout(3000)
-
-    # --------------------------------------------------------
-    # 8. Снова проверяем баланс
-    # --------------------------------------------------------
-
-    if await check_balance(page):
-
-        print()
-        print("=" * 60)
-        print("АВТОРИЗАЦИЯ УСПЕШНА")
-        print("=" * 60)
-        print()
-
-        return {
-            "ok": True,
-            "status": "AUTHORIZED",
-        }
-
-    # --------------------------------------------------------
-    # 9. Баланса нет
-    # --------------------------------------------------------
-
-    log(
-        "После отправки формы "
-        "баланс не появился."
-    )
-
-    # --------------------------------------------------------
-    # 10. Ищем CAPTCHA
-    # --------------------------------------------------------
-
-    if await check_captcha(page):
-
-        completed = await wait_manual_captcha(page, stop_event)
-
-        if not completed:
             return {"ok": False, "status": "AUTH_STOPPED"}
 
-        return {
-            "ok": True,
-            "status": "AUTHORIZED_AFTER_CAPTCHA",
-        }
+        if page.is_closed():
+            raise RuntimeError("Страница Chromium была закрыта во время ручного входа")
 
-    # --------------------------------------------------------
-    # 11. Нет ни баланса, ни CAPTCHA
-    # --------------------------------------------------------
+        if await check_balance(page):
+            log("Обнаружен .balance__currency = RUB")
+            log("Авторизация подтверждена")
+            if on_authorized is not None:
+                await on_authorized()
+            log("Продолжаем работу программы")
+            return {"ok": True, "status": "AUTHORIZED"}
 
-    print()
-    print("=" * 60)
-    print("АВТОРИЗАЦИЯ НЕ ПОДТВЕРЖДЕНА")
-    print("Баланс не найден.")
-    print("CAPTCHA не найдена.")
-    print("=" * 60)
-    print()
+        elapsed = asyncio.get_running_loop().time() - started_at
+        remaining = MANUAL_LOGIN_TIMEOUT - elapsed
+        if remaining <= 0:
+            break
+        if not await _wait_poll_interval(
+            stop_event,
+            min(MANUAL_LOGIN_POLL_INTERVAL, remaining),
+        ):
+            break
 
-    return {
-        "ok": False,
-        "status": "AUTH_NOT_CONFIRMED",
-    }
+    if stop_event is not None and stop_event.is_set():
+        return {"ok": False, "status": "AUTH_STOPPED"}
+
+    log("Таймаут ожидания ручной авторизации: 40 секунд")
+    log("RUB не обнаружен")
+    log("Продолжаем выполнение программы")
+    return {"ok": True, "status": "AUTH_TIMEOUT"}
 
 
-# ============================================================
-# MAIN
-# ============================================================
+async def authorize(
+    page: Page,
+    stop_event: asyncio.Event | None = None,
+    on_waiting: WaitingCallback | None = None,
+    on_authorized: WaitingCallback | None = None,
+) -> dict[str, Any]:
+    """Open XBET_URL and apply the bounded manual-authorization flow."""
+    await open_site(page)
+    log("Проверяем авторизацию")
 
-async def main():
+    if await check_balance(page):
+        log("Найден .balance__currency = RUB")
+        log("Пользователь авторизован")
+        if on_authorized is not None:
+            await on_authorized()
+        log("Ожидание перед продолжением: 25 секунд")
+        if not await _wait_poll_interval(stop_event, AUTHORIZED_CONTINUE_DELAY):
+            return {"ok": False, "status": "AUTH_STOPPED"}
+        log("Продолжаем работу программы")
+        return {"ok": True, "status": "AUTHORIZED"}
 
-    if not SITE_URL:
+    log("RUB не найден")
+    log("Ожидаем ручную авторизацию, максимум 40 секунд")
+    if on_waiting is not None:
+        await on_waiting()
 
-        raise RuntimeError(
-            "XBET_URL отсутствует в .env"
-        )
+    return await wait_for_manual_login(page, stop_event, on_authorized)
 
-    print()
-    print("=" * 60)
-    print("PLAYWRIGHT AUTH")
-    print("=" * 60)
-    print()
 
+async def main() -> None:
     from backend.app.browser.manager import BROWSER_MANAGER
 
     page = await BROWSER_MANAGER.start()
     try:
-
-            result = await authorize(page)
-
-            print()
-            print("=" * 60)
-            print("RESULT")
-            print("=" * 60)
-            print(result)
-            print("=" * 60)
-            print()
-
-            print(
-                "Браузер оставлен открытым."
-            )
-
-            print(
-                "Нажми ENTER в консоли для завершения."
-            )
-
+        result = await authorize(page)
+        print(result)
+        if result.get("status") == "AUTHORIZED":
+            print("Авторизация выполнена. Нажмите ENTER для завершения.")
             await asyncio.to_thread(input)
-
-    except Exception as error:
-
-            print()
-            print("=" * 60)
-            print("ОШИБКА")
-            print("=" * 60)
-            print(error)
-            print("=" * 60)
-            print()
-
-            print(
-                "Браузер оставлен открытым "
-                "для диагностики."
-            )
-
+        elif result.get("status") == "AUTH_TIMEOUT":
+            print("Ожидание авторизации завершено. Нажмите ENTER для завершения.")
             await asyncio.to_thread(input)
-
     finally:
-        # Standalone script termination is an explicit application shutdown.
         await BROWSER_MANAGER.stop()
 
-
-# ============================================================
-# START
-# ============================================================
 
 if __name__ == "__main__":
     asyncio.run(main())
