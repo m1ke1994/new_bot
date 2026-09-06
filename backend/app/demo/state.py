@@ -113,6 +113,29 @@ class DemoStateStore:
                 updated_at=utc_now(),
             )
 
+    async def reset_after_database_clear(
+        self,
+        *,
+        browser: dict[str, Any],
+        budget: dict[str, Any],
+        strategy_config: dict[str, Any],
+        sequence: dict[str, Any],
+        stats: dict[str, Any],
+    ) -> None:
+        async with self._lock:
+            self._state = initial_state()
+            self._state.update(
+                browser=deepcopy(browser),
+                budget=deepcopy(budget),
+                strategy_config=deepcopy(strategy_config),
+                sequence=deepcopy(sequence),
+                stats=deepcopy(stats),
+                status=DemoStatus.STOPPED.value,
+                message="База данных очищена",
+                event="DATABASE_CLEARED",
+                updated_at=utc_now(),
+            )
+
     async def restore(self, *, budget: dict[str, Any], strategy_config: dict[str, Any], sequence: dict[str, Any], stats: dict[str, Any]) -> None:
         async with self._lock:
             self._state.update(

@@ -2,7 +2,12 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from backend.app.demo.engine import ENGINE
+from backend.app.demo.engine import (
+    BrowserStartError,
+    DatabaseClearBlockedError,
+    ENGINE,
+    HistoryClearBlockedError,
+)
 from backend.app.demo.history import REPOSITORY
 from backend.app.demo.state import STATE
 
@@ -12,7 +17,13 @@ router = APIRouter(prefix="/api/demo", tags=["demo"])
 
 @router.post("/start")
 async def start_demo():
-    return await ENGINE.start()
+    try:
+        return await ENGINE.start()
+    except BrowserStartError as error:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": error.code, "message": str(error)},
+        ) from error
 
 
 @router.post("/stop")
@@ -50,7 +61,29 @@ async def demo_state():
 
 @router.get("/history")
 async def demo_history(limit: int = Query(default=500, ge=1, le=5000)):
-    return {"items": await REPOSITORY.history(limit)}
+    return {"items": await REPOSITORY.history(limit, mode="DEMO")}
+
+
+@router.delete("/history")
+async def clear_demo_history():
+    try:
+        return await ENGINE.clear_history()
+    except HistoryClearBlockedError as error:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": error.code, "message": str(error)},
+        ) from error
+
+
+@router.delete("/database")
+async def clear_demo_database():
+    try:
+        return await ENGINE.clear_database()
+    except DatabaseClearBlockedError as error:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": error.code, "message": str(error)},
+        ) from error
 
 
 @router.get("/logs")

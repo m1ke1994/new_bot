@@ -38,31 +38,65 @@ class BrowserManager:
         if self.context is None or self._context_closed:
             return False
         try:
+            browser = self.context.browser
+            if browser is not None and not browser.is_connected():
+                return False
             self.context.pages
         except Exception:
             return False
         return True
 
+    async def _discard_stale_context_locked(self) -> None:
+        context = self.context
+        self._mark_context_closed()
+        if context is not None:
+            try:
+                await context.close()
+            except Exception:
+                pass
+
+    async def _recover_page_locked(self, error: Exception | None = None) -> Page:
+        if error is not None:
+            await self._log(
+                "BROWSER_STALE_RUNTIME",
+                f"Discarding stale browser context: {type(error).__name__}: {error}",
+            )
+        await self._discard_stale_context_locked()
+        return await self._launch_locked(recovered=True)
+
     async def start(self) -> Page:
         async with self.lock:
             if self._context_is_alive():
-                page = await self._ensure_page_locked()
+                try:
+                    page = await self._ensure_page_locked()
+                except Exception as error:
+                    return await self._recover_page_locked(error)
                 await self._log("BROWSER_ALREADY_RUNNING", "Persistent Chromium уже запущен")
                 return page
+            if self.context is not None:
+                return await self._recover_page_locked()
             return await self._launch_locked(recovered=False)
 
     async def ensure_browser(self) -> BrowserContext:
         async with self.lock:
             if not self._context_is_alive():
-                await self._launch_locked(recovered=self.playwright is not None)
+                if self.context is not None:
+                    await self._recover_page_locked()
+                else:
+                    await self._launch_locked(recovered=self.playwright is not None)
             assert self.context is not None
             return self.context
 
     async def ensure_page(self) -> Page:
         async with self.lock:
             if not self._context_is_alive():
+                if self.context is not None:
+                    return await self._recover_page_locked()
                 return await self._launch_locked(recovered=True)
-            return await self._ensure_page_locked()
+            try:
+                return await self._ensure_page_locked()
+            except Exception as error:
+                return await self._recover_page_locked(error)
 
     async def _launch_locked(self, *, recovered: bool) -> Page:
         PROFILE_DIR.mkdir(parents=True, exist_ok=True)
@@ -125,7 +159,10 @@ class BrowserManager:
 
     async def snapshot(self) -> dict[str, str]:
         context_open = self._context_is_alive()
-        page_open = bool(self.page is not None and not self.page.is_closed())
+        try:
+            page_open = bool(context_open and self.page is not None and not self.page.is_closed())
+        except Exception:
+            page_open = False
         return {
             "status": "OPEN" if context_open else "CLOSED",
             "context": "OPEN" if context_open else "CLOSED",

@@ -140,18 +140,69 @@ class DemoRepository:
     async def add_bet(self, item: dict[str, Any]) -> dict[str, Any]:
         return await self.save_bet(item)
 
-    async def history(self, limit: int = 500) -> list[dict[str, Any]]:
+    async def history(self, limit: int = 500, mode: str | None = None) -> list[dict[str, Any]]:
         await self.initialize()
         async with self._lock:
             with self._connection() as db:
-                rows = db.execute("SELECT payload FROM bet_history ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
-        return list(reversed([json.loads(row["payload"]) for row in rows]))
+                rows = db.execute("SELECT payload FROM bet_history ORDER BY created_at DESC").fetchall()
+        items = [json.loads(row["payload"]) for row in rows]
+        if mode is not None:
+            expected_mode = mode.strip().upper()
+            items = [
+                item
+                for item in items
+                if str(item.get("mode") or "DEMO").upper() == expected_mode
+            ]
+        return list(reversed(items[:limit]))
 
-    async def active_bet(self) -> dict[str, Any] | None:
-        for item in reversed(await self.history(5000)):
+    async def active_bet(self, mode: str = "DEMO") -> dict[str, Any] | None:
+        expected_mode = mode.strip().upper()
+        for item in reversed(await self.history(5000, mode=expected_mode)):
             if item.get("result") == "ACTIVE":
                 return item
         return None
+
+    async def clear_bet_history(self, mode: str = "DEMO") -> int:
+        """Delete only bet rows for one executor mode; keep config, budget and logs."""
+        expected_mode = mode.strip().upper()
+        await self.initialize()
+        async with self._lock:
+            with self._connection() as db:
+                rows = db.execute("SELECT id, payload FROM bet_history").fetchall()
+                bet_ids = [
+                    row["id"]
+                    for row in rows
+                    if str(json.loads(row["payload"]).get("mode") or "DEMO").upper()
+                    == expected_mode
+                ]
+                if bet_ids:
+                    db.executemany("DELETE FROM bet_history WHERE id=?", ((bet_id,) for bet_id in bet_ids))
+        return len(bet_ids)
+
+    async def reset_database(self) -> None:
+        """Reset all DEMO persistence while keeping the SQLite schema in place."""
+        await self.initialize()
+        now = local_now()
+        async with self._lock:
+            with self._connection() as db:
+                db.execute("DELETE FROM bet_history")
+                db.execute("DELETE FROM logs")
+                db.execute("DELETE FROM cycles")
+                db.execute("DELETE FROM strategy_config")
+                db.execute("DELETE FROM budget_state")
+                db.execute("DELETE FROM sequence_state")
+                db.execute(
+                    "INSERT INTO strategy_config VALUES (1, ?, ?, ?)",
+                    (json.dumps(DEFAULT_STRATEGY_CONFIG.to_dict()), now, now),
+                )
+                db.execute(
+                    "INSERT INTO budget_state VALUES (1, ?, ?, ?, ?)",
+                    (str(DEMO_START_BUDGET), str(DEMO_START_BUDGET), "0.00", now),
+                )
+                db.execute(
+                    "INSERT INTO sequence_state VALUES (1, ?, 1, 'WAITING_FOR_MATCH', '0.00', '0.00', NULL, NULL, ?)",
+                    (uuid4().hex, now),
+                )
 
     async def log(self, event: str, message: str) -> dict[str, Any]:
         await self.initialize()
@@ -178,7 +229,7 @@ class DemoRepository:
         return record
 
     async def stats(self) -> dict[str, Any]:
-        bets, cycles = await self.history(5000), []
+        bets, cycles = await self.history(5000, mode="DEMO"), []
         await self.initialize()
         async with self._lock:
             with self._connection() as db:

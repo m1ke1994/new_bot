@@ -39,6 +39,18 @@ class RecoverableDemoError(RuntimeError):
         self.status = status
 
 
+class BrowserStartError(RuntimeError):
+    code = "BROWSER_START_FAILED"
+
+
+class HistoryClearBlockedError(RuntimeError):
+    code = "HISTORY_CLEAR_BLOCKED_ACTIVE_BET"
+
+
+class DatabaseClearBlockedError(RuntimeError):
+    code = "DATABASE_CLEAR_BLOCKED_ACTIVE_BET"
+
+
 def local_now() -> str:
     return datetime.now().astimezone().isoformat()
 
@@ -64,10 +76,18 @@ class DemoEngine:
         budget = await REPOSITORY.get_budget()
         self._budget.restore(budget["initial_budget"], budget["current_budget"])
         sequence = await REPOSITORY.get_sequence()
-        active = await REPOSITORY.active_bet()
+        active = await REPOSITORY.active_bet("DEMO")
         if active is not None:
             # An interrupted ACTIVE bet is retained as history and never duplicated.
             sequence = await REPOSITORY.save_sequence(status="RECOVERY_REQUIRED")
+        elif sequence["status"] == "RECOVERY_REQUIRED":
+            # LIVE used the same singleton sequence in an older build. Once LIVE
+            # is removed, its orphaned recovery marker must not block DEMO.
+            sequence = await REPOSITORY.reset_sequence()
+            await REPOSITORY.log(
+                "STALE_RECOVERY_CLEARED",
+                "RECOVERY_REQUIRED had no ACTIVE DEMO bet; DEMO runtime was reset",
+            )
         await STATE.restore(budget=budget, strategy_config=config_data, sequence=sequence, stats=await REPOSITORY.stats())
         if active is not None:
             await STATE.update(status=DemoStatus.RECOVERING.value, message="ACTIVE ставка ожидает ручной reconciliation после рестарта", bet={**active, "max_steps": self._config.max_steps})
@@ -91,16 +111,75 @@ class DemoEngine:
         await STATE.update(status=DemoStatus.STOPPED.value, event="SEQUENCE_RESET", message="Новая серия готова")
         return await STATE.snapshot()
 
+    async def clear_history(self) -> dict[str, Any]:
+        async with self._control_lock:
+            worker_running = self._task is not None and not self._task.done()
+            active = await REPOSITORY.active_bet("DEMO")
+            if worker_running or active is not None:
+                await REPOSITORY.log(
+                    HistoryClearBlockedError.code,
+                    "DEMO history clear rejected while worker or ACTIVE bet exists",
+                )
+                raise HistoryClearBlockedError(
+                    "Остановите worker и завершите ACTIVE DEMO-ставку перед очисткой истории."
+                )
+            deleted = await REPOSITORY.clear_bet_history("DEMO")
+            stats = await REPOSITORY.stats()
+            await STATE.update(stats=stats)
+            await REPOSITORY.log("HISTORY_CLEARED", f"Удалено DEMO-ставок: {deleted}")
+            return {
+                "ok": True,
+                "deleted": deleted,
+                "items": [],
+                "state": await STATE.snapshot(),
+            }
+
+    async def clear_database(self) -> dict[str, Any]:
+        async with self._control_lock:
+            worker_running = self._task is not None and not self._task.done()
+            active = await REPOSITORY.active_bet("DEMO")
+            if worker_running or active is not None:
+                await REPOSITORY.log(
+                    DatabaseClearBlockedError.code,
+                    "Database clear rejected while worker or ACTIVE DEMO bet exists",
+                )
+                raise DatabaseClearBlockedError(
+                    "Остановите worker и завершите ACTIVE DEMO-ставку перед очисткой базы."
+                )
+            await REPOSITORY.reset_database()
+            config_data = await REPOSITORY.get_config()
+            self._config = StrategyConfig.from_payload(config_data)
+            budget = await REPOSITORY.get_budget()
+            self._budget.restore(budget["initial_budget"], budget["current_budget"])
+            sequence = await REPOSITORY.get_sequence()
+            stats = await REPOSITORY.stats()
+            await STATE.reset_after_database_clear(
+                browser=await self.browser_manager.snapshot(),
+                budget=budget,
+                strategy_config=config_data,
+                sequence=sequence,
+                stats=stats,
+            )
+            await REPOSITORY.log("DATABASE_CLEARED", "DEMO SQLite reset to initial state")
+            return {
+                "ok": True,
+                "items": [],
+                "state": await STATE.snapshot(),
+            }
+
     @property
     def task(self) -> asyncio.Task[None] | None:
         return self._task
 
     async def start(self) -> dict[str, Any]:
         async with self._control_lock:
+            await REPOSITORY.log("DEMO_START_REQUEST", "Получен запрос запуска DEMO")
             if self._task is not None and not self._task.done():
                 await REPOSITORY.log("DEMO_ALREADY_RUNNING", "Второй worker не создан")
                 await STATE.update(event="DEMO_ALREADY_RUNNING")
                 return await STATE.snapshot()
+            if self._task is not None and self._task.done():
+                self._task = None
 
             CONFIG.validate()
             await self.restore()
@@ -116,8 +195,31 @@ class DemoEngine:
             self._authorized_generation = -1
             self._auth_status = "UNKNOWN"
             await REPOSITORY.save_sequence(status="WAITING_FOR_MATCH")
+            await STATE.reset_for_start(await REPOSITORY.stats())
+            try:
+                await REPOSITORY.log("BROWSER_STARTING", "Проверяем Playwright/browser/context/page")
+                await self.browser_manager.ensure_page()
+            except Exception as error:
+                trace = traceback.format_exc()
+                await REPOSITORY.log(
+                    BrowserStartError.code,
+                    f"{type(error).__name__}: {error}\n{trace}",
+                )
+                await REPOSITORY.log("DEMO_START_FAILED", f"{type(error).__name__}: {error}")
+                await STATE.update(
+                    running=False,
+                    status=DemoStatus.ERROR.value,
+                    message="Не удалось запустить браузер для DEMO",
+                    error=f"{type(error).__name__}: {error}",
+                    event=BrowserStartError.code,
+                    browser=await self.browser_manager.snapshot(),
+                )
+                raise BrowserStartError(str(error)) from error
+            await REPOSITORY.log("BROWSER_OPENED", "Playwright browser/context/page готовы")
             await STATE.update(
                 status=DemoStatus.STARTING.value,
+                message="Запуск DEMO worker",
+                event="DEMO_START",
                 browser=await self.browser_manager.snapshot(),
                 budget=self._budget.snapshot(),
                 strategy_config=(await REPOSITORY.get_config()),
@@ -125,9 +227,13 @@ class DemoEngine:
             )
             await REPOSITORY.log("DEMO_START", "Запущен background DEMO worker")
             self._task = asyncio.create_task(self._run_guarded(), name="demo-worker")
+            await REPOSITORY.log("WORKER_STARTED", "Создан единственный asyncio DEMO worker")
+            await REPOSITORY.log("DEMO_RUNNING", "DEMO worker и Playwright запущены")
+            await STATE.update(event="DEMO_RUNNING", message="DEMO worker запущен")
             return await STATE.snapshot()
 
     async def stop(self) -> dict[str, Any]:
+        await REPOSITORY.log("DEMO_STOP_REQUEST", "Получен запрос остановки DEMO")
         async with self._control_lock:
             self._stop_event.set()
             task = self._task
@@ -143,6 +249,7 @@ class DemoEngine:
         async with self._control_lock:
             if self._task is task:
                 self._task = None
+        await REPOSITORY.log("WORKER_STOPPED", "asyncio DEMO worker остановлен")
         await REPOSITORY.log("DEMO_STOP", "DEMO worker остановлен; browser не закрывался")
         await STATE.update(
             running=False,
