@@ -370,6 +370,7 @@ async def read_next_goal_odds(
         )
 
     values: dict[int, float] = {}
+    target_buttons: dict[int, Any] = {}
     locked_sides: set[int] = set()
     buttons = target_group.locator(MARKET_BUTTON_SELECTOR)
     for index in range(await buttons.count()):
@@ -393,6 +394,7 @@ async def read_next_goal_odds(
             continue
         try:
             values[side] = parse_dom_odds(await value_locator.inner_text())
+            target_buttons[side] = button
         except ValueError:
             continue
 
@@ -425,4 +427,6 @@ async def read_next_goal_odds(
         source="DOM_PLAYWRIGHT",
         ocr_backend=None,
         confidence=None,
+        team1_locator=target_buttons[1],
+        team2_locator=target_buttons[2],
     )

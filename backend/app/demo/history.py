@@ -162,6 +162,33 @@ class DemoRepository:
                 return item
         return None
 
+    async def verified_active_live_bet(self) -> dict[str, Any] | None:
+        for item in reversed(await self.history(5000, mode="LIVE")):
+            if item.get("result") == "ACTIVE" and item.get("placement_confirmed_at"):
+                return item
+        return None
+
+    async def unresolved_live_submission(self) -> dict[str, Any] | None:
+        unresolved_statuses = {
+            "LIVE_MARKET_SELECTED",
+            "LIVE_COUPON_OPENED",
+            "LIVE_AMOUNT_FILLED",
+            "LIVE_AMOUNT_VERIFIED",
+            "READY_FOR_MANUAL_CONFIRMATION",
+            "AWAITING_PLACEMENT_RESULT",
+            "BET_PLACED",
+            "ACTIVE",
+        }
+        for item in reversed(await self.history(5000, mode="LIVE")):
+            if item.get("result") == "SUBMISSION_UNKNOWN":
+                return item
+            if (
+                item.get("result") == "PENDING"
+                and item.get("status") in unresolved_statuses
+            ):
+                return item
+        return None
+
     async def clear_bet_history(self, mode: str = "DEMO") -> int:
         """Delete only bet rows for one executor mode; keep config, budget and logs."""
         expected_mode = mode.strip().upper()
@@ -234,6 +261,7 @@ class DemoRepository:
         async with self._lock:
             with self._connection() as db:
                 cycles = [json.loads(row["payload"]) for row in db.execute("SELECT payload FROM cycles").fetchall()]
+        cycles = [item for item in cycles if str(item.get("mode") or "DEMO").upper() == "DEMO"]
         settled = [item for item in bets if item.get("result") in {"WIN", "LOSE"}]
         odds = [float(item["odds"]) for item in settled if item.get("odds") is not None]
         wins = [item for item in settled if item["result"] == "WIN"]

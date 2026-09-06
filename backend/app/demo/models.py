@@ -83,6 +83,15 @@ class NextGoalOdds:
     source: str = "DOM_PLAYWRIGHT"
     ocr_backend: str | None = None
     confidence: float | None = None
+    team1_locator: Any | None = None
+    team2_locator: Any | None = None
+
+    def locator_for_side(self, side: Scorer) -> Any | None:
+        if side == Scorer.TEAM_1:
+            return self.team1_locator
+        if side == Scorer.TEAM_2:
+            return self.team2_locator
+        return None
 
 
 @dataclass(frozen=True)
@@ -92,3 +101,28 @@ class TeamSelection:
     selected_odds: float
     other_team: str
     other_odds: float
+
+
+@dataclass
+class CurrentSeries:
+    """Fixed match/team identity shared by every bet in one strategy series."""
+
+    cycle_id: str
+    match_id: str | None
+    match_url: str | None
+    team_1: str
+    team_2: str
+    selected_team: str
+    selected_side: Scorer
+    current_step: int
+    status: str = "ACTIVE"
+
+    def assert_identity(self, match_id: str | None, selected_team: str) -> None:
+        if match_id != self.match_id:
+            raise AssertionError(
+                f"SERIES_MATCH_CHANGED: {self.match_id!r} -> {match_id!r}"
+            )
+        if selected_team != self.selected_team:
+            raise AssertionError(
+                f"SERIES_TEAM_CHANGED: {self.selected_team!r} -> {selected_team!r}"
+            )

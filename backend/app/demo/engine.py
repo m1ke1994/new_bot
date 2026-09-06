@@ -15,21 +15,28 @@ from backend.app.browser.manager import BROWSER_MANAGER, BrowserManager
 from backend.app.browser.market import MarketReadError, market_canvas_debug, read_next_goal_odds
 from backend.app.browser.match import MatchBrowser
 from backend.app.browser.scoreboard import ScoreReadError
+from backend.app.live.executor import LiveExecutor
+from backend.app.live.models import (
+    ActiveLiveBet,
+    LiveDecision,
+    LivePreparationError,
+    LiveStatus,
+    PendingLiveBet,
+    PlacementObservation,
+)
 
 from .budget import DemoBudget
 from .config import CONFIG
 from .history import REPOSITORY
-from .models import DemoStatus, Scorer, ScoreboardSnapshot
+from .models import CurrentSeries, DemoStatus, Scorer, ScoreboardSnapshot
 from .state import STATE
 from .strategy import (
     DEFAULT_STRATEGY_CONFIG,
-    ScoreProgression,
     StrategyConfig,
     can_create_initial_bet,
     detect_scorer,
     odds_for_selected_side,
     select_team_with_higher_odds,
-    validate_score_progression,
 )
 
 
@@ -51,6 +58,10 @@ class DatabaseClearBlockedError(RuntimeError):
     code = "DATABASE_CLEAR_BLOCKED_ACTIVE_BET"
 
 
+class ModeConflictError(RuntimeError):
+    pass
+
+
 def local_now() -> str:
     return datetime.now().astimezone().isoformat()
 
@@ -67,6 +78,12 @@ class DemoEngine:
         self._auth_status = "UNKNOWN"
         self._budget = DemoBudget()
         self._config = DEFAULT_STRATEGY_CONFIG
+        self._mode = "DEMO"
+        self.live_executor = LiveExecutor(REPOSITORY.log)
+        self._pending_live_bet: PendingLiveBet | None = None
+        self._active_live_bet: ActiveLiveBet | None = None
+        self._live_attempt_counter = 0
+        self._current_series: CurrentSeries | None = None
 
     async def restore(self) -> None:
         """Hydrate the in-memory dashboard from durable storage after a restart."""
@@ -76,7 +93,10 @@ class DemoEngine:
         budget = await REPOSITORY.get_budget()
         self._budget.restore(budget["initial_budget"], budget["current_budget"])
         sequence = await REPOSITORY.get_sequence()
-        active = await REPOSITORY.active_bet("DEMO")
+        active_demo = await REPOSITORY.active_bet("DEMO")
+        active_live = await REPOSITORY.verified_active_live_bet()
+        unresolved_live = await REPOSITORY.unresolved_live_submission()
+        active = active_demo or active_live or unresolved_live
         if active is not None:
             # An interrupted ACTIVE bet is retained as history and never duplicated.
             sequence = await REPOSITORY.save_sequence(status="RECOVERY_REQUIRED")
@@ -90,7 +110,12 @@ class DemoEngine:
             )
         await STATE.restore(budget=budget, strategy_config=config_data, sequence=sequence, stats=await REPOSITORY.stats())
         if active is not None:
-            await STATE.update(status=DemoStatus.RECOVERING.value, message="ACTIVE ставка ожидает ручной reconciliation после рестарта", bet={**active, "max_steps": self._config.max_steps})
+            await STATE.update(
+                mode=str(active.get("mode") or "DEMO").upper(),
+                status=DemoStatus.RECOVERING.value,
+                message="Ставка или LIVE-отправка ожидает reconciliation после рестарта",
+                bet={**active, "max_steps": self._config.max_steps},
+            )
 
     async def save_strategy_config(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self._task is not None and not self._task.done():
@@ -137,7 +162,7 @@ class DemoEngine:
     async def clear_database(self) -> dict[str, Any]:
         async with self._control_lock:
             worker_running = self._task is not None and not self._task.done()
-            active = await REPOSITORY.active_bet("DEMO")
+            active = await REPOSITORY.active_bet("DEMO") or await REPOSITORY.active_bet("LIVE")
             if worker_running or active is not None:
                 await REPOSITORY.log(
                     DatabaseClearBlockedError.code,
@@ -171,12 +196,21 @@ class DemoEngine:
     def task(self) -> asyncio.Task[None] | None:
         return self._task
 
-    async def start(self) -> dict[str, Any]:
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    async def start(self, mode: str = "DEMO") -> dict[str, Any]:
+        requested_mode = mode.strip().upper()
+        if requested_mode not in {"DEMO", "LIVE"}:
+            raise ValueError(f"Неизвестный режим: {mode}")
         async with self._control_lock:
-            await REPOSITORY.log("DEMO_START_REQUEST", "Получен запрос запуска DEMO")
+            await REPOSITORY.log(f"{requested_mode}_START_REQUEST", f"Получен запрос запуска {requested_mode}")
             if self._task is not None and not self._task.done():
-                await REPOSITORY.log("DEMO_ALREADY_RUNNING", "Второй worker не создан")
-                await STATE.update(event="DEMO_ALREADY_RUNNING")
+                if self._mode != requested_mode:
+                    raise ModeConflictError(f"Уже запущен режим {self._mode}.")
+                await REPOSITORY.log(f"{requested_mode}_ALREADY_RUNNING", "Второй worker не создан")
+                await STATE.update(event=f"{requested_mode}_ALREADY_RUNNING")
                 return await STATE.snapshot()
             if self._task is not None and self._task.done():
                 self._task = None
@@ -184,6 +218,14 @@ class DemoEngine:
             CONFIG.validate()
             await self.restore()
             sequence = await REPOSITORY.get_sequence()
+            if requested_mode == "LIVE":
+                unresolved_live = await REPOSITORY.verified_active_live_bet()
+                if unresolved_live is None:
+                    unresolved_live = await REPOSITORY.unresolved_live_submission()
+                if unresolved_live is not None:
+                    raise ModeConflictError(
+                        "Найдена незавершённая LIVE-ставка или отправка; повторный запуск заблокирован."
+                    )
             if sequence["status"] in {"SEQUENCE_EXHAUSTED", "RECOVERY_REQUIRED"}:
                 await STATE.update(
                     status=DemoStatus.SEQUENCE_EXHAUSTED.value if sequence["status"] == "SEQUENCE_EXHAUSTED" else DemoStatus.RECOVERING.value,
@@ -194,6 +236,12 @@ class DemoEngine:
             self._stop_event.clear()
             self._authorized_generation = -1
             self._auth_status = "UNKNOWN"
+            self._mode = requested_mode
+            self._current_series = None
+            if requested_mode == "LIVE":
+                self.live_executor.reset()
+                self._pending_live_bet = None
+                self._active_live_bet = None
             await REPOSITORY.save_sequence(status="WAITING_FOR_MATCH")
             await STATE.reset_for_start(await REPOSITORY.stats())
             try:
@@ -205,11 +253,14 @@ class DemoEngine:
                     BrowserStartError.code,
                     f"{type(error).__name__}: {error}\n{trace}",
                 )
-                await REPOSITORY.log("DEMO_START_FAILED", f"{type(error).__name__}: {error}")
+                await REPOSITORY.log(
+                    f"{requested_mode}_START_FAILED",
+                    f"{type(error).__name__}: {error}",
+                )
                 await STATE.update(
                     running=False,
                     status=DemoStatus.ERROR.value,
-                    message="Не удалось запустить браузер для DEMO",
+                    message=f"Не удалось запустить браузер для {requested_mode}",
                     error=f"{type(error).__name__}: {error}",
                     event=BrowserStartError.code,
                     browser=await self.browser_manager.snapshot(),
@@ -218,22 +269,26 @@ class DemoEngine:
             await REPOSITORY.log("BROWSER_OPENED", "Playwright browser/context/page готовы")
             await STATE.update(
                 status=DemoStatus.STARTING.value,
-                message="Запуск DEMO worker",
-                event="DEMO_START",
+                mode=requested_mode,
+                message=f"Запуск {requested_mode} worker",
+                event=f"{requested_mode}_START",
                 browser=await self.browser_manager.snapshot(),
                 budget=self._budget.snapshot(),
                 strategy_config=(await REPOSITORY.get_config()),
                 sequence=(await REPOSITORY.get_sequence()),
             )
-            await REPOSITORY.log("DEMO_START", "Запущен background DEMO worker")
-            self._task = asyncio.create_task(self._run_guarded(), name="demo-worker")
-            await REPOSITORY.log("WORKER_STARTED", "Создан единственный asyncio DEMO worker")
-            await REPOSITORY.log("DEMO_RUNNING", "DEMO worker и Playwright запущены")
-            await STATE.update(event="DEMO_RUNNING", message="DEMO worker запущен")
+            await REPOSITORY.log(f"{requested_mode}_START", f"Запущен background {requested_mode} worker")
+            self._task = asyncio.create_task(self._run_guarded(), name=f"{requested_mode.lower()}-worker")
+            await REPOSITORY.log("WORKER_STARTED", f"Создан единственный asyncio {requested_mode} worker")
+            await REPOSITORY.log(f"{requested_mode}_RUNNING", f"{requested_mode} worker и Playwright запущены")
+            await STATE.update(event=f"{requested_mode}_RUNNING", message=f"{requested_mode} worker запущен")
             return await STATE.snapshot()
 
-    async def stop(self) -> dict[str, Any]:
-        await REPOSITORY.log("DEMO_STOP_REQUEST", "Получен запрос остановки DEMO")
+    async def stop(self, mode: str | None = None) -> dict[str, Any]:
+        if mode is not None and self._task is not None and not self._task.done() and self._mode != mode.upper():
+            raise ModeConflictError(f"Сейчас запущен режим {self._mode}.")
+        current_mode = self._mode
+        await REPOSITORY.log(f"{current_mode}_STOP_REQUEST", f"Получен запрос остановки {current_mode}")
         async with self._control_lock:
             self._stop_event.set()
             task = self._task
@@ -249,12 +304,12 @@ class DemoEngine:
         async with self._control_lock:
             if self._task is task:
                 self._task = None
-        await REPOSITORY.log("WORKER_STOPPED", "asyncio DEMO worker остановлен")
-        await REPOSITORY.log("DEMO_STOP", "DEMO worker остановлен; browser не закрывался")
+        await REPOSITORY.log("WORKER_STOPPED", f"asyncio {current_mode} worker остановлен")
+        await REPOSITORY.log(f"{current_mode}_STOP", f"{current_mode} worker остановлен; browser не закрывался")
         await STATE.update(
             running=False,
             status=DemoStatus.STOPPED.value,
-            message="Демо остановлено",
+            message=f"{current_mode} остановлен",
             event="STOPPED",
             browser=await self.browser_manager.snapshot(),
         )
@@ -289,7 +344,7 @@ class DemoEngine:
             await STATE.update(
                 running=False,
                 status=DemoStatus.ERROR.value,
-                message="DEMO worker остановлен из-за fatal error",
+                message=f"{self._mode} worker остановлен из-за fatal error",
                 error=f"{type(error).__name__}: {error}",
                 event="FATAL_ERROR",
                 browser=await self.browser_manager.snapshot(),
@@ -504,7 +559,7 @@ class DemoEngine:
             "TEAM_SELECTED", f"{selection.selected_team} @ {selection.selected_odds} / HIGHER_ODDS"
         )
         await REPOSITORY.save_sequence(
-            status="ACTIVE",
+            status="PENDING" if self._mode == "LIVE" else "ACTIVE",
             current_match_id=selected_match.get("match_id"),
             selected_team=selection.selected_team,
         )
@@ -512,14 +567,37 @@ class DemoEngine:
         won = False
         ambiguous_cycle = False
         start_step = int(sequence["current_step"])
-        previous_settlement_score = None
+        self._current_series = CurrentSeries(
+            cycle_id=cycle_id,
+            match_id=selected_match.get("match_id"),
+            match_url=selected_match.get("url"),
+            team_1=snapshot.team1,
+            team_2=snapshot.team2,
+            selected_team=selection.selected_team,
+            selected_side=selection.selected_side,
+            current_step=start_step,
+        )
         if sequence["status"] == "SEQUENCE_EXHAUSTED":
             await self._status(DemoStatus.SEQUENCE_EXHAUSTED, "Серия исчерпана; выполните явный сброс", "SEQUENCE_EXHAUSTED")
             return
         for step in range(start_step, self._config.max_steps + 1):
+            self._current_series.assert_identity(
+                selected_match.get("match_id"), selection.selected_team
+            )
+            self._current_series.current_step = step
             amount = float(self._config.stakes[step - 1])
             if self._stop_event.is_set():
                 return
+            if self._mode == "LIVE":
+                self._pending_live_bet = PendingLiveBet(
+                    decision_id=f"{selected_match.get('match_id')}_{selection.selected_side.value}_step{step}",
+                    match_id=str(selected_match.get("match_id") or cycle_id),
+                    team=selection.selected_team,
+                    side=selection.selected_side,
+                    strategy_step=step,
+                    amount=amount,
+                    target_goal_number=snapshot.score.team1 + snapshot.score.team2 + 1,
+                )
             if step == 1:
                 current_odds = initial_odds
             else:
@@ -527,19 +605,13 @@ class DemoEngine:
                 if odds_result is None:
                     return
                 snapshot, current_odds = odds_result
-                if previous_settlement_score is not None and validate_score_progression(
-                    previous_settlement_score, snapshot.score, expected_goals=0
-                ) != ScoreProgression.UNCHANGED:
-                    await self._skip_match_for_missed_event(selected_match, step, snapshot)
-                    return
             browser = MatchBrowser(await self.browser_manager.ensure_page())
             snapshot = await self._read_fresh_score(browser, selected_match, snapshot)
             if step == 1 and not can_create_initial_bet(snapshot.score):
                 await REPOSITORY.log(
-                    "INITIAL_BET_SKIPPED",
-                    f"Счёт изменился до фиксации ставки: {snapshot.score.text()}",
+                    "SCORE_CHANGED_BEFORE_BET",
+                    f"Счёт изменился до ставки: {snapshot.score.text()}; сохраняем матч, команду и шаг 1",
                 )
-                return
             while (
                 current_odds.next_goal_number
                 != snapshot.score.team1 + snapshot.score.team2 + 1
@@ -567,6 +639,7 @@ class DemoEngine:
             )
             active_record = {
                 "id": bet_id,
+                "mode": self._mode,
                 "cycle_id": cycle_id,
                 "match_id": selected_match.get("match_id"),
                 "match": match_name,
@@ -590,15 +663,36 @@ class DemoEngine:
                 "budget_change": None,
                 "budget_after": None,
             }
+            if self._mode == "LIVE":
+                placement = await self._prepare_live_until_placed(
+                    browser=browser,
+                    selected_match=selected_match,
+                    selection=selection,
+                    match_name=match_name,
+                    cycle_id=cycle_id,
+                    step=step,
+                    amount=amount,
+                    snapshot=snapshot,
+                    current_odds=current_odds,
+                    record=active_record,
+                )
+                if placement is None:
+                    return
+                active_record, snapshot, current_odds, selected_odd, opponent_odd = placement
+                score_before = snapshot.score
+                created_at = active_record["created_at"]
+                bet_id = active_record["id"]
+                waiting_for_match_start = step == 1 and not snapshot.period
+                active_status = "WAITING_FOR_MATCH_START" if waiting_for_match_start else "ACTIVE"
             await REPOSITORY.save_bet(active_record)
             await STATE.update(
                 status=(
                     DemoStatus.WAITING_FOR_MATCH_START.value
                     if waiting_for_match_start
-                    else DemoStatus.BET_SIMULATED.value
+                    else (LiveStatus.ACTIVE.value if self._mode == "LIVE" else DemoStatus.BET_SIMULATED.value)
                 ),
-                message=f"DEMO BET #{step}: {amount} RUB @ {selected_odd}",
-                event="DEMO_BET_CREATED",
+                message=f"{self._mode} BET #{step}: {amount} RUB @ {selected_odd}",
+                event=f"{self._mode}_BET_CREATED",
                 odds=self._odds_state(current_odds, selected_odd, opponent_odd),
                 bet={
                     "id": bet_id,
@@ -619,13 +713,17 @@ class DemoEngine:
                         else "WAITING_FOR_GOAL"
                     ),
                     "created_at": created_at,
-                    "budget_before": float(self._budget.current_budget),
+                    "budget_before": (
+                        float(self._budget.current_budget)
+                        if self._mode == "DEMO"
+                        else None
+                    ),
                 },
                 budget=self._budget.snapshot(),
                 stats=await REPOSITORY.stats(),
             )
             await REPOSITORY.log(
-                "DEMO_BET_CREATED",
+                f"{self._mode}_BET_CREATED",
                 f"#{step}: {selection.selected_team}, {amount} RUB @ {selected_odd}, score={score_before.text()}",
             )
 
@@ -643,6 +741,16 @@ class DemoEngine:
                     },
                 )
 
+            if self._mode == "LIVE" and (
+                self._active_live_bet is None
+                or self._active_live_bet.attempt_id != bet_id
+                or self._active_live_bet.strategy_step != step
+            ):
+                await REPOSITORY.log(
+                    "LIVE_SETTLEMENT_BLOCKED",
+                    "Изменение счёта нельзя оценивать без подтверждённой ACTIVE LIVE-ставки",
+                )
+                return
             goal = await self._wait_for_goal(browser, selected_match, snapshot)
             if goal is None:
                 return
@@ -683,20 +791,51 @@ class DemoEngine:
                     bet={**record, "max_steps": self._config.max_steps},
                 )
                 snapshot = new_snapshot
-                await self._skip_match_for_missed_event(selected_match, step, new_snapshot)
-                return
+                if self._mode == "LIVE":
+                    self._active_live_bet = None
+                if step < self._config.max_steps:
+                    next_step = step + 1
+                    self._current_series.assert_identity(
+                        selected_match.get("match_id"), selection.selected_team
+                    )
+                    self._current_series.current_step = next_step
+                    await REPOSITORY.save_sequence(
+                        current_step=next_step,
+                        status="ACTIVE",
+                    )
+                    await self._status(
+                        DemoStatus.NEXT_STEP,
+                        f"Неоднозначный score delta; остаёмся в том же матче, шаг {next_step}",
+                        "NEXT_STEP",
+                    )
+                    await self._publish_pending_bet(
+                        selection,
+                        match_name,
+                        next_step,
+                        new_snapshot,
+                    )
+                continue
 
             scorer_name = (
                 new_snapshot.team1 if scorer == Scorer.TEAM_1 else new_snapshot.team2
             )
             result = "WIN" if scorer == selection.selected_side else "LOSE"
-            budget_change = self._budget.settle(bet_id, result, amount, selected_odd)
-            if budget_change is None:
-                await REPOSITORY.log(
-                    "DEMO_BUDGET_DUPLICATE_IGNORED", f"bet_id={bet_id}"
-                )
-                snapshot = new_snapshot
-                continue
+            if self._mode == "DEMO":
+                budget_change = self._budget.settle(bet_id, result, amount, selected_odd)
+                if budget_change is None:
+                    await REPOSITORY.log(
+                        "DEMO_BUDGET_DUPLICATE_IGNORED", f"bet_id={bet_id}"
+                    )
+                    snapshot = new_snapshot
+                    continue
+            else:
+                budget_change = {
+                    "budget_before": None,
+                    "gross_return": None,
+                    "pnl": 0.0,
+                    "budget_change": None,
+                    "budget_after": None,
+                }
             record = await REPOSITORY.save_bet(
                 {
                     **common_record,
@@ -705,29 +844,31 @@ class DemoEngine:
                     **budget_change,
                 }
             )
-            await REPOSITORY.save_budget(self._budget.snapshot())
-            sequence_after_result = await REPOSITORY.get_sequence()
-            sequence_pnl = Decimal(str(sequence_after_result["cumulative_pnl"])) + Decimal(str(budget_change["pnl"]))
-            sequence_losses = Decimal(str(sequence_after_result["cumulative_losses"]))
-            if result == "LOSE":
-                sequence_losses += Decimal(str(amount))
-            await REPOSITORY.save_sequence(
-                cumulative_pnl=str(sequence_pnl.quantize(Decimal("0.01"))),
-                cumulative_losses=str(sequence_losses.quantize(Decimal("0.01"))),
-            )
+            if self._mode == "DEMO":
+                await REPOSITORY.save_budget(self._budget.snapshot())
+                sequence_after_result = await REPOSITORY.get_sequence()
+                sequence_pnl = Decimal(str(sequence_after_result["cumulative_pnl"])) + Decimal(str(budget_change["pnl"]))
+                sequence_losses = Decimal(str(sequence_after_result["cumulative_losses"]))
+                if result == "LOSE":
+                    sequence_losses += Decimal(str(amount))
+                await REPOSITORY.save_sequence(
+                    cumulative_pnl=str(sequence_pnl.quantize(Decimal("0.01"))),
+                    cumulative_losses=str(sequence_losses.quantize(Decimal("0.01"))),
+                )
             await REPOSITORY.log(
                 "SCORE_CHANGED", f"{score_before.text()} → {new_snapshot.score.text()}"
             )
             await REPOSITORY.log("GOAL_DETECTED", scorer_name)
             await REPOSITORY.log(result, selection.selected_team)
-            await REPOSITORY.log(
-                "DEMO_BUDGET",
-                f"result={result} stake={amount} before={budget_change['budget_before']} "
-                f"change={budget_change['budget_change']:+.2f} after={budget_change['budget_after']}",
-            )
+            if self._mode == "DEMO":
+                await REPOSITORY.log(
+                    "DEMO_BUDGET",
+                    f"result={result} stake={amount} before={budget_change['budget_before']} "
+                    f"change={budget_change['budget_change']:+.2f} after={budget_change['budget_after']}",
+                )
             await STATE.update(
                 status=(DemoStatus.WIN if result == "WIN" else DemoStatus.LOSE).value,
-                message=f"Результат виртуальной ставки: {result}",
+                message=f"Результат {'виртуальной' if self._mode == 'DEMO' else 'LIVE'} ставки: {result}",
                 event=result,
                 last_change={
                     "before": record["score_before"],
@@ -741,17 +882,28 @@ class DemoEngine:
                 bet={**record, "max_steps": self._config.max_steps},
             )
             snapshot = new_snapshot
+            if self._mode == "LIVE":
+                self._active_live_bet = None
             if result == "WIN":
                 won = True
+                self._current_series.assert_identity(
+                    selected_match.get("match_id"), selection.selected_team
+                )
+                self._current_series.status = "FINISHED"
                 await REPOSITORY.add_cycle(
-                    {"cycle_id": cycle_id, "match": match_name, "result": "WIN", "steps": step}
+                    {"cycle_id": cycle_id, "match": match_name, "mode": self._mode, "result": "WIN", "steps": step}
                 )
                 await REPOSITORY.log("STRATEGY_CYCLE_WON", match_name)
                 await REPOSITORY.reset_sequence()
                 await STATE.update(stats=await REPOSITORY.stats(), sequence=await REPOSITORY.get_sequence())
+                self._current_series = None
                 break
             if step < self._config.max_steps:
                 next_step = step + 1
+                self._current_series.assert_identity(
+                    selected_match.get("match_id"), selection.selected_team
+                )
+                self._current_series.current_step = next_step
                 await REPOSITORY.save_sequence(
                     current_step=next_step,
                     status="ACTIVE",
@@ -759,10 +911,13 @@ class DemoEngine:
                 )
                 # Read the scoreboard again before exposing/creating the next bet.
                 fresh_after_settlement = await self._read_fresh_score(browser, selected_match, new_snapshot)
-                if validate_score_progression(new_snapshot.score, fresh_after_settlement.score, expected_goals=0) != ScoreProgression.UNCHANGED:
-                    await self._skip_match_for_missed_event(selected_match, next_step, fresh_after_settlement)
-                    return
-                previous_settlement_score = new_snapshot.score
+                if fresh_after_settlement.score != new_snapshot.score:
+                    await REPOSITORY.log(
+                        "SCORE_CHANGED_WITHOUT_ACTIVE_BET",
+                        f"{new_snapshot.score.text()} → {fresh_after_settlement.score.text()}; "
+                        f"match/team/step сохранены, следующий гол пересчитан",
+                    )
+                snapshot = fresh_after_settlement
                 await self._status(
                     DemoStatus.NEXT_STEP, f"Переход к шагу {next_step}", "NEXT_STEP"
                 )
@@ -770,14 +925,20 @@ class DemoEngine:
                     selection,
                     match_name,
                     next_step,
-                    new_snapshot,
+                    snapshot,
                 )
 
         if not won and not self._stop_event.is_set():
+            if self._current_series is not None:
+                self._current_series.assert_identity(
+                    selected_match.get("match_id"), selection.selected_team
+                )
+                self._current_series.status = "SEQUENCE_EXHAUSTED"
             await REPOSITORY.add_cycle(
                 {
                     "cycle_id": cycle_id,
                     "match": match_name,
+                    "mode": self._mode,
                     "result": "SEQUENCE_EXHAUSTED",
                     "steps": self._config.max_steps,
                     "had_ambiguous": ambiguous_cycle,
@@ -791,6 +952,7 @@ class DemoEngine:
             )
             await REPOSITORY.log("SEQUENCE_EXHAUSTED", match_name)
             await REPOSITORY.save_sequence(current_step=self._config.max_steps, status="SEQUENCE_EXHAUSTED", current_match_id=selected_match.get("match_id"))
+            self._current_series = None
 
         if not self._stop_event.is_set():
             await self._status(
@@ -889,6 +1051,8 @@ class DemoEngine:
                         "Порядок или названия команд в scoreboard изменились.",
                     )
                 snapshot = fresh
+                if self._mode == "LIVE" and self._pending_live_bet is not None:
+                    self._pending_live_bet = self._pending_live_bet.with_score(snapshot.score)
                 await self._publish_snapshot(snapshot, selected_match, state="LIVE")
             except ScoreReadError as error:
                 if attempt == 1 or attempt % 20 == 0:
@@ -991,6 +1155,308 @@ class DemoEngine:
                 if attempt == 1 or attempt % 10 == 0:
                     await REPOSITORY.log(error.status, str(error))
                 await self._sleep_or_stop(CONFIG.ocr_retry_delay)
+        return None
+
+    async def _prepare_live_until_placed(
+        self,
+        *,
+        browser: MatchBrowser,
+        selected_match: dict[str, Any],
+        selection: Any,
+        match_name: str,
+        cycle_id: str,
+        step: int,
+        amount: float,
+        snapshot: ScoreboardSnapshot,
+        current_odds: Any,
+        record: dict[str, Any],
+    ):
+        """Prepare one strategy decision until the user places it or stops LIVE."""
+        while not self._stop_event.is_set():
+            assert self._pending_live_bet is not None
+            self._pending_live_bet = self._pending_live_bet.with_score(snapshot.score)
+            target_goal = self._pending_live_bet.target_goal_number
+            if current_odds.next_goal_number != target_goal:
+                odds_result = await self._wait_for_odds(snapshot, selected_match)
+                if odds_result is None:
+                    return None
+                snapshot, current_odds = odds_result
+                continue
+
+            selected_odd, opponent_odd = odds_for_selected_side(
+                current_odds, selection.selected_side
+            )
+            coefficient_locator = current_odds.locator_for_side(selection.selected_side)
+            placement_snapshot = snapshot
+            self._live_attempt_counter += 1
+            attempt_id = (
+                f"{self._pending_live_bet.decision_id}_goal{target_goal}_"
+                f"attempt{self._live_attempt_counter}_{uuid4().hex[:8]}"
+            )
+            attempt_record = {
+                **record,
+                "id": attempt_id,
+                "attempt_id": attempt_id,
+                "decision_id": self._pending_live_bet.decision_id,
+                "mode": "LIVE",
+                "cycle_id": cycle_id,
+                "match_id": selected_match.get("match_id"),
+                "match": match_name,
+                "selected_team": selection.selected_team,
+                "selected_side": selection.selected_side.value,
+                "step": step,
+                "amount": amount,
+                "odds": selected_odd,
+                "score_before": placement_snapshot.score.text(),
+                "market": current_odds.market,
+                "next_goal_number": target_goal,
+                "result": "PENDING",
+                "status": LiveStatus.IDLE.value,
+                "settled": False,
+                "created_at": local_now(),
+                "resolved_at": None,
+                "budget_before": None,
+                "budget_change": None,
+                "budget_after": None,
+            }
+            decision = LiveDecision(
+                attempt_id=attempt_id,
+                match_id=str(selected_match.get("match_id") or cycle_id),
+                team=selection.selected_team,
+                side=selection.selected_side,
+                strategy_step=step,
+                amount=amount,
+                goal_number=target_goal,
+                coefficient=selected_odd,
+                coefficient_locator=coefficient_locator,
+            )
+            await REPOSITORY.save_bet(attempt_record)
+
+            async def publish_live(status: LiveStatus, message: str) -> None:
+                attempt_record["status"] = status.value
+                await REPOSITORY.save_bet(attempt_record)
+                await STATE.update(
+                    mode="LIVE",
+                    status=status.value,
+                    message=message,
+                    event=status.value,
+                    odds=self._odds_state(current_odds, selected_odd, opponent_odd),
+                    bet={**attempt_record, "max_steps": self._config.max_steps},
+                )
+
+            try:
+                page = await self.browser_manager.ensure_page()
+                await self.live_executor.prepare(page, decision, publish_live)
+                fresh = await self._read_fresh_score(browser, selected_match, placement_snapshot)
+                clicked = await self.live_executor.manual_click_seen(attempt_id)
+                if fresh.score != placement_snapshot.score and not clicked:
+                    await self._invalidate_live_attempt(
+                        attempt_record,
+                        decision,
+                        f"Счёт изменился {placement_snapshot.score.text()} → {fresh.score.text()} до подтверждения.",
+                        publish_live,
+                    )
+                    snapshot = fresh
+                    odds_result = await self._wait_for_odds(snapshot, selected_match)
+                    if odds_result is None:
+                        return None
+                    snapshot, current_odds = odds_result
+                    continue
+
+                observation, latest = await self._wait_for_live_confirmation_or_score(
+                    page,
+                    browser,
+                    selected_match,
+                    placement_snapshot,
+                    decision,
+                    publish_live,
+                )
+                if observation is None:
+                    attempt_record.update(
+                        result=(
+                            "SUBMISSION_UNKNOWN"
+                            if await self.live_executor.manual_click_seen(attempt_id)
+                            else "NOT_PLACED"
+                        ),
+                        status=self.live_executor.state(attempt_id).value,
+                        resolved_at=local_now(),
+                    )
+                    await REPOSITORY.save_bet(attempt_record)
+                    return None
+                if not observation.placed:
+                    await self._invalidate_live_attempt(
+                        attempt_record,
+                        decision,
+                        observation.signal,
+                        publish_live,
+                    )
+                    snapshot = latest or await self._read_fresh_score(
+                        browser, selected_match, placement_snapshot
+                    )
+                    odds_result = await self._wait_for_odds(snapshot, selected_match)
+                    if odds_result is None:
+                        return None
+                    snapshot, current_odds = odds_result
+                    continue
+            except LivePreparationError as error:
+                attempt_record.update(
+                    result="NOT_PLACED",
+                    status=error.status,
+                    settled=True,
+                    resolved_at=local_now(),
+                    error=str(error),
+                )
+                await REPOSITORY.save_bet(attempt_record)
+                await REPOSITORY.log(error.status, str(error))
+                if self.live_executor.market_was_selected(attempt_id):
+                    await STATE.update(
+                        mode="LIVE",
+                        running=False,
+                        status=LiveStatus.ERROR.value,
+                        event=error.status,
+                        message=(
+                            "Подготовка LIVE остановлена после открытия coupon, "
+                            "чтобы не создать повторную ставку."
+                        ),
+                        error=str(error),
+                        bet={**attempt_record, "max_steps": self._config.max_steps},
+                    )
+                    self._stop_event.set()
+                    return None
+                fresh = await self._read_fresh_score(browser, selected_match, snapshot)
+                snapshot = fresh
+                await self._sleep_or_stop(CONFIG.ocr_retry_delay)
+                odds_result = await self._wait_for_odds(snapshot, selected_match)
+                if odds_result is None:
+                    return None
+                snapshot, current_odds = odds_result
+                continue
+
+            # Only goals observed after the bookmaker has explicitly confirmed
+            # placement may settle a LIVE bet.  A score change while the manual
+            # click was being processed must never be attributed to the bet.
+            placement_snapshot = await self._read_fresh_score(
+                browser,
+                selected_match,
+                latest or placement_snapshot,
+            )
+            attempt_record.update(
+                result="ACTIVE",
+                status=LiveStatus.ACTIVE.value,
+                score_before=placement_snapshot.score.text(),
+                placement_signal=observation.signal,
+                placement_confirmed_at=local_now(),
+            )
+            await REPOSITORY.save_bet(attempt_record)
+            self._active_live_bet = ActiveLiveBet(
+                attempt_id=attempt_id,
+                match_id=decision.match_id,
+                team=decision.team,
+                side=decision.side,
+                strategy_step=step,
+                amount=amount,
+                coefficient=selected_odd,
+                goal_number=target_goal,
+                score_before=placement_snapshot.score,
+            )
+            self._pending_live_bet = None
+            return attempt_record, placement_snapshot, current_odds, selected_odd, opponent_odd
+        return None
+
+    async def _invalidate_live_attempt(
+        self,
+        record: dict[str, Any],
+        decision: LiveDecision,
+        reason: str,
+        publish: Any,
+    ) -> None:
+        await self.live_executor.invalidate(decision.attempt_id, reason, publish)
+        record.update(
+            result="NOT_PLACED",
+            status=LiveStatus.STALE_COUPON.value,
+            settled=True,
+            resolved_at=local_now(),
+            placement_signal=reason,
+        )
+        await REPOSITORY.save_bet(record)
+
+    async def _wait_for_live_confirmation_or_score(
+        self,
+        page: Any,
+        browser: MatchBrowser,
+        selected_match: dict[str, Any],
+        snapshot: ScoreboardSnapshot,
+        decision: LiveDecision,
+        publish: Any,
+    ) -> tuple[PlacementObservation | None, ScoreboardSnapshot | None]:
+        confirmation_task = asyncio.create_task(
+            self.live_executor.wait_for_manual_confirmation(
+                page, decision, self._stop_event, publish
+            )
+        )
+        latest = snapshot
+        score_task = asyncio.create_task(
+            self._wait_for_pending_score_change(browser, selected_match, latest)
+        )
+        try:
+            while not self._stop_event.is_set():
+                done, _ = await asyncio.wait(
+                    {confirmation_task, score_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if confirmation_task in done:
+                    return confirmation_task.result(), latest
+                if score_task in done:
+                    changed = score_task.result()
+                    if changed is None:
+                        return None, latest
+                    latest = changed
+                    if not await self.live_executor.manual_click_seen(decision.attempt_id):
+                        confirmation_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await confirmation_task
+                        return PlacementObservation(
+                            False,
+                            "Счёт изменился до ручного подтверждения",
+                            retryable=True,
+                        ), latest
+                    score_task = asyncio.create_task(
+                        self._wait_for_pending_score_change(browser, selected_match, latest)
+                    )
+            return None, latest
+        finally:
+            for task in (confirmation_task, score_task):
+                if not task.done():
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+
+    async def _wait_for_pending_score_change(
+        self,
+        browser: MatchBrowser,
+        selected_match: dict[str, Any],
+        previous: ScoreboardSnapshot,
+    ) -> ScoreboardSnapshot | None:
+        while not self._stop_event.is_set():
+            await self._sleep_or_stop(CONFIG.score_poll_interval)
+            try:
+                current = await browser.snapshot()
+            except ScoreReadError:
+                continue
+            if current.team1 != previous.team1 or current.team2 != previous.team2:
+                raise RecoverableDemoError(
+                    "SCOREBOARD_TEAMS_CHANGED",
+                    "Порядок или названия команд в scoreboard изменились.",
+                )
+            await self._publish_snapshot(current, selected_match, state="LIVE")
+            if current.score != previous.score:
+                if self._pending_live_bet is not None:
+                    self._pending_live_bet = self._pending_live_bet.with_score(current.score)
+                await REPOSITORY.log(
+                    "LIVE_SCORE_ONLY",
+                    f"{previous.score.text()} → {current.score.text()}; ACTIVE-ставки ещё нет",
+                )
+                return current
         return None
 
     async def _publish_pending_bet(

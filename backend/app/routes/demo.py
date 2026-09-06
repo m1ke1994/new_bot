@@ -7,6 +7,7 @@ from backend.app.demo.engine import (
     DatabaseClearBlockedError,
     ENGINE,
     HistoryClearBlockedError,
+    ModeConflictError,
 )
 from backend.app.demo.history import REPOSITORY
 from backend.app.demo.state import STATE
@@ -24,11 +25,16 @@ async def start_demo():
             status_code=503,
             detail={"code": error.code, "message": str(error)},
         ) from error
+    except ModeConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @router.post("/stop")
 async def stop_demo():
-    return await ENGINE.stop()
+    try:
+        return await ENGINE.stop("DEMO")
+    except ModeConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @router.post("/reset")

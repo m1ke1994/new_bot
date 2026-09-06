@@ -8,6 +8,7 @@ from backend.app.browser.manager import BROWSER_MANAGER
 from backend.app.demo.engine import ENGINE
 from backend.app.routes.browser import router as browser_router
 from backend.app.routes.demo import router as demo_router
+from backend.app.routes.live import router as live_router
 
 
 @asynccontextmanager
@@ -29,11 +30,12 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
 app.include_router(demo_router)
 app.include_router(browser_router)
+app.include_router(live_router)
 
 
 @app.get("/api/health")
