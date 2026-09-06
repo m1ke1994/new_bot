@@ -49,10 +49,14 @@ const history = ref([])
 const logs = ref([])
 const strategyConfig = ref({ initial_stake: 20, progression_multiplier: 2.2, max_steps: 7, stakes: [20, 44, 97, 213, 469, 1031, 2268], required_budget: 4142 })
 const backendError = ref('')
-const actionPending = ref(false)
+const backendAvailable = ref(false)
+const selectedMode = ref('DEMO')
+const pendingAction = ref(null)
+const actionPending = computed(() => pendingAction.value !== null)
 const initialLoading = ref(true)
 let timer = null
 let tick = 0
+let refreshInFlight = false
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -66,7 +70,11 @@ async function api(path, options = {}) {
   }
   const result = await response.json()
   if (!response.ok) {
-    throw new Error(result.detail || `HTTP ${response.status}`)
+    const detail = result.detail
+    const message = typeof detail === 'object' && detail !== null
+      ? [detail.code, detail.message].filter(Boolean).join(': ')
+      : detail
+    throw new Error(message || `HTTP ${response.status}`)
   }
   return result
 }
@@ -74,9 +82,15 @@ async function api(path, options = {}) {
 async function loadState() {
   try {
     state.value = await api('/api/demo/state')
+    if (state.value.running && ['DEMO', 'LIVE'].includes(state.value.mode)) {
+      selectedMode.value = state.value.mode
+    }
+    backendAvailable.value = true
     backendError.value = ''
   } catch (error) {
-    backendError.value = error instanceof Error ? error.message : String(error)
+    backendAvailable.value = false
+    const message = error instanceof Error ? error.message : String(error)
+    backendError.value = `Backend недоступен: ${message}`
   } finally {
     initialLoading.value = false
   }
@@ -84,20 +98,27 @@ async function loadState() {
 
 async function loadDetails() {
   try {
+    const historyMode = (state.value.running ? state.value.mode : selectedMode.value).toLowerCase()
     const [historyData, logsData] = await Promise.all([
-      api('/api/demo/history?limit=500'),
+      api(`/api/${historyMode}/history?limit=500`),
       api('/api/demo/logs?limit=500'),
     ])
     history.value = Array.isArray(historyData.items) ? historyData.items : []
     logs.value = Array.isArray(logsData.items) ? logsData.items : []
   } catch (error) {
+    if (error instanceof TypeError) backendAvailable.value = false
     backendError.value = error instanceof Error ? error.message : String(error)
   }
 }
 
 async function loadStrategyConfig() {
-  const config = await api('/api/demo/strategy-config')
-  strategyConfig.value = { ...config, stakes: [...config.stakes] }
+  try {
+    const config = await api('/api/demo/strategy-config')
+    strategyConfig.value = { ...config, stakes: [...config.stakes] }
+  } catch (error) {
+    if (error instanceof TypeError) backendAvailable.value = false
+    backendError.value = error instanceof Error ? error.message : String(error)
+  }
 }
 
 function regenerateStakes() {
@@ -115,7 +136,7 @@ function updateStake(index, event) {
 }
 
 async function saveStrategy() {
-  actionPending.value = true
+  pendingAction.value = 'save-strategy'
   try {
     const saved = await api('/api/demo/strategy-config', { method: 'PUT', body: JSON.stringify(strategyConfig.value) })
     strategyConfig.value = { ...saved, stakes: [...saved.stakes] }
@@ -123,28 +144,81 @@ async function saveStrategy() {
   } catch (error) {
     backendError.value = error instanceof Error ? error.message : String(error)
   } finally {
-    actionPending.value = false
+    pendingAction.value = null
   }
 }
 
 async function refresh() {
-  await loadState()
-  tick += 1
-  if (tick % 2 === 0) {
-    await loadDetails()
+  if (refreshInFlight) return
+  refreshInFlight = true
+  try {
+    await loadState()
+    tick += 1
+    if (backendAvailable.value && tick % 5 === 0) {
+      await loadDetails()
+    }
+  } finally {
+    refreshInFlight = false
   }
 }
 
 async function control(action) {
-  actionPending.value = true
+  pendingAction.value = action
   try {
-    state.value = await api(`/api/demo/${action}`, { method: 'POST' })
+    const endpointMode = action === 'start'
+      ? selectedMode.value.toLowerCase()
+      : action === 'stop'
+        ? (state.value.mode || selectedMode.value).toLowerCase()
+        : 'demo'
+    state.value = await api(`/api/${endpointMode}/${action}`, { method: 'POST' })
     backendError.value = ''
     await loadDetails()
   } catch (error) {
     backendError.value = error instanceof Error ? error.message : String(error)
   } finally {
-    actionPending.value = false
+    pendingAction.value = null
+  }
+}
+
+async function clearHistory() {
+  pendingAction.value = 'clear-history'
+  try {
+    const result = await api('/api/demo/history', { method: 'DELETE' })
+    history.value = Array.isArray(result.items) ? result.items : []
+    if (result.state) state.value = result.state
+    backendAvailable.value = true
+    backendError.value = ''
+    await loadDetails()
+  } catch (error) {
+    backendError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    pendingAction.value = null
+  }
+}
+
+async function clearDatabase() {
+  const confirmed = window.confirm(
+    'Очистить всю DEMO-базу? История, логи, бюджет и настройки стратегии будут сброшены.'
+  )
+  if (!confirmed) return
+  pendingAction.value = 'clear-database'
+  try {
+    const result = await api('/api/demo/database', { method: 'DELETE' })
+    history.value = []
+    logs.value = []
+    if (result.state) {
+      state.value = result.state
+      strategyConfig.value = {
+        ...result.state.strategy_config,
+        stakes: [...result.state.strategy_config.stakes],
+      }
+    }
+    backendAvailable.value = true
+    backendError.value = ''
+  } catch (error) {
+    backendError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    pendingAction.value = null
   }
 }
 
@@ -171,6 +245,15 @@ const configInvalid = computed(() => {
   const config = strategyConfig.value
   return !(Number(config.initial_stake) > 0) || !(Number(config.progression_multiplier) > 1) || !Number.isInteger(Number(config.max_steps)) || Number(config.max_steps) < 1 || config.stakes.length !== Number(config.max_steps) || config.stakes.some((amount) => !Number.isFinite(Number(amount)) || Number(amount) <= 0)
 })
+const hasActiveBet = computed(() => (
+  state.value.bet?.result === 'ACTIVE'
+  || history.value.some((item) => (item.mode || 'DEMO') === 'DEMO' && item.result === 'ACTIVE')
+))
+const canStart = computed(() => backendAvailable.value && !initialLoading.value && !actionPending.value && !state.value.running && !configInvalid.value)
+const canStop = computed(() => backendAvailable.value && !actionPending.value && state.value.running)
+const canResetSequence = computed(() => backendAvailable.value && !actionPending.value && !state.value.running && selectedMode.value === 'DEMO')
+const canClearHistory = computed(() => backendAvailable.value && !actionPending.value && !state.value.running && !hasActiveBet.value && selectedMode.value === 'DEMO')
+const canClearDatabase = computed(() => backendAvailable.value && !actionPending.value && !state.value.running && !hasActiveBet.value)
 const reversedHistory = computed(() => [...history.value].reverse())
 const recentLogs = computed(() => logs.value.slice(-250))
 const profitTone = computed(() => Number(budget.value.session_profit || 0) >= 0 ? 'green' : 'red')
@@ -225,7 +308,7 @@ const updatedAt = computed(() => {
 
 onMounted(async () => {
   await Promise.all([loadState(), loadDetails(), loadStrategyConfig()])
-  timer = setInterval(refresh, 750)
+  timer = setInterval(refresh, 1000)
 })
 
 onBeforeUnmount(() => {
@@ -239,38 +322,54 @@ onBeforeUnmount(() => {
       <div class="brand">
         <div class="brand-mark">AB</div>
         <div>
-          <div class="brand-title">DEMO MONITOR</div>
+          <div class="brand-title">{{ state.running ? state.mode : selectedMode }} MONITOR</div>
           <div class="brand-subtitle">AutoBet · FC 25 Live Strategy</div>
         </div>
       </div>
 
       <div class="controls">
-        <div class="demo-chip">DEMO</div>
+        <select v-model="selectedMode" class="mode-select" :disabled="state.running || actionPending">
+          <option value="DEMO">DEMO</option>
+          <option value="LIVE">LIVE</option>
+        </select>
+        <div class="demo-chip">{{ state.running ? state.mode : selectedMode }}</div>
         <button
-          class="button button-start"
-          :disabled="state.running || actionPending || configInvalid"
+          :class="['button', selectedMode === 'LIVE' ? 'button-danger' : 'button-start']"
+          :disabled="!canStart"
           @click="control('start')"
         >
-          Запустить бота
+          {{ pendingAction === 'start' ? 'Запуск...' : `Запустить ${selectedMode}` }}
         </button>
         <button
           class="button button-stop"
-          :disabled="!state.running || actionPending"
+          :disabled="!canStop"
           @click="control('stop')"
         >
           Остановить
         </button>
-        <button class="button" :disabled="state.running || actionPending" @click="control('reset')">Новая серия</button>
+        <button class="button" :disabled="!canResetSequence" @click="control('reset')">Новая серия</button>
+        <button class="button button-danger" :disabled="!canClearDatabase" @click="clearDatabase">
+          {{ pendingAction === 'clear-database' ? 'Очистка...' : 'Очистить базу данных' }}
+        </button>
       </div>
     </header>
 
     <main class="dashboard">
-      <section class="demo-notice">
-        <span class="notice-icon">D</span>
+      <section :class="['demo-notice', { 'live-notice': (state.running ? state.mode : selectedMode) === 'LIVE' }]">
+        <span class="notice-icon">{{ (state.running ? state.mode : selectedMode) === 'LIVE' ? 'L' : 'D' }}</span>
         <div>
-          <strong>ДЕМО-РЕЖИМ</strong>
-          <span>Реальные ставки не отправляются. Все действия стратегии виртуальные.</span>
+          <strong>{{ (state.running ? state.mode : selectedMode) }}-РЕЖИМ</strong>
+          <span v-if="(state.running ? state.mode : selectedMode) === 'LIVE'">Coupon заполняется автоматически, но кнопку «Сделать ставку» нажимает пользователь.</span>
+          <span v-else>Реальные ставки не отправляются. Все действия стратегии виртуальные.</span>
         </div>
+      </section>
+
+      <section v-if="state.status === 'READY_FOR_MANUAL_CONFIRMATION'" class="auth-stage auth-stage-waiting">
+        <div>
+          <strong>Подтвердите LIVE-ставку</strong>
+          <span>Проверьте coupon и один раз нажмите «Сделать ставку» в окне букмекера.</span>
+        </div>
+        <small>Шаг {{ bet.step }} · {{ bet.amount }} RUB · гол №{{ bet.next_goal_number }}</small>
       </section>
 
       <section
@@ -285,7 +384,7 @@ onBeforeUnmount(() => {
       </section>
 
       <div v-if="backendError" class="alert alert-error">
-        <strong>Нет соединения с DEMO API</strong>
+        <strong>Backend недоступен</strong>
         <span>{{ backendError }}</span>
       </div>
 
@@ -534,7 +633,12 @@ onBeforeUnmount(() => {
                 <span class="eyebrow">BET JOURNAL</span>
                 <h2>История ставок</h2>
               </div>
-              <span class="counter">{{ history.length }}</span>
+              <div class="history-actions">
+                <button class="button" :disabled="!canClearHistory" @click="clearHistory">
+                  {{ pendingAction === 'clear-history' ? 'Очищение...' : 'Очистить историю ставок' }}
+                </button>
+                <span class="counter">{{ history.length }}</span>
+              </div>
             </header>
             <div class="table-wrap">
               <table>

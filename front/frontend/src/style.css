@@ -95,6 +95,10 @@ button { font: inherit; }
 .button:disabled { opacity: .38; cursor: not-allowed; }
 .button-start { border-color: rgba(56, 217, 149, .38); color: var(--green); }
 .button-stop { border-color: rgba(255, 104, 118, .25); color: #ff8994; }
+.button-danger { border-color: rgba(255, 104, 118, .4); color: #ff8994; }
+.history-actions { display: flex; align-items: center; gap: 10px; }
+.mode-select { min-height: 38px; padding: 0 12px; color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+.live-notice { border-color: rgba(255, 104, 118, .35); }
 
 .dashboard {
   width: min(1720px, 100%);

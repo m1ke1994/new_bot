@@ -5,7 +5,16 @@ backend/diagnostics/canvas/*.json
 backend/data/*.jsonl
 backend/data/*.sqlite3
 backend/data/*.sqlite3-*
+$patterns = @(
+    "browser_profile/",
+    "backend/data/"
+)
 
+foreach ($p in $patterns) {
+    if (-not (Select-String -Path ".gitignore" -SimpleMatch $p -Quiet -ErrorAction SilentlyContinue)) {
+        Add-Content ".gitignore" $p
+    }
+}
 # Python cache
 __pycache__/
 *.pyc

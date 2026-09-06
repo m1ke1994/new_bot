@@ -86,6 +86,50 @@ class DemoJournalTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stats["bets"], 1)
             self.assertEqual(stats["losses"], 1)
 
+    async def test_clear_history_removes_only_demo_bets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = DemoRepository(Path(directory))
+            await repository.save_config(
+                {"initial_stake": 57, "progression_multiplier": 2.25, "max_steps": 2, "stakes": [57, 128]}
+            )
+            await repository.save_budget(
+                {"initial_budget": 4142, "current_budget": 4000, "session_profit": -142}
+            )
+            await repository.save_bet({"id": "demo", "mode": "DEMO", "result": "WIN"})
+            await repository.save_bet({"id": "legacy-demo", "result": "LOSE"})
+            await repository.save_bet({"id": "old-live", "mode": "LIVE", "result": "ACTIVE"})
+
+            deleted = await repository.clear_bet_history("DEMO")
+
+            self.assertEqual(deleted, 2)
+            self.assertEqual(await repository.history(mode="DEMO"), [])
+            self.assertEqual([item["id"] for item in await repository.history()], ["old-live"])
+            self.assertEqual((await repository.get_config())["stakes"], [57.0, 128.0])
+            self.assertEqual((await repository.get_budget())["current_budget"], 4000)
+
+    async def test_database_reset_restores_initial_demo_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = DemoRepository(Path(directory))
+            await repository.save_config(
+                {"initial_stake": 57, "progression_multiplier": 2.25, "max_steps": 2, "stakes": [57, 128]}
+            )
+            await repository.save_budget(
+                {"initial_budget": 4142, "current_budget": 4000, "session_profit": -142}
+            )
+            await repository.save_sequence(current_step=2, status="WAITING_NEXT_MATCH")
+            await repository.save_bet({"id": "demo", "mode": "DEMO", "result": "WIN"})
+            await repository.log("TEST", "will be removed")
+            await repository.add_cycle({"id": "cycle"})
+
+            await repository.reset_database()
+
+            self.assertEqual(await repository.history(), [])
+            self.assertEqual(await repository.logs(), [])
+            self.assertEqual((await repository.get_budget())["current_budget"], float(DEMO_START_BUDGET))
+            self.assertEqual((await repository.get_sequence())["current_step"], 1)
+            self.assertEqual((await repository.get_sequence())["status"], "WAITING_FOR_MATCH")
+            self.assertNotEqual((await repository.get_config())["stakes"], [57.0, 128.0])
+
 
 if __name__ == "__main__":
     unittest.main()
