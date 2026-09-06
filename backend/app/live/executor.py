@@ -18,6 +18,11 @@ AMOUNT_SELECTOR = (
 CONFIRM_SELECTOR = ".quick-coupon-main button.quick-coupon-put-bet-button"
 CONFIRM_TEXT = "Сделать ставку"
 
+# ТЕСТОВЫЙ АККАУНТ:
+# автоподтверждение включено прямо в коде, ENV больше не требуется.
+# Перед использованием другого аккаунта переключите значение на False.
+TEST_AUTO_CONFIRM = True
+
 
 def _amount_text(amount: float) -> str:
     decimal = Decimal(str(amount))
@@ -163,6 +168,9 @@ class LiveExecutor:
                     raise LivePreparationError(
                         "LIVE_CONFIRM_BUTTON_NOT_FOUND", "Не удалось зафиксировать кнопку подтверждения."
                     )
+
+                # Сохраняем handle и listener: это оставляет прежний ручной режим рабочим,
+                # когда автоподтверждение тестового аккаунта выключено.
                 await handle.evaluate(
                     """button => {
                         button.dataset.autobetManualClick = '0';
@@ -172,10 +180,30 @@ class LiveExecutor:
                     }"""
                 )
                 self._confirm_handles[decision.attempt_id] = handle
+
+                if not TEST_AUTO_CONFIRM:
+                    await self._publish(
+                        decision.attempt_id,
+                        LiveStatus.READY_FOR_MANUAL_CONFIRMATION,
+                        "Coupon проверен. Нажмите «Сделать ставку» один раз вручную.",
+                        publish,
+                    )
+                    return
+
+                # ТЕСТОВЫЙ АККАУНТ: после полной проверки coupon автоматически
+                # нажимаем ту же кнопку, которую раньше должен был нажать пользователь.
+                await self._log(
+                    "TEST_AUTO_CONFIRM",
+                    (
+                        f"attempt={decision.attempt_id} "
+                        f"step={decision.strategy_step} amount={expected_text}"
+                    ),
+                )
+                await confirm.click(timeout=5_000)
                 await self._publish(
                     decision.attempt_id,
-                    LiveStatus.READY_FOR_MANUAL_CONFIRMATION,
-                    "Coupon проверен. Нажмите «Сделать ставку» один раз вручную.",
+                    LiveStatus.AWAITING_PLACEMENT_RESULT,
+                    "Тестовый режим: кнопка «Сделать ставку» нажата автоматически; ждём ответ сайта",
                     publish,
                 )
             except LivePreparationError:
@@ -194,18 +222,28 @@ class LiveExecutor:
         stop_event: asyncio.Event,
         publish: Publisher | None = None,
     ) -> PlacementObservation | None:
-        if self.state(decision.attempt_id) != LiveStatus.READY_FOR_MANUAL_CONFIRMATION:
+        current_state = self.state(decision.attempt_id)
+        allowed_states = {
+            LiveStatus.READY_FOR_MANUAL_CONFIRMATION,
+            LiveStatus.AWAITING_PLACEMENT_RESULT,
+        }
+        if current_state not in allowed_states:
             raise LivePreparationError(
-                "LIVE_INVALID_STATE", "Coupon не находится в состоянии ручного подтверждения."
+                "LIVE_INVALID_STATE",
+                f"Coupon находится в неподходящем состоянии: {current_state.value}",
             )
-        success = page.get_by_text(
-            re.compile(r"ставк[аи].*(принята|размещена|успешно)", re.IGNORECASE)
-        ).first
-        failure = page.get_by_text(
-            re.compile(r"ставк[аи].*(не принята|отклонена|ошибка|не удалось)", re.IGNORECASE)
-        ).first
-        handle = self._confirm_handles[decision.attempt_id]
-        click_seen = False
+
+        # Единственный критерий успешной отправки:
+        # после клика одновременно исчезли:
+        # 1) input суммы;
+        # 2) кнопка «Сделать ставку».
+        #
+        # Никакие toast/modal/coupon-wrapper больше не используются
+        # для подтверждения размещения.
+        amount_input = page.locator(AMOUNT_SELECTOR).first
+        confirm = page.locator(CONFIRM_SELECTOR).first
+
+        click_seen = current_state == LiveStatus.AWAITING_PLACEMENT_RESULT
 
         while not stop_event.is_set():
             if not click_seen:
@@ -214,29 +252,61 @@ class LiveExecutor:
                     await self._publish(
                         decision.attempt_id,
                         LiveStatus.AWAITING_PLACEMENT_RESULT,
-                        "Ручной клик обнаружен; ждём ответ сайта",
+                        "Клик подтверждения обнаружен; ждём исчезновение кнопки и поля суммы",
                         publish,
                     )
-            if click_seen and await failure.count() and await failure.is_visible():
-                return PlacementObservation(False, "LIVE placement rejected", retryable=True)
-            if click_seen and await success.count() and await success.is_visible():
-                await self._publish(
-                    decision.attempt_id,
-                    LiveStatus.BET_PLACED,
-                    "Сайт подтвердил размещение ставки",
-                    publish,
+
+            if click_seen:
+                try:
+                    confirm_visible = (
+                        await confirm.count() > 0
+                        and await confirm.is_visible()
+                    )
+                except Exception:
+                    confirm_visible = False
+
+                try:
+                    amount_visible = (
+                        await amount_input.count() > 0
+                        and await amount_input.is_visible()
+                    )
+                except Exception:
+                    amount_visible = False
+
+                await self._log(
+                    "LIVE_PLACEMENT_CHECK",
+                    (
+                        f"attempt={decision.attempt_id}; "
+                        f"confirm_visible={confirm_visible}; "
+                        f"amount_visible={amount_visible}"
+                    ),
                 )
-                await self._publish(
-                    decision.attempt_id,
-                    LiveStatus.ACTIVE,
-                    "LIVE-ставка активна",
-                    publish,
-                )
-                return PlacementObservation(True, "explicit DOM success")
+
+                # ГЛАВНЫЙ И ЕДИНСТВЕННЫЙ ТРИГГЕР:
+                # оба элемента исчезли -> ставка считается размещённой.
+                if not confirm_visible and not amount_visible:
+                    await self._publish(
+                        decision.attempt_id,
+                        LiveStatus.BET_PLACED,
+                        "Кнопка «Сделать ставку» и поле суммы исчезли; ставка размещена",
+                        publish,
+                    )
+                    await self._publish(
+                        decision.attempt_id,
+                        LiveStatus.ACTIVE,
+                        "LIVE-ставка активна",
+                        publish,
+                    )
+                    return PlacementObservation(
+                        True,
+                        "confirm button and amount input disappeared",
+                    )
+
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=0.25)
             except TimeoutError:
                 pass
+
         return None
 
     async def invalidate(
