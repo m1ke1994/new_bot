@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, Query
 from backend.app.demo.engine import BrowserStartError, ENGINE, ModeConflictError
 from backend.app.demo.history import REPOSITORY
 from backend.app.demo.state import STATE
+from backend.app.session_control import stop_and_reset_session
 
 
 router = APIRouter(prefix="/api/live", tags=["live"])
@@ -24,7 +25,7 @@ async def start_live():
 @router.post("/stop")
 async def stop_live():
     try:
-        return await ENGINE.stop("LIVE")
+        return await stop_and_reset_session("LIVE")
     except ModeConflictError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
 

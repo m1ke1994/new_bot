@@ -11,6 +11,7 @@ from backend.app.demo.engine import (
 )
 from backend.app.demo.history import REPOSITORY
 from backend.app.demo.state import STATE
+from backend.app.session_control import stop_and_reset_session
 
 
 router = APIRouter(prefix="/api/demo", tags=["demo"])
@@ -32,7 +33,7 @@ async def start_demo():
 @router.post("/stop")
 async def stop_demo():
     try:
-        return await ENGINE.stop("DEMO")
+        return await stop_and_reset_session("DEMO")
     except ModeConflictError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
 
