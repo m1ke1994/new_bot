@@ -10,19 +10,37 @@ def normalize_team_name(team: str | None) -> str:
     return " ".join((team or "").strip().casefold().split())
 
 
-def excluded_team_in_match(team1: str | None, team2: str | None) -> str | None:
+def excluded_team_in_match(
+    team1: str | None,
+    team2: str | None,
+    *,
+    enabled: bool = True,
+) -> str | None:
+    if not enabled:
+        return None
     for team in (team1, team2):
         if normalize_team_name(team) in EXCLUDED_TEAMS:
             return (team or "").strip()
     return None
 
 
-def is_excluded_match(team1: str | None, team2: str | None) -> bool:
-    return excluded_team_in_match(team1, team2) is not None
+def is_excluded_match(
+    team1: str | None,
+    team2: str | None,
+    *,
+    enabled: bool = True,
+) -> bool:
+    return excluded_team_in_match(team1, team2, enabled=enabled) is not None
 
 
-def is_initial_odds_allowed(selected_odds: Decimal | float | int | str) -> bool:
+def is_initial_odds_allowed(
+    selected_odds: Decimal | float | int | str,
+    *,
+    enabled: bool = True,
+) -> bool:
     """Apply the inclusive entry threshold using decimal arithmetic."""
+    if not enabled:
+        return True
     try:
         return Decimal(str(selected_odds)) >= MIN_INITIAL_SELECTED_ODDS
     except (InvalidOperation, TypeError, ValueError):

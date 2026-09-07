@@ -21,8 +21,9 @@ class MatchAlreadyStarted(RuntimeError):
 
 
 class LeagueBrowser:
-    def __init__(self, page: Page) -> None:
+    def __init__(self, page: Page, *, exclude_teams_enabled: bool = True) -> None:
         self.page = page
+        self.exclude_teams_enabled = exclude_teams_enabled
         self.last_scan_stats = {
             "total": 0,
             "started": 0,
@@ -55,7 +56,11 @@ class LeagueBrowser:
             if not item or item["finished"]:
                 continue
             if item["is_upcoming"]:
-                excluded_team = excluded_team_in_match(item["team1"], item["team2"])
+                excluded_team = excluded_team_in_match(
+                    item["team1"],
+                    item["team2"],
+                    enabled=self.exclude_teams_enabled,
+                )
                 if excluded_team is not None:
                     excluded.append({**item, "excluded_team": excluded_team})
                 else:

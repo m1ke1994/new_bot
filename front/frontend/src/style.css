@@ -184,12 +184,40 @@ button { font: inherit; }
 .strategy-config-body { border-bottom: 1px solid var(--line-soft); }
 .strategy-config label { display: grid; gap: 6px; color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .06em; }
 .strategy-config input { width: 145px; min-height: 34px; border: 1px solid var(--line); border-radius: 6px; padding: 0 9px; color: var(--text); background: var(--panel-2); }
+.match-filters { padding: 16px 19px; border-bottom: 1px solid var(--line-soft); }
+.match-filters-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; }
+.match-filters-heading h3 { margin: 3px 0 0; color: var(--text); font-size: 15px; }
+.match-filters-heading small { color: var(--muted); font-size: 10px; }
+.match-filter-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+.strategy-config .match-filter-option {
+  min-height: 68px;
+  padding: 13px 14px;
+  border: 1px solid rgba(56, 217, 149, .3);
+  border-radius: 8px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  background: var(--green-soft);
+  cursor: pointer;
+  transition: .18s ease;
+}
+.strategy-config .match-filter-option.filter-disabled { border-color: var(--line); background: #0d131c; opacity: .62; }
+.strategy-config .match-filter-option:has(input:disabled) { cursor: not-allowed; }
+.strategy-config .match-filter-option input[type="checkbox"] { width: 18px; min-height: 18px; margin: 0; padding: 0; accent-color: var(--green); }
+.filter-copy strong, .filter-copy small { display: block; }
+.filter-copy strong { color: var(--text); font-size: 12px; letter-spacing: 0; }
+.filter-copy small { margin-top: 4px; color: var(--muted); font-size: 10px; font-weight: 500; letter-spacing: 0; line-height: 1.4; }
+.filter-state { color: var(--green); font-size: 9px; font-weight: 850; letter-spacing: .1em; }
+.filter-disabled .filter-state { color: var(--muted); }
 .stake-row { flex-wrap: wrap; padding-top: 12px; }
 .stake-row input { width: 104px; }
 .strategy-config-footer { padding-top: 0; justify-content: space-between; align-items: center; color: var(--muted); font-size: 11px; }
 @media (max-width: 720px) {
   .strategy-config-body, .strategy-config-footer { flex-wrap: wrap; }
   .strategy-config-footer { align-items: stretch; }
+  .match-filter-grid { grid-template-columns: 1fr; }
+  .match-filters-heading { align-items: flex-start; flex-direction: column; }
 }
 
 .overview-grid {

@@ -124,7 +124,7 @@ class DemoEngine:
 
     async def save_strategy_config(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self._task is not None and not self._task.done():
-            raise ValueError("Stop the strategy before changing its stake row")
+            raise ValueError("Stop the strategy before changing its settings")
         saved = await REPOSITORY.save_config(payload)
         self._config = StrategyConfig.from_payload(saved)
         sequence = await REPOSITORY.get_sequence()
@@ -247,6 +247,12 @@ class DemoEngine:
                 self.live_executor.reset()
                 self._pending_live_bet = None
                 self._active_live_bet = None
+            await REPOSITORY.log(
+                "MATCH_FILTERS_CONFIG",
+                f"exclude_teams_enabled={str(self._config.exclude_teams_enabled).lower()} "
+                f"min_initial_odds_enabled={str(self._config.min_initial_odds_enabled).lower()} "
+                f"min_initial_odds={MIN_INITIAL_SELECTED_ODDS}",
+            )
             await REPOSITORY.save_sequence(status="WAITING_FOR_MATCH")
             await STATE.reset_for_start(await REPOSITORY.stats())
             try:
@@ -439,7 +445,10 @@ class DemoEngine:
 
     async def _process_next_match(self, page: Page) -> None:
         page = await self.browser_manager.ensure_page()
-        league = LeagueBrowser(page)
+        league = LeagueBrowser(
+            page,
+            exclude_teams_enabled=self._config.exclude_teams_enabled,
+        )
         await self._status(DemoStatus.OPENING_LEAGUE, "Открываем страницу лиги", "LEAGUE_OPENING")
         await league.open()
         await REPOSITORY.log("LEAGUE_OPENED", CONFIG.league_name)
@@ -465,7 +474,10 @@ class DemoEngine:
         selected_match = None
         while selected_match is None and not self._stop_event.is_set():
             page = await self.browser_manager.ensure_page()
-            league = LeagueBrowser(page)
+            league = LeagueBrowser(
+                page,
+                exclude_teams_enabled=self._config.exclude_teams_enabled,
+            )
             await self._status(
                 DemoStatus.SCANNING_MATCHES,
                 "Считываем актуальный DOM списка матчей",
@@ -492,7 +504,11 @@ class DemoEngine:
                 )
             allowed_matches = []
             for item in matches:
-                excluded_team = excluded_team_in_match(item["team1"], item["team2"])
+                excluded_team = excluded_team_in_match(
+                    item["team1"],
+                    item["team2"],
+                    enabled=self._config.exclude_teams_enabled,
+                )
                 if excluded_team is not None:
                     await REPOSITORY.log(
                         "MATCH_SKIPPED_EXCLUDED_TEAM",
@@ -574,7 +590,11 @@ class DemoEngine:
         snapshot = await self._wait_for_initial_zero_score(selected_match)
         if snapshot is None:
             return
-        excluded_team = excluded_team_in_match(snapshot.team1, snapshot.team2)
+        excluded_team = excluded_team_in_match(
+            snapshot.team1,
+            snapshot.team2,
+            enabled=self._config.exclude_teams_enabled,
+        )
         if excluded_team is not None:
             message = (
                 f"{snapshot.team1} — {snapshot.team2}: match excluded by team filter "
@@ -598,7 +618,10 @@ class DemoEngine:
             )
             return
         selection = select_team_with_higher_odds(snapshot.team1, snapshot.team2, initial_odds)
-        if not is_initial_odds_allowed(selection.selected_odds):
+        if not is_initial_odds_allowed(
+            selection.selected_odds,
+            enabled=self._config.min_initial_odds_enabled,
+        ):
             message = (
                 f"{snapshot.team1} — {snapshot.team2}: "
                 f"selected_team={selection.selected_team} "

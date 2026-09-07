@@ -90,7 +90,23 @@ const history = ref([])
 
 const logs = ref([])
 
-const strategyConfig = ref({ initial_stake: 20, progression_multiplier: 2.2, max_steps: 7, stakes: [20, 44, 97, 213, 469, 1031, 2268], required_budget: 4142 })
+const strategyConfig = ref({
+
+  initial_stake: 20,
+
+  progression_multiplier: 2.2,
+
+  max_steps: 7,
+
+  stakes: [20, 44, 97, 213, 469, 1031, 2268],
+
+  required_budget: 4142,
+
+  exclude_teams_enabled: true,
+
+  min_initial_odds_enabled: true,
+
+})
 
 const backendError = ref('')
 
@@ -267,6 +283,32 @@ async function saveStrategy() {
   } catch (error) {
 
     backendError.value = error instanceof Error ? error.message : String(error)
+
+  } finally {
+
+    pendingAction.value = null
+
+  }
+
+}
+
+async function saveMatchFilters() {
+
+  pendingAction.value = 'save-match-filters'
+
+  try {
+
+    const saved = await api('/api/demo/strategy-config', { method: 'PUT', body: JSON.stringify(strategyConfig.value) })
+
+    strategyConfig.value = { ...saved, stakes: [...saved.stakes] }
+
+    await loadState()
+
+  } catch (error) {
+
+    backendError.value = error instanceof Error ? error.message : String(error)
+
+    await loadStrategyConfig()
 
   } finally {
 
@@ -805,6 +847,42 @@ onBeforeUnmount(() => {
           <label>Количество шагов<input v-model.number="strategyConfig.max_steps" type="number" min="1" step="1" @change="regenerateStakes"></label>
 
           <button class="button" :disabled="state.running || actionPending" @click="regenerateStakes">Рассчитать ряд</button>
+
+        </div>
+
+        <div class="match-filters">
+
+          <div class="match-filters-heading">
+
+            <div><span class="eyebrow amber">MATCH FILTERS</span><h3>Фильтры матчей</h3></div>
+
+            <small>{{ pendingAction === 'save-match-filters' ? 'Сохраняем...' : 'Изменения сохраняются автоматически' }}</small>
+
+          </div>
+
+          <div class="match-filter-grid">
+
+            <label :class="['match-filter-option', { 'filter-disabled': !strategyConfig.exclude_teams_enabled }]">
+
+              <input v-model="strategyConfig.exclude_teams_enabled" type="checkbox" :disabled="state.running || actionPending" @change="saveMatchFilters">
+
+              <span class="filter-copy"><strong>Chelsea / Roma</strong><small>Пропускать матчи с Chelsea и Roma</small></span>
+
+              <span class="filter-state">{{ strategyConfig.exclude_teams_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
+
+            </label>
+
+            <label :class="['match-filter-option', { 'filter-disabled': !strategyConfig.min_initial_odds_enabled }]">
+
+              <input v-model="strategyConfig.min_initial_odds_enabled" type="checkbox" :disabled="state.running || actionPending" @change="saveMatchFilters">
+
+              <span class="filter-copy"><strong>Коэффициент от 1.93</strong><small>Минимальный коэффициент выбранной команды для входа в новую серию</small></span>
+
+              <span class="filter-state">{{ strategyConfig.min_initial_odds_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
+
+            </label>
+
+          </div>
 
         </div>
 

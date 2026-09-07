@@ -58,8 +58,8 @@ class FakeLeagueBrowser:
     last_scan_stats = {"total": 2, "started": 0, "upcoming": 2}
     skipped_started = []
 
-    def __init__(self, _page):
-        pass
+    def __init__(self, _page, *, exclude_teams_enabled=True):
+        self.exclude_teams_enabled = exclude_teams_enabled
 
     async def open(self):
         pass
@@ -76,6 +76,93 @@ class FakeLeagueBrowser:
 
 
 class DemoSeriesLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def _assert_disabled_filter_allows_series_start(
+        self,
+        *,
+        mode: str,
+        initial: ScoreboardSnapshot,
+        initial_odds: NextGoalOdds,
+        exclude_teams_enabled: bool,
+        min_initial_odds_enabled: bool,
+    ):
+        class SeriesStartReached(RuntimeError):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = DemoRepository(Path(directory))
+            with (
+                patch("backend.app.demo.engine.REPOSITORY", repository),
+                patch("backend.app.demo.engine.LeagueBrowser", FakeLeagueBrowser),
+            ):
+                engine = DemoEngine(FakeManager())
+                engine._mode = mode
+                engine._config = StrategyConfig.from_payload(
+                    {
+                        "exclude_teams_enabled": exclude_teams_enabled,
+                        "min_initial_odds_enabled": min_initial_odds_enabled,
+                    }
+                )
+                engine._sleep_or_stop = AsyncMock()
+                engine._wait_for_initial_zero_score = AsyncMock(
+                    return_value=initial
+                )
+                engine._wait_for_odds = AsyncMock(
+                    return_value=(initial, initial_odds)
+                )
+                repository.save_sequence = AsyncMock(
+                    side_effect=SeriesStartReached
+                )
+
+                with self.assertRaises(SeriesStartReached):
+                    await engine._process_next_match(object())
+
+                logs = await repository.logs()
+
+        repository.save_sequence.assert_awaited_once_with(
+            status="PENDING" if mode == "LIVE" else "ACTIVE",
+            current_match_id=MATCH["match_id"],
+            selected_team=initial.team1,
+        )
+        return logs
+
+    async def test_disabled_minimum_odds_filter_allows_low_odds_in_both_modes(self):
+        initial = snapshot(0, 0)
+        for mode in ("DEMO", "LIVE"):
+            with self.subTest(mode=mode):
+                logs = await self._assert_disabled_filter_allows_series_start(
+                    mode=mode,
+                    initial=initial,
+                    initial_odds=NextGoalOdds(team1=1.80, team2=1.70),
+                    exclude_teams_enabled=True,
+                    min_initial_odds_enabled=False,
+                )
+                self.assertNotIn(
+                    "MATCH_SKIPPED_LOW_INITIAL_ODDS",
+                    [item["event"] for item in logs],
+                )
+
+    async def test_disabled_team_filter_allows_chelsea_in_both_modes(self):
+        initial = ScoreboardSnapshot(
+            MATCH["team1"],
+            "Chelsea",
+            Score(0, 0),
+            "00:00",
+            "",
+        )
+        for mode in ("DEMO", "LIVE"):
+            with self.subTest(mode=mode):
+                logs = await self._assert_disabled_filter_allows_series_start(
+                    mode=mode,
+                    initial=initial,
+                    initial_odds=NextGoalOdds(team1=1.95, team2=1.80),
+                    exclude_teams_enabled=False,
+                    min_initial_odds_enabled=True,
+                )
+                self.assertNotIn(
+                    "MATCH_SKIPPED_EXCLUDED_TEAM",
+                    [item["event"] for item in logs],
+                )
+
     async def test_low_initial_odds_skip_series_in_demo_and_live(self):
         for mode in ("DEMO", "LIVE"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:

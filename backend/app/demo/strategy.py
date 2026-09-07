@@ -22,6 +22,8 @@ class StrategyConfig:
     progression_multiplier: Decimal
     max_steps: int
     stakes: tuple[Decimal, ...]
+    exclude_teams_enabled: bool
+    min_initial_odds_enabled: bool
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "StrategyConfig":
@@ -30,7 +32,20 @@ class StrategyConfig:
         max_steps = int(payload.get("max_steps", 7))
         raw_stakes = payload.get("stakes")
         stakes = tuple(money(value) for value in raw_stakes) if raw_stakes is not None else generate_stakes(initial_stake, multiplier, max_steps)
-        config = cls(initial_stake, multiplier, max_steps, stakes)
+        exclude_teams_enabled = _boolean_setting(
+            payload, "exclude_teams_enabled", default=True
+        )
+        min_initial_odds_enabled = _boolean_setting(
+            payload, "min_initial_odds_enabled", default=True
+        )
+        config = cls(
+            initial_stake,
+            multiplier,
+            max_steps,
+            stakes,
+            exclude_teams_enabled,
+            min_initial_odds_enabled,
+        )
         config.validate()
         return config
 
@@ -51,7 +66,18 @@ class StrategyConfig:
             "max_steps": self.max_steps,
             "stakes": [float(value) for value in self.stakes],
             "required_budget": float(sum(self.stakes, Decimal("0"))),
+            "exclude_teams_enabled": self.exclude_teams_enabled,
+            "min_initial_odds_enabled": self.min_initial_odds_enabled,
         }
+
+
+def _boolean_setting(
+    payload: dict[str, Any], key: str, *, default: bool
+) -> bool:
+    value = payload.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be a boolean")
+    return value
 
 
 def generate_stakes(initial_stake: Decimal | float | int | str, progression_multiplier: Decimal | float | int | str, max_steps: int) -> tuple[Decimal, ...]:

@@ -73,6 +73,34 @@ class StaleContext:
 
 
 class DemoLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_filter_settings_are_saved_restored_and_published_to_state(self):
+        manager = FakeBrowserManager()
+        with tempfile.TemporaryDirectory() as directory:
+            repository = DemoRepository(Path(directory))
+            with patch("backend.app.demo.engine.REPOSITORY", repository):
+                engine = DemoEngine(manager)
+                saved = await engine.save_strategy_config(
+                    {
+                        "exclude_teams_enabled": False,
+                        "min_initial_odds_enabled": False,
+                    }
+                )
+                state = await STATE.snapshot()
+
+                restored_engine = DemoEngine(manager)
+                await restored_engine.restore()
+
+            restored = await repository.get_config()
+
+        self.assertFalse(saved["exclude_teams_enabled"])
+        self.assertFalse(saved["min_initial_odds_enabled"])
+        self.assertFalse(state["strategy_config"]["exclude_teams_enabled"])
+        self.assertFalse(state["strategy_config"]["min_initial_odds_enabled"])
+        self.assertFalse(restored["exclude_teams_enabled"])
+        self.assertFalse(restored["min_initial_odds_enabled"])
+        self.assertFalse(restored_engine._config.exclude_teams_enabled)
+        self.assertFalse(restored_engine._config.min_initial_odds_enabled)
+
     async def test_browser_manager_discards_stale_context_instead_of_reusing_it(self):
         manager = BrowserManager()
         stale_context = StaleContext()
@@ -128,6 +156,14 @@ class DemoLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(state["browser"]["status"], "OPEN")
                 self.assertIsNotNone(engine.task)
                 self.assertFalse(engine.task.done())
+                filter_logs = [
+                    item
+                    for item in await repository.logs()
+                    if item["event"] == "MATCH_FILTERS_CONFIG"
+                ]
+                self.assertEqual(len(filter_logs), 1)
+                self.assertIn("exclude_teams_enabled=true", filter_logs[0]["message"])
+                self.assertIn("min_initial_odds_enabled=true", filter_logs[0]["message"])
                 await engine.stop()
 
     async def test_second_start_reuses_running_task(self):

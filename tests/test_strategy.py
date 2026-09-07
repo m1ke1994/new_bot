@@ -20,6 +20,49 @@ from backend.app.demo.strategy import (
 
 
 class StrategyTests(unittest.TestCase):
+    def test_match_filter_flags_default_to_enabled(self):
+        config = StrategyConfig.from_payload({})
+        self.assertTrue(config.exclude_teams_enabled)
+        self.assertTrue(config.min_initial_odds_enabled)
+        self.assertTrue(config.to_dict()["exclude_teams_enabled"])
+        self.assertTrue(config.to_dict()["min_initial_odds_enabled"])
+
+    def test_disabled_match_filters_allow_previously_rejected_values(self):
+        self.assertTrue(is_excluded_match("Chelsea", "Lille", enabled=True))
+        self.assertFalse(is_excluded_match("Chelsea", "Lille", enabled=False))
+        self.assertTrue(is_initial_odds_allowed(1.92, enabled=False))
+
+    def test_filter_switches_are_independent(self):
+        self.assertFalse(is_excluded_match("Chelsea", "Lille", enabled=False))
+        self.assertFalse(is_initial_odds_allowed(1.80, enabled=True))
+        self.assertTrue(is_initial_odds_allowed(1.80, enabled=False))
+        self.assertTrue(is_initial_odds_allowed(1.95, enabled=True))
+
+    def test_both_disabled_apply_no_additional_match_filters(self):
+        config = StrategyConfig.from_payload(
+            {
+                "exclude_teams_enabled": False,
+                "min_initial_odds_enabled": False,
+            }
+        )
+        self.assertFalse(
+            is_excluded_match(
+                "Chelsea",
+                "Roma",
+                enabled=config.exclude_teams_enabled,
+            )
+        )
+        self.assertTrue(
+            is_initial_odds_allowed(
+                1.80,
+                enabled=config.min_initial_odds_enabled,
+            )
+        )
+
+    def test_strategy_config_rejects_non_boolean_filter_values(self):
+        with self.assertRaises(ValueError):
+            StrategyConfig.from_payload({"exclude_teams_enabled": "false"})
+
     def test_initial_odds_threshold_is_inclusive_and_decimal_safe(self):
         self.assertEqual(MIN_INITIAL_SELECTED_ODDS, Decimal("1.93"))
         self.assertFalse(is_initial_odds_allowed(1.92))

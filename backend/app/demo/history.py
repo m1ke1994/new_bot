@@ -73,7 +73,7 @@ class DemoRepository:
         async with self._lock:
             with self._connection() as db:
                 row = db.execute("SELECT payload, created_at, updated_at FROM strategy_config WHERE id = 1").fetchone()
-        result = json.loads(row["payload"])
+        result = StrategyConfig.from_payload(json.loads(row["payload"])).to_dict()
         result.update(created_at=row["created_at"], updated_at=row["updated_at"])
         return result
 

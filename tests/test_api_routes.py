@@ -16,6 +16,8 @@ class ApiRouteTests(unittest.TestCase):
         self.assertIn(("/api/demo/state", "GET"), routes)
         self.assertIn(("/api/demo/history", "GET"), routes)
         self.assertIn(("/api/demo/history", "DELETE"), routes)
+        self.assertIn(("/api/demo/strategy-config", "GET"), routes)
+        self.assertIn(("/api/demo/strategy-config", "PUT"), routes)
         self.assertIn(("/api/live/start", "POST"), routes)
         self.assertIn(("/api/live/stop", "POST"), routes)
         self.assertIn(("/api/live/state", "GET"), routes)

@@ -87,6 +87,49 @@ class LeagueTeamFilterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(browser.last_scan_stats["excluded"], 2)
         write_front.assert_awaited_once_with(result)
 
+    async def test_disabled_filter_keeps_excluded_team_in_candidates(self):
+        class FakeLinks:
+            async def count(self):
+                return 1
+
+            def nth(self, index):
+                return index
+
+        chelsea = {
+            "id": "chelsea",
+            "team1": "Chelsea",
+            "team2": "Lille",
+            "finished": False,
+            "is_upcoming": True,
+            "period": "",
+            "time_seconds": 10,
+        }
+        with (
+            patch(
+                "backend.app.browser.league.find_league_container",
+                AsyncMock(return_value=object()),
+            ),
+            patch(
+                "backend.app.browser.league.league_match_links",
+                return_value=FakeLinks(),
+            ),
+            patch(
+                "backend.app.browser.league.match_card_for_link",
+                side_effect=lambda item: item,
+            ),
+            patch(
+                "backend.app.browser.league.parse_match",
+                AsyncMock(return_value=chelsea),
+            ),
+            patch("backend.app.browser.league.write_front", AsyncMock()),
+        ):
+            browser = LeagueBrowser(AsyncMock(), exclude_teams_enabled=False)
+            result = await browser.scan()
+
+        self.assertEqual([item["id"] for item in result], ["chelsea"])
+        self.assertEqual(browser.skipped_excluded, [])
+        self.assertEqual(browser.last_scan_stats["excluded"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

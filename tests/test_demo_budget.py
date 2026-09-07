@@ -45,12 +45,24 @@ class DemoJournalTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             first = DemoRepository(path)
-            await first.save_config({"initial_stake": 57, "progression_multiplier": 2.25, "max_steps": 3, "stakes": [57, 128, 288]})
+            await first.save_config(
+                {
+                    "initial_stake": 57,
+                    "progression_multiplier": 2.25,
+                    "max_steps": 3,
+                    "stakes": [57, 128, 288],
+                    "exclude_teams_enabled": False,
+                    "min_initial_odds_enabled": False,
+                }
+            )
             await first.save_budget({"initial_budget": 4142, "current_budget": 4014.40, "session_profit": -127.60})
             await first.save_sequence(current_step=3, status="WAITING_NEXT_MATCH", cumulative_pnl="-127.60")
 
             restored = DemoRepository(path)
-            self.assertEqual((await restored.get_config())["stakes"], [57.0, 128.0, 288.0])
+            restored_config = await restored.get_config()
+            self.assertEqual(restored_config["stakes"], [57.0, 128.0, 288.0])
+            self.assertFalse(restored_config["exclude_teams_enabled"])
+            self.assertFalse(restored_config["min_initial_odds_enabled"])
             self.assertEqual((await restored.get_budget())["current_budget"], 4014.40)
             self.assertEqual((await restored.get_sequence())["current_step"], 3)
     async def test_active_bet_is_updated_in_place_when_settled(self):

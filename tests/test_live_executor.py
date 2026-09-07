@@ -40,8 +40,10 @@ class FakeLocator:
     async def wait_for(self, **_kwargs):
         return None
 
-    async def click(self):
+    async def click(self, **_kwargs):
         self.clicks += 1
+        if "data-autobet-manual-click" in self.attributes:
+            self.attributes["data-autobet-manual-click"] = "1"
 
     async def fill(self, value):
         self.fills.append(value)
@@ -100,7 +102,7 @@ def decision(locator=None, *, amount=42):
 
 
 class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
-    async def test_prepares_coupon_without_clicking_final_button(self):
+    async def test_prepares_coupon_and_uses_existing_auto_confirm_mode(self):
         events = []
 
         async def log(event, _message):
@@ -115,9 +117,9 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(market.clicks, 1)
         self.assertEqual(page.amount.fills, ["", "42"])
         self.assertEqual(await page.amount.input_value(), "42")
-        self.assertEqual(page.confirm.clicks, 0)
+        self.assertEqual(page.confirm.clicks, 1)
         self.assertTrue(executor.market_was_selected(item.attempt_id))
-        self.assertEqual(executor.state(item.attempt_id), LiveStatus.READY_FOR_MANUAL_CONFIRMATION)
+        self.assertEqual(executor.state(item.attempt_id), LiveStatus.AWAITING_PLACEMENT_RESULT)
         self.assertEqual(
             events,
             [
@@ -125,16 +127,18 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
                 "LIVE_COUPON_OPENED",
                 "LIVE_AMOUNT_FILLED",
                 "LIVE_AMOUNT_VERIFIED",
-                "READY_FOR_MANUAL_CONFIRMATION",
+                "TEST_AUTO_CONFIRM",
+                "AWAITING_PLACEMENT_RESULT",
             ],
         )
 
-    async def test_manual_click_then_explicit_dom_success_activates_bet(self):
+    async def test_auto_click_then_disappearing_controls_activates_bet(self):
         executor, page, item = LiveExecutor(), FakePage(), decision()
         await executor.prepare(page, item)
-        page.confirm.attributes["data-autobet-manual-click"] = "1"
-        page.success.present = 1
-        page.success.visible = True
+        page.confirm.present = 0
+        page.confirm.visible = False
+        page.amount.present = 0
+        page.amount.visible = False
 
         observation = await executor.wait_for_manual_confirmation(
             page, item, asyncio.Event()
@@ -142,7 +146,7 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(observation.placed)
         self.assertEqual(executor.state(item.attempt_id), LiveStatus.ACTIVE)
-        self.assertEqual(page.confirm.clicks, 0)
+        self.assertEqual(page.confirm.clicks, 1)
 
     async def test_success_text_without_manual_click_is_not_accepted(self):
         executor, page, item = LiveExecutor(), FakePage(), decision()
@@ -155,7 +159,7 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
         observation = await executor.wait_for_manual_confirmation(page, item, stop)
 
         self.assertIsNone(observation)
-        self.assertEqual(executor.state(item.attempt_id), LiveStatus.READY_FOR_MANUAL_CONFIRMATION)
+        self.assertEqual(executor.state(item.attempt_id), LiveStatus.AWAITING_PLACEMENT_RESULT)
 
     async def test_wrong_amount_is_rejected(self):
         executor, page, item = LiveExecutor(), FakePage(), decision(amount=94)
