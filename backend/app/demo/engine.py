@@ -530,6 +530,23 @@ class DemoEngine:
             return
         await REPOSITORY.log("MATCH_OPENED", opened["url"])
 
+        # Каждый новый матч: перед первой ставкой ждём 10 секунд.
+        # Пауза относится только к моменту после открытия нового матча.
+        # Догоны внутри уже выбранного матча выполняются без этой задержки.
+        await REPOSITORY.log(
+            "NEW_MATCH_BET_DELAY",
+            f"{match_name}: ждём 10 секунд перед первой ставкой",
+        )
+        await STATE.update(
+            message=f"Новый матч открыт. Пауза 10 секунд перед первой ставкой: {match_name}",
+            event="NEW_MATCH_BET_DELAY",
+        )
+
+        await self._sleep_or_stop(10.0)
+
+        if self._stop_event.is_set():
+            return
+
         snapshot = await self._wait_for_initial_zero_score(selected_match)
         if snapshot is None:
             return
