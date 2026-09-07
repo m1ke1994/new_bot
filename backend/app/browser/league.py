@@ -3,6 +3,7 @@ from typing import Any
 
 from playwright.async_api import Page
 
+from backend.app.match_filters import excluded_team_in_match
 from matches import (
     exact_match_link_selector,
     find_league_container,
@@ -22,8 +23,14 @@ class MatchAlreadyStarted(RuntimeError):
 class LeagueBrowser:
     def __init__(self, page: Page) -> None:
         self.page = page
-        self.last_scan_stats = {"total": 0, "started": 0, "upcoming": 0}
+        self.last_scan_stats = {
+            "total": 0,
+            "started": 0,
+            "excluded": 0,
+            "upcoming": 0,
+        }
         self.skipped_started: list[dict[str, Any]] = []
+        self.skipped_excluded: list[dict[str, Any]] = []
 
     async def open(self) -> None:
         await open_matches_page(self.page)
@@ -41,13 +48,18 @@ class LeagueBrowser:
         print(f"[SELECTOR] Найдено матчей: {total}")
         upcoming: list[dict[str, Any]] = []
         started: list[dict[str, Any]] = []
+        excluded: list[dict[str, Any]] = []
 
         for index in range(total):
             item = await parse_match(match_card_for_link(links.nth(index)), index + 1)
             if not item or item["finished"]:
                 continue
             if item["is_upcoming"]:
-                upcoming.append(item)
+                excluded_team = excluded_team_in_match(item["team1"], item["team2"])
+                if excluded_team is not None:
+                    excluded.append({**item, "excluded_team": excluded_team})
+                else:
+                    upcoming.append(item)
             elif item["period"]:
                 started.append(item)
 
@@ -56,9 +68,11 @@ class LeagueBrowser:
             item["number"] = number
         await write_front(upcoming)
         self.skipped_started = started
+        self.skipped_excluded = excluded
         self.last_scan_stats = {
             "total": total,
             "started": len(started),
+            "excluded": len(excluded),
             "upcoming": len(upcoming),
         }
         return upcoming

@@ -1,6 +1,13 @@
 import unittest
+from decimal import Decimal
 
 from backend.app.demo.models import NextGoalOdds, Score, Scorer
+from backend.app.match_filters import (
+    EXCLUDED_TEAMS,
+    MIN_INITIAL_SELECTED_ODDS,
+    is_excluded_match,
+    is_initial_odds_allowed,
+)
 from backend.app.demo.strategy import (
     BET_STEPS,
     ScoreProgression,
@@ -13,6 +20,32 @@ from backend.app.demo.strategy import (
 
 
 class StrategyTests(unittest.TestCase):
+    def test_initial_odds_threshold_is_inclusive_and_decimal_safe(self):
+        self.assertEqual(MIN_INITIAL_SELECTED_ODDS, Decimal("1.93"))
+        self.assertFalse(is_initial_odds_allowed(1.92))
+        self.assertFalse(is_initial_odds_allowed("1.929"))
+        self.assertTrue(is_initial_odds_allowed(1.93))
+        self.assertTrue(is_initial_odds_allowed(2.05))
+
+    def test_excluded_teams_are_exact_casefolded_names(self):
+        self.assertEqual(EXCLUDED_TEAMS, {"chelsea", "челси", "roma", "рома"})
+        for team in (
+            "Chelsea",
+            " CHELSEA ",
+            "Челси",
+            "чЕЛСИ",
+            "Roma",
+            " Рома ",
+        ):
+            with self.subTest(team=team):
+                self.assertTrue(is_excluded_match(team, "Lille"))
+                self.assertTrue(is_excluded_match("Lille", team))
+
+    def test_team_filter_does_not_use_broad_substrings(self):
+        self.assertFalse(is_excluded_match("Chelsea U21", "Lille"))
+        self.assertFalse(is_excluded_match("Romarinho", "Nice"))
+        self.assertFalse(is_excluded_match("Arsenal", "Milan"))
+
     def test_default_stake_row_is_valid_but_not_used_as_runtime_config(self):
         self.assertEqual(len(BET_STEPS), 7)
         self.assertTrue(all(amount > 0 for amount in BET_STEPS))

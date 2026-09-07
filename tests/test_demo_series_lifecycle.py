@@ -76,6 +76,85 @@ class FakeLeagueBrowser:
 
 
 class DemoSeriesLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_low_initial_odds_skip_series_in_demo_and_live(self):
+        for mode in ("DEMO", "LIVE"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                repository = DemoRepository(Path(directory))
+                with (
+                    patch("backend.app.demo.engine.REPOSITORY", repository),
+                    patch("backend.app.demo.engine.LeagueBrowser", FakeLeagueBrowser),
+                ):
+                    engine = DemoEngine(FakeManager())
+                    engine._mode = mode
+                    engine._sleep_or_stop = AsyncMock()
+                    initial = snapshot(0, 0)
+                    engine._wait_for_initial_zero_score = AsyncMock(
+                        return_value=initial
+                    )
+                    engine._wait_for_odds = AsyncMock(
+                        return_value=(
+                            initial,
+                            NextGoalOdds(team1=1.92, team2=1.90),
+                        )
+                    )
+                    engine._read_fresh_score = AsyncMock()
+
+                    await engine._process_next_match(object())
+
+                    history = await repository.history(mode=mode)
+                    sequence = await repository.get_sequence()
+                    logs = await repository.logs()
+
+                self.assertEqual(history, [])
+                self.assertEqual(sequence["status"], "WAITING_FOR_MATCH")
+                self.assertIsNone(sequence["current_match_id"])
+                self.assertIsNone(sequence["selected_team"])
+                self.assertIsNone(engine._current_series)
+                self.assertIsNone(engine._pending_live_bet)
+                self.assertFalse(engine._read_fresh_score.await_count)
+                self.assertIn(
+                    "MATCH_SKIPPED_LOW_INITIAL_ODDS",
+                    [item["event"] for item in logs],
+                )
+
+    async def test_scoreboard_team_filter_is_final_safety_check_in_both_modes(self):
+        excluded = ScoreboardSnapshot(
+            "Chelsea",
+            "Lille",
+            Score(0, 0),
+            "00:00",
+            "",
+        )
+        for mode in ("DEMO", "LIVE"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                repository = DemoRepository(Path(directory))
+                with (
+                    patch("backend.app.demo.engine.REPOSITORY", repository),
+                    patch("backend.app.demo.engine.LeagueBrowser", FakeLeagueBrowser),
+                ):
+                    engine = DemoEngine(FakeManager())
+                    engine._mode = mode
+                    engine._sleep_or_stop = AsyncMock()
+                    engine._wait_for_initial_zero_score = AsyncMock(
+                        return_value=excluded
+                    )
+                    engine._wait_for_odds = AsyncMock()
+
+                    await engine._process_next_match(object())
+
+                    history = await repository.history(mode=mode)
+                    sequence = await repository.get_sequence()
+                    logs = await repository.logs()
+
+                self.assertEqual(history, [])
+                self.assertEqual(sequence["status"], "WAITING_FOR_MATCH")
+                self.assertIsNone(engine._current_series)
+                engine._wait_for_odds.assert_not_awaited()
+                self.assertIn(
+                    "MATCH_SKIPPED_EXCLUDED_TEAM",
+                    [item["event"] for item in logs],
+                )
+
     async def _run_two_step_series(
         self,
         *,
@@ -112,7 +191,9 @@ class DemoSeriesLifecycleTests(unittest.IsolatedAsyncioTestCase):
                             odds(
                                 score_after_loss.score.team1
                                 + score_after_loss.score.team2
-                                + 1
+                                + 1,
+                                team1=1.89,
+                                team2=2.05,
                             ),
                         ),
                     ]
@@ -134,7 +215,7 @@ class DemoSeriesLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         return history, sequence
 
-    async def test_lose_continues_same_match_and_team_until_win(self):
+    async def test_lose_continues_same_match_and_team_below_entry_threshold(self):
         history, sequence = await self._run_two_step_series(
             score_after_loss=snapshot(0, 1),
             final_score=snapshot(1, 1),
@@ -147,6 +228,7 @@ class DemoSeriesLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["selected_team"] for item in history], [MATCH["team1"]] * 2)
         self.assertEqual([item["step"] for item in history], [1, 2])
         self.assertEqual([item["amount"] for item in history], [211.0, 464.0])
+        self.assertEqual([item["odds"] for item in history], [1.984, 1.89])
         self.assertEqual([item["next_goal_number"] for item in history], [1, 2])
         self.assertEqual(sequence["status"], "WAITING_FOR_MATCH")
         self.assertEqual(sequence["current_step"], 1)

@@ -24,6 +24,11 @@ from backend.app.live.models import (
     PendingLiveBet,
     PlacementObservation,
 )
+from backend.app.match_filters import (
+    MIN_INITIAL_SELECTED_ODDS,
+    excluded_team_in_match,
+    is_initial_odds_allowed,
+)
 
 from .budget import DemoBudget
 from .config import CONFIG
@@ -471,13 +476,32 @@ class DemoEngine:
             await REPOSITORY.log("MATCHES_FOUND", str(stats["total"]))
             await REPOSITORY.log(
                 "MATCHES_FILTERED",
-                f"Всего: {stats['total']}; Started: {stats['started']}; Upcoming: {stats['upcoming']}",
+                f"Всего: {stats['total']}; Started: {stats['started']}; "
+                f"Excluded: {stats.get('excluded', 0)}; Upcoming: {stats['upcoming']}",
             )
             for item in league.skipped_started:
                 await REPOSITORY.log(
                     "MATCH_SKIPPED_STARTED",
                     f"{item['team1']} — {item['team2']} / period={item['period']}",
                 )
+            for item in getattr(league, "skipped_excluded", []):
+                await REPOSITORY.log(
+                    "MATCH_SKIPPED_EXCLUDED_TEAM",
+                    f"{item['team1']} — {item['team2']}: match excluded by team filter "
+                    f"({item['excluded_team']})",
+                )
+            allowed_matches = []
+            for item in matches:
+                excluded_team = excluded_team_in_match(item["team1"], item["team2"])
+                if excluded_team is not None:
+                    await REPOSITORY.log(
+                        "MATCH_SKIPPED_EXCLUDED_TEAM",
+                        f"{item['team1']} — {item['team2']}: match excluded by team filter "
+                        f"({excluded_team})",
+                    )
+                    continue
+                allowed_matches.append(item)
+            matches = allowed_matches
             for item in matches:
                 await REPOSITORY.log(
                     "MATCH_CANDIDATE",
@@ -550,6 +574,19 @@ class DemoEngine:
         snapshot = await self._wait_for_initial_zero_score(selected_match)
         if snapshot is None:
             return
+        excluded_team = excluded_team_in_match(snapshot.team1, snapshot.team2)
+        if excluded_team is not None:
+            message = (
+                f"{snapshot.team1} — {snapshot.team2}: match excluded by team filter "
+                f"({excluded_team})"
+            )
+            await REPOSITORY.log("MATCH_SKIPPED_EXCLUDED_TEAM", message)
+            await self._status(
+                DemoStatus.MATCH_SKIPPED,
+                message,
+                "MATCH_SKIPPED_EXCLUDED_TEAM",
+            )
+            return
         odds_result = await self._wait_for_odds(snapshot, selected_match)
         if odds_result is None:
             return
@@ -561,6 +598,23 @@ class DemoEngine:
             )
             return
         selection = select_team_with_higher_odds(snapshot.team1, snapshot.team2, initial_odds)
+        if not is_initial_odds_allowed(selection.selected_odds):
+            message = (
+                f"{snapshot.team1} — {snapshot.team2}: "
+                f"selected_team={selection.selected_team} "
+                f"selected_odds={selection.selected_odds} "
+                f"minimum={MIN_INITIAL_SELECTED_ODDS}"
+            )
+            await REPOSITORY.log("MATCH_SKIPPED_LOW_INITIAL_ODDS", message)
+            await self._status(
+                DemoStatus.MATCH_SKIPPED,
+                message,
+                "MATCH_SKIPPED_LOW_INITIAL_ODDS",
+                odds=self._odds_state(
+                    initial_odds, selection.selected_odds, selection.other_odds
+                ),
+            )
+            return
         await STATE.update(
             status=DemoStatus.TEAM_SELECTED.value,
             message=f"Выбрана команда {selection.selected_team}: коэффициент выше",
