@@ -5,6 +5,10 @@ from backend.app.demo.models import Scorer
 from backend.app.live.executor import (
     ACCOUNT_SELECTOR,
     AMOUNT_SELECTOR,
+    BLOCKED_COUPON_SELECTOR,
+    BLOCKED_EVENT_SIGNAL,
+    BLOCKED_REMOVE_SELECTOR,
+    BLOCKED_TEXT_SELECTOR,
     CONFIRM_SELECTOR,
     COUPON_SELECTOR,
     LiveExecutor,
@@ -13,7 +17,7 @@ from backend.app.live.models import LiveDecision, LivePreparationError, LiveStat
 
 
 class FakeLocator:
-    def __init__(self, *, text="", value="", count=1, visible=True, disabled=False, keep_value=False):
+    def __init__(self, *, text="", value="", count=1, visible=True, disabled=False, keep_value=False, on_click=None):
         self.text = text
         self.value = value
         self.present = count
@@ -23,6 +27,7 @@ class FakeLocator:
         self.attributes = {}
         self.clicks = 0
         self.fills = []
+        self.on_click = on_click
 
     @property
     def first(self):
@@ -44,6 +49,8 @@ class FakeLocator:
         self.clicks += 1
         if "data-autobet-manual-click" in self.attributes:
             self.attributes["data-autobet-manual-click"] = "1"
+        if self.on_click is not None:
+            self.on_click()
 
     async def fill(self, value):
         self.fills.append(value)
@@ -74,6 +81,24 @@ class FakePage:
         self.confirm = FakeLocator(text="Сделать ставку")
         self.success = FakeLocator(count=0, visible=False)
         self.failure = FakeLocator(count=0, visible=False)
+        self.blocked_coupon = FakeLocator(count=0, visible=False)
+        self.blocked_text = FakeLocator(
+            text="Заблокированное событие",
+            count=0,
+            visible=False,
+        )
+
+        def remove_blocked():
+            self.blocked_coupon.present = 0
+            self.blocked_coupon.visible = False
+            self.blocked_text.present = 0
+            self.blocked_text.visible = False
+
+        self.blocked_remove = FakeLocator(
+            count=0,
+            visible=False,
+            on_click=remove_blocked,
+        )
 
     def locator(self, selector):
         return {
@@ -81,7 +106,18 @@ class FakePage:
             ACCOUNT_SELECTOR: self.account,
             AMOUNT_SELECTOR: self.amount,
             CONFIRM_SELECTOR: self.confirm,
+            BLOCKED_COUPON_SELECTOR: self.blocked_coupon,
+            BLOCKED_TEXT_SELECTOR: self.blocked_text,
+            BLOCKED_REMOVE_SELECTOR: self.blocked_remove,
         }[selector]
+
+    def show_blocked_event(self):
+        self.blocked_coupon.present = 1
+        self.blocked_coupon.visible = True
+        self.blocked_text.present = 1
+        self.blocked_text.visible = True
+        self.blocked_remove.present = 1
+        self.blocked_remove.visible = True
 
     def get_by_text(self, pattern):
         return self.failure if "не принята" in pattern.pattern else self.success
@@ -102,6 +138,34 @@ def decision(locator=None, *, amount=42):
 
 
 class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pending_blocked_event_returns_retryable_not_placed(self):
+        executor, page, item = LiveExecutor(), FakePage(), decision()
+        await executor.prepare(page, item)
+        page.show_blocked_event()
+
+        observation = await executor.wait_for_manual_confirmation(
+            page,
+            item,
+            asyncio.Event(),
+        )
+
+        self.assertFalse(observation.placed)
+        self.assertTrue(observation.retryable)
+        self.assertEqual(observation.signal, BLOCKED_EVENT_SIGNAL)
+        self.assertEqual(executor.state(item.attempt_id), LiveStatus.AWAITING_PLACEMENT_RESULT)
+
+    async def test_blocked_coupon_removal_is_idempotent(self):
+        executor, page, item = LiveExecutor(), FakePage(), decision()
+        page.show_blocked_event()
+
+        first = await executor.remove_blocked_coupon(page, item.attempt_id)
+        second = await executor.remove_blocked_coupon(page, item.attempt_id)
+
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertEqual(page.blocked_remove.clicks, 1)
+        self.assertFalse(await executor.blocked_event_exists(page))
+
     async def test_prepares_coupon_and_uses_existing_auto_confirm_mode(self):
         events = []
 

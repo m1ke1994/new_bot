@@ -15,7 +15,7 @@ from backend.app.browser.manager import BROWSER_MANAGER, BrowserManager
 from backend.app.browser.market import MarketReadError, market_canvas_debug, read_next_goal_odds
 from backend.app.browser.match import MatchBrowser
 from backend.app.browser.scoreboard import ScoreReadError
-from backend.app.live.executor import LiveExecutor
+from backend.app.live.executor import BLOCKED_EVENT_SIGNAL, LiveExecutor
 from backend.app.live.models import (
     ActiveLiveBet,
     LiveDecision,
@@ -1266,6 +1266,7 @@ class DemoEngine:
         record: dict[str, Any],
     ):
         """Prepare one strategy decision until the user places it or stops LIVE."""
+        retrying_blocked_attempt = False
         while not self._stop_event.is_set():
             assert self._pending_live_bet is not None
             self._pending_live_bet = self._pending_live_bet.with_score(snapshot.score)
@@ -1276,6 +1277,33 @@ class DemoEngine:
                     return None
                 snapshot, current_odds = odds_result
                 continue
+
+            if retrying_blocked_attempt:
+                verified = await self._read_fresh_score(
+                    browser,
+                    selected_match,
+                    snapshot,
+                )
+                if verified.score != snapshot.score:
+                    await REPOSITORY.log(
+                        "LIVE_SCORE_CHANGED_BEFORE_RETRY",
+                        f"{snapshot.score.text()} → {verified.score.text()}; "
+                        f"strategy_step={step} unchanged",
+                    )
+                    snapshot = verified
+                    self._pending_live_bet = self._pending_live_bet.with_score(
+                        snapshot.score
+                    )
+                    odds_result = await self._wait_for_odds(snapshot, selected_match)
+                    if odds_result is None:
+                        return None
+                    snapshot, current_odds = odds_result
+                    continue
+                retrying_blocked_attempt = False
+                await REPOSITORY.log(
+                    "LIVE_BLOCKED_RETRY_MARKET_READY",
+                    f"step={step} stake={amount} next_goal={target_goal}",
+                )
 
             selected_odd, opponent_odd = odds_for_selected_side(
                 current_odds, selection.selected_side
@@ -1378,6 +1406,78 @@ class DemoEngine:
                     await REPOSITORY.save_bet(attempt_record)
                     return None
                 if not observation.placed:
+                    if observation.signal == BLOCKED_EVENT_SIGNAL:
+                        score_before_removal = await self._read_fresh_score(
+                            browser,
+                            selected_match,
+                            latest or placement_snapshot,
+                        )
+                        await REPOSITORY.log(
+                            "LIVE_PENDING_NOT_ACCEPTED",
+                            f"step={step} stake={amount}; blocked event",
+                        )
+                        await REPOSITORY.log(
+                            "LIVE_BLOCKED_SCORE_BEFORE_REMOVAL",
+                            f"old={placement_snapshot.score.text()} "
+                            f"current={score_before_removal.score.text()}",
+                        )
+                        await REPOSITORY.log(
+                            "LIVE_BLOCKED_PROGRESS_UNCHANGED",
+                            f"step={step} stake={amount} team={selection.selected_team}",
+                        )
+                        await self._invalidate_live_attempt(
+                            attempt_record,
+                            decision,
+                            observation.signal,
+                            publish_live,
+                        )
+                        await self.live_executor.remove_blocked_coupon(
+                            page,
+                            attempt_id,
+                        )
+                        await REPOSITORY.discard_unaccepted_bet(attempt_id)
+
+                        score_after_removal = await self._read_fresh_score(
+                            browser,
+                            selected_match,
+                            score_before_removal,
+                        )
+                        if score_after_removal.score != score_before_removal.score:
+                            await REPOSITORY.log(
+                                "LIVE_SCORE_CHANGED_DURING_BLOCKED_RECOVERY",
+                                f"{score_before_removal.score.text()} → "
+                                f"{score_after_removal.score.text()}",
+                            )
+                        snapshot = score_after_removal
+                        self._pending_live_bet = self._pending_live_bet.with_score(
+                            snapshot.score
+                        )
+                        new_target_goal = self._pending_live_bet.target_goal_number
+                        await REPOSITORY.log(
+                            "LIVE_BLOCKED_GOAL_MARKET_UPDATED",
+                            f"Следующий гол №{target_goal} → "
+                            f"Следующий гол №{new_target_goal}; step={step}",
+                        )
+                        await self._publish_pending_bet(
+                            selection,
+                            match_name,
+                            step,
+                            snapshot,
+                        )
+                        odds_result = await self._wait_for_odds(
+                            snapshot,
+                            selected_match,
+                        )
+                        if odds_result is None:
+                            return None
+                        snapshot, current_odds = odds_result
+                        retrying_blocked_attempt = True
+                        await REPOSITORY.log(
+                            "LIVE_BLOCKED_RETRYING",
+                            f"step={step} stake={amount} "
+                            f"next_goal={new_target_goal}",
+                        )
+                        continue
                     await self._invalidate_live_attempt(
                         attempt_record,
                         decision,

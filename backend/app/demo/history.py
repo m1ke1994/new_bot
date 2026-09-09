@@ -140,6 +140,25 @@ class DemoRepository:
     async def add_bet(self, item: dict[str, Any]) -> dict[str, Any]:
         return await self.save_bet(item)
 
+    async def discard_unaccepted_bet(self, bet_id: str) -> bool:
+        """Remove one confirmed-unaccepted technical LIVE attempt."""
+        await self.initialize()
+        async with self._lock:
+            with self._connection() as db:
+                row = db.execute(
+                    "SELECT payload FROM bet_history WHERE id=?",
+                    (bet_id,),
+                ).fetchone()
+                if row is None:
+                    return False
+                result = str(json.loads(row["payload"]).get("result") or "")
+                if result != "NOT_PLACED":
+                    raise ValueError(
+                        f"Cannot discard accepted or unresolved bet {bet_id}: {result}"
+                    )
+                cursor = db.execute("DELETE FROM bet_history WHERE id=?", (bet_id,))
+        return cursor.rowcount > 0
+
     async def history(self, limit: int = 500, mode: str | None = None) -> list[dict[str, Any]]:
         await self.initialize()
         async with self._lock:

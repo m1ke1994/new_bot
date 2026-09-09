@@ -17,6 +17,13 @@ AMOUNT_SELECTOR = (
 )
 CONFIRM_SELECTOR = ".quick-coupon-main button.quick-coupon-put-bet-button"
 CONFIRM_TEXT = "Сделать ставку"
+BLOCKED_COUPON_SELECTOR = ".quick-coupon-events-card__lock"
+BLOCKED_TEXT_SELECTOR = ".quick-coupon-events-card-lock__text"
+BLOCKED_REMOVE_SELECTOR = (
+    'button.quick-coupon-events-card-lock__remove[aria-label="Удалить"]'
+)
+BLOCKED_TEXT = "Заблокированное событие"
+BLOCKED_EVENT_SIGNAL = "BLOCKED_EVENT"
 
 # ТЕСТОВЫЙ АККАУНТ:
 # автоподтверждение включено прямо в коде, ENV больше не требуется.
@@ -47,6 +54,7 @@ class LiveExecutor:
         self._states: dict[str, LiveStatus] = {}
         self._confirm_handles: dict[str, Any] = {}
         self._market_selected: set[str] = set()
+        self._recovered_blocked_attempts: set[str] = set()
         self._lock = asyncio.Lock()
 
     async def _log(self, event: str, message: str) -> None:
@@ -79,6 +87,57 @@ class LiveExecutor:
             return await handle.get_attribute("data-autobet-manual-click") == "1"
         except Exception:
             return self.state(attempt_id) == LiveStatus.AWAITING_PLACEMENT_RESULT
+
+    async def blocked_event_exists(self, page: Any) -> bool:
+        try:
+            text = page.locator(BLOCKED_TEXT_SELECTOR).first
+            if await text.count() > 0 and await text.is_visible():
+                normalized = " ".join((await text.inner_text()).casefold().split())
+                if BLOCKED_TEXT.casefold() in normalized:
+                    return True
+        except Exception:
+            pass
+
+        try:
+            container = page.locator(BLOCKED_COUPON_SELECTOR).first
+            return await container.count() > 0 and await container.is_visible()
+        except Exception:
+            return False
+
+    async def remove_blocked_coupon(self, page: Any, attempt_id: str) -> bool:
+        """Remove one rejected coupon exactly once for a placement attempt."""
+        async with self._lock:
+            if attempt_id in self._recovered_blocked_attempts:
+                return False
+
+            remove = page.locator(BLOCKED_REMOVE_SELECTOR).first
+            if await remove.count() == 0 or not await remove.is_visible():
+                raise LivePreparationError(
+                    "LIVE_BLOCKED_REMOVE_NOT_FOUND",
+                    "Кнопка удаления заблокированного события не найдена.",
+                )
+
+            await self._log("LIVE_BLOCKED_COUPON_REMOVING", f"attempt={attempt_id}")
+            try:
+                await remove.click(timeout=5_000)
+                blocked = page.locator(BLOCKED_COUPON_SELECTOR).first
+                await blocked.wait_for(state="hidden", timeout=5_000)
+                if await self.blocked_event_exists(page):
+                    raise LivePreparationError(
+                        "LIVE_BLOCKED_COUPON_NOT_REMOVED",
+                        "Заблокированное событие осталось в coupon после удаления.",
+                    )
+            except LivePreparationError:
+                raise
+            except Exception as error:
+                raise LivePreparationError(
+                    "LIVE_BLOCKED_COUPON_NOT_REMOVED",
+                    f"Не удалось удалить заблокированное событие: {error}",
+                ) from error
+
+            self._recovered_blocked_attempts.add(attempt_id)
+            await self._log("LIVE_BLOCKED_COUPON_REMOVED", f"attempt={attempt_id}")
+            return True
 
     async def prepare(
         self,
@@ -246,6 +305,17 @@ class LiveExecutor:
         click_seen = current_state == LiveStatus.AWAITING_PLACEMENT_RESULT
 
         while not stop_event.is_set():
+            if await self.blocked_event_exists(page):
+                await self._log(
+                    "LIVE_BLOCKED_EVENT_DETECTED",
+                    f"attempt={decision.attempt_id}; status={current_state.value}",
+                )
+                return PlacementObservation(
+                    False,
+                    BLOCKED_EVENT_SIGNAL,
+                    retryable=True,
+                )
+
             if not click_seen:
                 click_seen = await self.manual_click_seen(decision.attempt_id)
                 if click_seen:
@@ -322,3 +392,4 @@ class LiveExecutor:
         self._states.clear()
         self._confirm_handles.clear()
         self._market_selected.clear()
+        self._recovered_blocked_attempts.clear()
