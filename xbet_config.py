@@ -4,6 +4,7 @@ import os
 XBET_LEAGUE_PATH = (
     "live/fifa/2860561-fc-25-3x3-conference-league"
 )
+TABLE_TENNIS_PATH = "ru/live/table-tennis"
 
 
 def get_xbet_url(path: str = "") -> str:

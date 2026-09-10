@@ -3,6 +3,8 @@ from pathlib import Path
 
 
 APP_VUE = Path(__file__).parents[1] / "front" / "frontend" / "src" / "App.vue"
+FORKS_VIEW = APP_VUE.parent / "views" / "ForksView.vue"
+ROUTER = APP_VUE.parent / "router" / "index.js"
 
 
 class FrontendControlTests(unittest.TestCase):
@@ -49,6 +51,23 @@ class FrontendControlTests(unittest.TestCase):
         self.assertIn("strategyConfig.value.strategy_type", self.source)
         self.assertIn("Стратегия «Тотал чёт» пока доступна только в DEMO.", self.source)
         self.assertIn("item.strategy_name", self.source)
+
+    def test_forks_tactic_links_to_separate_route(self):
+        self.assertIn('to="/forks"', self.source)
+        self.assertIn("Вилки", self.source)
+        self.assertIn("Настольный теннис", self.source)
+        self.assertIn("path: '/forks'", ROUTER.read_text(encoding="utf-8"))
+
+    def test_forks_view_uses_read_only_scanner_api(self):
+        source = FORKS_VIEW.read_text(encoding="utf-8")
+        self.assertIn("/api/table-tennis/scan", source)
+        self.assertIn("/api/table-tennis/start", source)
+        self.assertIn("/api/table-tennis/stop", source)
+        self.assertIn("Запустить DEMO вилки", source)
+        self.assertIn("Остановить", source)
+        self.assertIn("/api/table-tennis/leagues", source)
+        self.assertIn("/api/table-tennis/matches", source)
+        self.assertNotIn("stake", source.casefold())
 
 
 if __name__ == "__main__":

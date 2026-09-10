@@ -222,6 +222,14 @@ class DemoEngine:
         return self._mode
 
     async def start(self, mode: str = "DEMO") -> dict[str, Any]:
+        # The read-only table-tennis scanner shares this exact Playwright page.
+        # Never let two independent workflows navigate it concurrently.
+        from backend.app.table_tennis.scanner import TABLE_TENNIS_SCANNER
+
+        if TABLE_TENNIS_SCANNER.scanning:
+            raise ModeConflictError(
+                "Сначала остановите DEMO «Вилки» и общий Playwright browser."
+            )
         requested_mode = mode.strip().upper()
         if requested_mode not in {"DEMO", "LIVE"}:
             raise ValueError(f"Неизвестный режим: {mode}")

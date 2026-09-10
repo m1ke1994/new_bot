@@ -23,6 +23,12 @@ class ApiRouteTests(unittest.TestCase):
         self.assertIn(("/api/live/state", "GET"), routes)
         self.assertIn(("/api/live/history", "GET"), routes)
         self.assertIn(("/api/demo/database", "DELETE"), routes)
+        self.assertIn(("/api/table-tennis/scan", "POST"), routes)
+        self.assertIn(("/api/table-tennis/start", "POST"), routes)
+        self.assertIn(("/api/table-tennis/stop", "POST"), routes)
+        self.assertIn(("/api/table-tennis/state", "GET"), routes)
+        self.assertIn(("/api/table-tennis/leagues", "GET"), routes)
+        self.assertIn(("/api/table-tennis/matches", "GET"), routes)
 
 
 if __name__ == "__main__":

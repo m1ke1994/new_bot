@@ -931,6 +931,14 @@ onBeforeUnmount(() => {
 
             </label>
 
+            <RouterLink class="strategy-option forks-strategy-option" to="/forks">
+
+              <span class="forks-strategy-icon">TT</span>
+
+              <span><strong>Вилки</strong><small>Настольный теннис</small></span>
+
+            </RouterLink>
+
           </div>
 
           <p class="strategy-description"><strong>{{ selectedStrategyName }}</strong> · {{ selectedStrategyDescription }}</p>

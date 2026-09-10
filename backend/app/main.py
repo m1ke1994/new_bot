@@ -9,6 +9,8 @@ from backend.app.demo.engine import ENGINE
 from backend.app.routes.browser import router as browser_router
 from backend.app.routes.demo import router as demo_router
 from backend.app.routes.live import router as live_router
+from backend.app.routes.table_tennis import router as table_tennis_router
+from backend.app.table_tennis.scanner import TABLE_TENNIS_SCANNER
 
 
 @asynccontextmanager
@@ -17,6 +19,8 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        if TABLE_TENNIS_SCANNER.scanning:
+            await TABLE_TENNIS_SCANNER.stop()
         await ENGINE.stop()
         await BROWSER_MANAGER.stop()
 
@@ -36,6 +40,7 @@ app.add_middleware(
 app.include_router(demo_router)
 app.include_router(browser_router)
 app.include_router(live_router)
+app.include_router(table_tennis_router)
 
 
 @app.get("/api/health")

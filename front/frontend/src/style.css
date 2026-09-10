@@ -179,7 +179,7 @@ button { font: inherit; }
 .strategy-picker-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; }
 .strategy-picker-heading h3 { margin: 3px 0 0; color: var(--text); font-size: 15px; }
 .strategy-picker-heading small, .strategy-description { color: var(--muted); font-size: 10px; }
-.strategy-option-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+.strategy-option-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
 .strategy-config .strategy-option { min-height: 64px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; display: flex; align-items: center; gap: 12px; background: #0d131c; cursor: pointer; }
 .strategy-config .strategy-option.selected { border-color: rgba(56, 217, 149, .38); background: var(--green-soft); }
 .strategy-config .strategy-option:has(input:disabled) { cursor: not-allowed; }
@@ -187,6 +187,8 @@ button { font: inherit; }
 .strategy-option strong, .strategy-option small { display: block; }
 .strategy-option strong { color: var(--text); font-size: 12px; }
 .strategy-option small { margin-top: 4px; color: var(--muted); font-size: 10px; }
+.forks-strategy-option { color: inherit; text-decoration: none; }
+.forks-strategy-icon { width: 34px; height: 34px; border: 1px solid rgba(255, 180, 76, .4); border-radius: 50%; display: grid; place-items: center; color: var(--amber); font-size: 10px; font-weight: 900; }
 .strategy-description { margin: 12px 0 0; line-height: 1.5; }
 .strategy-description strong { color: var(--text); }
 .strategy-config-body, .stake-row, .strategy-config-footer {
