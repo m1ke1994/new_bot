@@ -10,7 +10,7 @@ from backend.app.routes.browser import router as browser_router
 from backend.app.routes.demo import router as demo_router
 from backend.app.routes.live import router as live_router
 from backend.app.routes.table_tennis import router as table_tennis_router
-from backend.app.table_tennis.scanner import TABLE_TENNIS_SCANNER
+from backend.app.table_tennis.forks_scanner import TABLE_TENNIS_SCANNER
 
 
 @asynccontextmanager
