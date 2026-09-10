@@ -39,9 +39,10 @@ from .state import TABLE_TENNIS_STATE, TableTennisStateStore, utc_now
 class ForksTableTennisScanner(TableTennisScanner):
     """Paper-trading table-tennis forks strategy.
 
-    It scans every league, keeps only 0:0 matches, opens the nearest candidate,
-    watches 1X2 of the first party and records two virtual legs. It never clicks
-    bookmaker odds or sends a real bet.
+    At startup it scans the table-tennis catalog exactly once, keeps only LIVE
+    matches with score 0:0, opens the first such match, watches 1X2 of the first
+    party and records two virtual legs. It never clicks bookmaker odds or sends
+    a real bet.
     """
 
     def __init__(
@@ -133,8 +134,11 @@ class ForksTableTennisScanner(TableTennisScanner):
 
         unique = deduplicate_match_models(collected)
         candidates = [
-            match for match in select_zero_zero_matches(unique)
-            if str(match.event_id) not in self._processed_event_ids
+            match
+            for match in select_zero_zero_matches(unique)
+            if match.status == "LIVE"
+            and match.started is True
+            and str(match.event_id) not in self._processed_event_ids
         ]
         await self.state.replace_results(
             [item.to_dict() for item in scanned_leagues],
@@ -142,7 +146,7 @@ class ForksTableTennisScanner(TableTennisScanner):
             [zero_zero_candidate_payload(item) for item in candidates],
         )
         await self.state.update(
-            status="ZERO_ZERO_READY" if candidates else "WAITING_FOR_ZERO_ZERO",
+            status="ZERO_ZERO_READY" if candidates else "NO_LIVE_ZERO_ZERO_MATCH",
             matches_found=len(candidates),
             candidates_count=len(candidates),
             current_league=None,
@@ -368,17 +372,36 @@ class ForksTableTennisScanner(TableTennisScanner):
         async with self._scan_lock:
             try:
                 page, table_tennis_url = await self._authorize_page()
-                while not self._stop_event.is_set():
-                    candidates = await self._scan_zero_zero_catalog(page, table_tennis_url)
-                    if not candidates:
-                        await self._sleep_or_stop(get_table_tennis_odds_poll_interval())
-                        continue
-                    candidate = candidates[0]
-                    outcome = await self._observe_zero_zero(page, candidate)
-                    if candidate.event_id:
-                        self._processed_event_ids.add(str(candidate.event_id))
-                    await self._log("FORKS_MATCH_FINISHED", f"event={candidate.event_id}; outcome={outcome}")
-                    await self._sleep_or_stop(0.25)
+
+                # Важно: каталог сканируется только один раз на один запуск бота.
+                candidates = await self._scan_zero_zero_catalog(page, table_tennis_url)
+                if not candidates:
+                    await self.state.update(
+                        status="NO_LIVE_ZERO_ZERO_MATCH",
+                        scanning=False,
+                        active_match_id=None,
+                        active_match=None,
+                    )
+                    await self._log(
+                        "FORKS_NO_MATCH",
+                        "После однократного сканирования нет LIVE-матча со счётом 0:0.",
+                    )
+                    return
+
+                # Берём первый найденный LIVE-матч 0:0 и больше каталог не пересканируем.
+                candidate = candidates[0]
+                await self._log(
+                    "FORKS_MATCH_SELECTED",
+                    f"event={candidate.event_id}; {candidate.player_1} - {candidate.player_2}; score={candidate.score}",
+                )
+                outcome = await self._observe_zero_zero(page, candidate)
+                if candidate.event_id:
+                    self._processed_event_ids.add(str(candidate.event_id))
+                await self._log(
+                    "FORKS_MATCH_FINISHED",
+                    f"event={candidate.event_id}; outcome={outcome}",
+                )
+                await self.state.update(scanning=False)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
