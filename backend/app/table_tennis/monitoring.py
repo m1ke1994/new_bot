@@ -173,13 +173,18 @@ def ensure_same_event(page: Page, expected_event_id: str) -> None:
 
 
 async def find_target_party_item(page: Page, target_set: int) -> Locator | None:
+    """Find the concrete sub-game tab by its visible caption, not by Vue data-v attributes."""
     items = page.locator(f"{SUB_GAMES_LIST_SELECTOR} {SUB_GAME_ITEM_SELECTOR}")
     for index in range(await items.count()):
         item = items.nth(index)
         caption = item.locator(CAPTION_SELECTOR).first
         if await caption.count() == 0:
             continue
-        if parse_party_number(await caption.inner_text()) == target_set:
+        try:
+            text = await caption.inner_text()
+        except Exception:
+            continue
+        if parse_party_number(text) == target_set:
             return item
     return None
 
@@ -193,37 +198,116 @@ async def _wait_or_stop(stop_event: asyncio.Event, seconds: float) -> None:
         raise asyncio.CancelledError
 
 
+async def _wait_until_party_selected(
+    page: Page,
+    event_id: str,
+    target_set: int,
+    stop_event: asyncio.Event,
+    *,
+    timeout: float,
+) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        ensure_same_event(page, event_id)
+        if await read_selected_party(page) == target_set:
+            return True
+        await _wait_or_stop(stop_event, 0.1)
+    return False
+
+
 async def open_target_party(
     page: Page,
     event_id: str,
     target_set: int,
     stop_event: asyncio.Event,
     *,
-    timeout: float = 10.0,
+    timeout: float = 15.0,
 ) -> None:
+    """Open a party tab and verify that the site really changed the selected sub-game.
+
+    The table-tennis page initially opens on «Основная игра». The sub-games list is
+    rendered asynchronously, so a single immediate lookup/click is unreliable.
+    """
     ensure_same_event(page, event_id)
-    item = await find_target_party_item(page, target_set)
+
+    list_locator = page.locator(SUB_GAMES_LIST_SELECTOR).first
+    try:
+        await list_locator.wait_for(state="attached", timeout=min(timeout * 1000, 15_000))
+    except Exception as error:
+        raise TargetPartyNotAvailable("Список партий не появился на странице матча.") from error
+
+    deadline = time.monotonic() + timeout
+    item: Locator | None = None
+    while time.monotonic() < deadline and not stop_event.is_set():
+        ensure_same_event(page, event_id)
+        item = await find_target_party_item(page, target_set)
+        if item is not None:
+            break
+        await _wait_or_stop(stop_event, 0.1)
+
     if item is None:
         raise TargetPartyNotAvailable(
             f"Вкладка «{target_set}-я Партия» отсутствует."
         )
-    ensure_same_event(page, event_id)
-    await item.scroll_into_view_if_needed()
-    await item.click()
 
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    if await read_selected_party(page) == target_set:
+        return
+
+    # Click the visible caption first. The site's handler is attached to the tab
+    # and the child click bubbles to it. If the normal Playwright click is
+    # intercepted during a re-render, retry on the LI and then dispatch a click.
+    click_targets = [item.locator(CAPTION_SELECTOR).first, item]
+    last_error: Exception | None = None
+    for target in click_targets:
         ensure_same_event(page, event_id)
-        if await read_selected_party(page) == target_set:
-            return
-        await _wait_or_stop(stop_event, 0.1)
-    raise TargetPartyNotAvailable(
-        f"Вкладка «{target_set}-я Партия» не стала выбранной."
-    )
+        try:
+            await target.scroll_into_view_if_needed()
+            await target.click(timeout=3_000)
+            if await _wait_until_party_selected(
+                page,
+                event_id,
+                target_set,
+                stop_event,
+                timeout=2.0,
+            ):
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            last_error = error
+
+    # Last fallback for the same visible tab. This does not use any data-v-* selector.
+    try:
+        ensure_same_event(page, event_id)
+        item = await find_target_party_item(page, target_set)
+        if item is not None:
+            await item.dispatch_event("click")
+            if await _wait_until_party_selected(
+                page,
+                event_id,
+                target_set,
+                stop_event,
+                timeout=max(1.0, min(3.0, timeout)),
+            ):
+                return
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        last_error = error
+
+    message = f"Вкладка «{target_set}-я Партия» найдена, но сайт не переключил её в выбранное состояние."
+    if last_error is not None:
+        message += f" Последняя ошибка: {type(last_error).__name__}: {last_error}"
+    raise TargetPartyNotAvailable(message)
 
 
 async def find_target_market_group(page: Page, target_set: int) -> Locator | None:
-    expected = normalize_text(target_market_title(target_set)).casefold()
+    """Find the 1X2 market inside the already selected party.
+
+    On the current site, after selecting «1-я партия» the accordion is titled simply
+    «1X2». Older layouts used «1X2. 1-я Партия», so both forms are supported.
+    """
+    expected_party_title = normalize_text(target_market_title(target_set)).casefold().replace("х", "x")
     groups = page.locator(
         f"{MARKET_CONTENT_ITEM_SELECTOR} {MARKET_GROUP_SELECTOR}, "
         f"{MARKET_GROUP_SELECTOR}"
@@ -234,7 +318,8 @@ async def find_target_market_group(page: Page, target_set: int) -> Locator | Non
         title = group.locator(title_selector).first
         if await title.count() == 0:
             continue
-        if normalize_text(await title.inner_text()).casefold() == expected:
+        actual = normalize_text(await title.inner_text()).casefold().replace("х", "x")
+        if actual == "1x2" or actual == expected_party_title:
             return group
     return None
 
