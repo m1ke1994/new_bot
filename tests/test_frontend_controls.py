@@ -43,6 +43,13 @@ class FrontendControlTests(unittest.TestCase):
         self.assertIn("api('/api/demo/strategy-config'", self.source)
         self.assertIn('@change="saveMatchFilters"', self.source)
 
+    def test_strategy_picker_is_persisted_and_total_even_is_demo_only(self):
+        self.assertIn("selectStrategyType('NEXT_GOAL')", self.source)
+        self.assertIn("selectStrategyType('TOTAL_EVEN')", self.source)
+        self.assertIn("strategyConfig.value.strategy_type", self.source)
+        self.assertIn("Стратегия «Тотал чёт» пока доступна только в DEMO.", self.source)
+        self.assertIn("item.strategy_name", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()

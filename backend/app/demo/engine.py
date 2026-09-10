@@ -1,4 +1,5 @@
 import asyncio
+import time
 import traceback
 from contextlib import suppress
 from datetime import datetime
@@ -12,7 +13,12 @@ from auth import authorize
 from backend.app.browser.canvas_vision import load_latest_analysis
 from backend.app.browser.league import LeagueBrowser, MatchAlreadyStarted
 from backend.app.browser.manager import BROWSER_MANAGER, BrowserManager
-from backend.app.browser.market import MarketReadError, market_canvas_debug, read_next_goal_odds
+from backend.app.browser.market import (
+    MarketReadError,
+    market_canvas_debug,
+    read_next_goal_odds,
+    read_total_even_market,
+)
 from backend.app.browser.match import MatchBrowser
 from backend.app.browser.scoreboard import ScoreReadError
 from backend.app.live.executor import BLOCKED_EVENT_SIGNAL, LiveExecutor
@@ -38,10 +44,20 @@ from .state import STATE
 from .strategy import (
     DEFAULT_STRATEGY_CONFIG,
     StrategyConfig,
+    StrategyType,
     can_create_initial_bet,
     detect_scorer,
     odds_for_selected_side,
     select_team_with_higher_odds,
+)
+from .strategies.total_even import (
+    MARKET_NAME as TOTAL_EVEN_MARKET_NAME,
+    MARKET_SELECTION as TOTAL_EVEN_SELECTION,
+    STRATEGY_NAME as TOTAL_EVEN_STRATEGY_NAME,
+    is_match_finished,
+    settle_total_even,
+    total_goals,
+    total_parity,
 )
 
 
@@ -222,6 +238,13 @@ class DemoEngine:
 
             CONFIG.validate()
             await self.restore()
+            if (
+                requested_mode == "LIVE"
+                and self._config.strategy_type == StrategyType.TOTAL_EVEN
+            ):
+                raise ModeConflictError(
+                    "Стратегия «Тотал чёт» пока доступна только в DEMO."
+                )
             sequence = await REPOSITORY.get_sequence()
             if requested_mode == "LIVE":
                 unresolved_live = await REPOSITORY.verified_active_live_bet()
@@ -253,8 +276,24 @@ class DemoEngine:
                 f"min_initial_odds_enabled={str(self._config.min_initial_odds_enabled).lower()} "
                 f"min_initial_odds={MIN_INITIAL_SELECTED_ODDS}",
             )
+            await REPOSITORY.log(
+                "STRATEGY_STARTED",
+                f"{self._config.strategy_type.value} / {self._config.strategy_type.display_name}",
+            )
             await REPOSITORY.save_sequence(status="WAITING_FOR_MATCH")
             await STATE.reset_for_start(await REPOSITORY.stats())
+            await STATE.update(
+                strategy_type=self._config.strategy_type.value,
+                strategy_name=self._config.strategy_type.display_name,
+                market_name=self._config.strategy_type.display_name,
+                market_selection=(
+                    TOTAL_EVEN_SELECTION
+                    if self._config.strategy_type == StrategyType.TOTAL_EVEN
+                    else None
+                ),
+                strategy_config=(await REPOSITORY.get_config()),
+                sequence=(await REPOSITORY.get_sequence()),
+            )
             try:
                 await REPOSITORY.log("BROWSER_STARTING", "Проверяем Playwright/browser/context/page")
                 await self.browser_manager.ensure_page()
@@ -287,6 +326,14 @@ class DemoEngine:
                 budget=self._budget.snapshot(),
                 strategy_config=(await REPOSITORY.get_config()),
                 sequence=(await REPOSITORY.get_sequence()),
+                strategy_type=self._config.strategy_type.value,
+                strategy_name=self._config.strategy_type.display_name,
+                market_name=self._config.strategy_type.display_name,
+                market_selection=(
+                    TOTAL_EVEN_SELECTION
+                    if self._config.strategy_type == StrategyType.TOTAL_EVEN
+                    else None
+                ),
             )
             await REPOSITORY.log(f"{requested_mode}_START", f"Запущен background {requested_mode} worker")
             self._task = asyncio.create_task(self._run_guarded(), name=f"{requested_mode.lower()}-worker")
@@ -444,6 +491,12 @@ class DemoEngine:
         return True
 
     async def _process_next_match(self, page: Page) -> None:
+        if self._config.strategy_type == StrategyType.TOTAL_EVEN:
+            await self._process_total_even_match(page)
+            return
+        await self._process_next_goal_match(page)
+
+    async def _process_next_goal_match(self, page: Page) -> None:
         page = await self.browser_manager.ensure_page()
         league = LeagueBrowser(
             page,
@@ -734,6 +787,8 @@ class DemoEngine:
             active_record = {
                 "id": bet_id,
                 "mode": self._mode,
+                "strategy_type": StrategyType.NEXT_GOAL.value,
+                "strategy_name": StrategyType.NEXT_GOAL.display_name,
                 "cycle_id": cycle_id,
                 "match_id": selected_match.get("match_id"),
                 "match": match_name,
@@ -985,7 +1040,7 @@ class DemoEngine:
                 )
                 self._current_series.status = "FINISHED"
                 await REPOSITORY.add_cycle(
-                    {"cycle_id": cycle_id, "match": match_name, "mode": self._mode, "result": "WIN", "steps": step}
+                    {"cycle_id": cycle_id, "match": match_name, "mode": self._mode, "strategy_type": StrategyType.NEXT_GOAL.value, "result": "WIN", "steps": step}
                 )
                 await REPOSITORY.log("STRATEGY_CYCLE_WON", match_name)
                 await REPOSITORY.reset_sequence()
@@ -1033,6 +1088,7 @@ class DemoEngine:
                     "cycle_id": cycle_id,
                     "match": match_name,
                     "mode": self._mode,
+                    "strategy_type": StrategyType.NEXT_GOAL.value,
                     "result": "SEQUENCE_EXHAUSTED",
                     "steps": self._config.max_steps,
                     "had_ambiguous": ambiguous_cycle,
@@ -1056,6 +1112,430 @@ class DemoEngine:
                 stats=await REPOSITORY.stats(),
             )
             await REPOSITORY.log("RETURNING_TO_LEAGUE", CONFIG.league_url)
+
+    async def _process_total_even_match(self, page: Page) -> None:
+        """Run one isolated «Тотал чёт — Да» DEMO bet for one complete match."""
+        if self._mode != "DEMO":
+            raise ModeConflictError("Стратегия «Тотал чёт» пока доступна только в DEMO.")
+
+        await REPOSITORY.log("TOTAL_EVEN_STRATEGY_STARTED", "[TOTAL_EVEN] strategy started")
+        page = await self.browser_manager.ensure_page()
+        league = LeagueBrowser(
+            page,
+            exclude_teams_enabled=self._config.exclude_teams_enabled,
+        )
+        await self._status(DemoStatus.OPENING_LEAGUE, "Открываем страницу лиги", "LEAGUE_OPENING")
+        await league.open()
+        await STATE.update(
+            selected_team=None,
+            selected_side=None,
+            initial_selected_odds=None,
+            other_team=None,
+            selection_reason="TOTAL_EVEN_YES",
+            strategy_type=StrategyType.TOTAL_EVEN.value,
+            strategy_name=TOTAL_EVEN_STRATEGY_NAME,
+            market_name=TOTAL_EVEN_MARKET_NAME,
+            market_selection=TOTAL_EVEN_SELECTION,
+            market_odds=None,
+            market_available=False,
+            market_locked=False,
+            odds_available=False,
+            odds_value=None,
+            time_waiting_for_market=0.0,
+            bet={
+                "step": 0,
+                "max_steps": self._config.max_steps,
+                "amount": None,
+                "market": TOTAL_EVEN_MARKET_NAME,
+                "selection": TOTAL_EVEN_SELECTION,
+                "odds": None,
+                "score_before": None,
+                "status": "WAITING",
+            },
+            budget=self._budget.snapshot(),
+        )
+
+        selected_match = None
+        while selected_match is None and not self._stop_event.is_set():
+            league = LeagueBrowser(
+                await self.browser_manager.ensure_page(),
+                exclude_teams_enabled=self._config.exclude_teams_enabled,
+            )
+            await self._status(
+                DemoStatus.SCANNING_MATCHES,
+                "Считываем актуальный DOM списка матчей",
+                "MATCHES_REFRESHING",
+            )
+            matches = await league.scan()
+            stats = league.last_scan_stats
+            allowed_matches = []
+            for item in matches:
+                excluded_team = excluded_team_in_match(
+                    item["team1"], item["team2"], enabled=self._config.exclude_teams_enabled
+                )
+                if excluded_team is not None:
+                    await REPOSITORY.log(
+                        "MATCH_SKIPPED_EXCLUDED_TEAM",
+                        f"{item['team1']} — {item['team2']} ({excluded_team})",
+                    )
+                    continue
+                allowed_matches.append(item)
+            matches = allowed_matches
+            await STATE.update(scanner={**stats, "selected": matches[0] if matches else None})
+            if matches:
+                selected_match = matches[0]
+                break
+            await self._status(
+                DemoStatus.NO_UPCOMING_MATCHES,
+                "Предстоящих матчей пока нет",
+                "NO_UPCOMING_MATCHES",
+            )
+            await self._sleep_or_stop(CONFIG.league_retry_interval)
+
+        if selected_match is None or self._stop_event.is_set():
+            return
+
+        match_name = f"{selected_match['team1']} — {selected_match['team2']}"
+        await self._status(
+            DemoStatus.MATCH_SELECTED,
+            f"Выбран ближайший матч: {match_name}",
+            "MATCH_SELECTED",
+            match={
+                "id": selected_match.get("match_id"),
+                "team1": selected_match["team1"],
+                "team2": selected_match["team2"],
+                "score1": None,
+                "score2": None,
+                "timer": selected_match.get("time") or "",
+                "period": selected_match.get("period") or "",
+                "url": selected_match.get("url"),
+                "state": "UPCOMING",
+            },
+        )
+        try:
+            opened = await league.open_match(selected_match)
+        except MatchAlreadyStarted as error:
+            await REPOSITORY.log("MATCH_ALREADY_STARTED", str(error))
+            return
+        await REPOSITORY.log("MATCH_OPENED", opened["url"])
+        await REPOSITORY.log("NEW_MATCH_BET_DELAY", f"{match_name}: ждём 10 секунд")
+        await self._sleep_or_stop(10.0)
+        if self._stop_event.is_set():
+            return
+
+        snapshot = await self._wait_for_initial_zero_score(selected_match)
+        if snapshot is None:
+            return
+        excluded_team = excluded_team_in_match(
+            snapshot.team1,
+            snapshot.team2,
+            enabled=self._config.exclude_teams_enabled,
+        )
+        if excluded_team is not None:
+            await REPOSITORY.log(
+                "MATCH_SKIPPED_EXCLUDED_TEAM",
+                f"{snapshot.team1} — {snapshot.team2} ({excluded_team})",
+            )
+            return
+
+        market_result = await self._wait_for_total_even_market(snapshot, selected_match)
+        if market_result is None:
+            return
+        snapshot, market, lock_count, lock_seconds, wait_seconds = market_result
+        sequence = await REPOSITORY.get_sequence()
+        step = int(sequence["current_step"])
+        if step > self._config.max_steps:
+            await REPOSITORY.save_sequence(status="SEQUENCE_EXHAUSTED")
+            return
+        amount = float(self._config.stakes[step - 1])
+        cycle_id = sequence["sequence_id"]
+        bet_id = f"{cycle_id}:TOTAL_EVEN:{selected_match.get('match_id')}:{step}"
+        created_at = local_now()
+        active_record = {
+            "id": bet_id,
+            "mode": "DEMO",
+            "strategy_type": StrategyType.TOTAL_EVEN.value,
+            "strategy_name": TOTAL_EVEN_STRATEGY_NAME,
+            "cycle_id": cycle_id,
+            "match_id": selected_match.get("match_id"),
+            "match": match_name,
+            "selected_team": TOTAL_EVEN_SELECTION,
+            "selected_side": None,
+            "side_label": TOTAL_EVEN_SELECTION,
+            "step": step,
+            "amount": amount,
+            "odds": market.odds,
+            "score_before": snapshot.score.text(),
+            "score_after": None,
+            "scorer": None,
+            "result": "ACTIVE",
+            "status": "ACTIVE",
+            "settled": False,
+            "market": TOTAL_EVEN_MARKET_NAME,
+            "market_selection": TOTAL_EVEN_SELECTION,
+            "created_at": created_at,
+            "resolved_at": None,
+            "budget_before": float(self._budget.current_budget),
+            "budget_change": None,
+            "budget_after": None,
+            "market_locked_count": lock_count,
+            "market_locked_seconds": round(lock_seconds, 3),
+            "time_waiting_for_market": round(wait_seconds, 3),
+        }
+        await REPOSITORY.save_sequence(
+            status="ACTIVE",
+            current_match_id=selected_match.get("match_id"),
+            selected_team=TOTAL_EVEN_SELECTION,
+        )
+        await REPOSITORY.save_bet(active_record)
+        await STATE.update(
+            status=DemoStatus.BET_SIMULATED.value,
+            event="TOTAL_EVEN_DEMO_BET_CREATED",
+            message=f"[TOTAL_EVEN] DEMO bet placed: {amount:g} RUB @ {market.odds}",
+            market_odds=market.odds,
+            odds_value=market.odds,
+            current_stake=amount,
+            current_step=step,
+            bet={**active_record, "max_steps": self._config.max_steps},
+            stats=await REPOSITORY.stats(),
+        )
+        await REPOSITORY.log(
+            "TOTAL_EVEN_DEMO_BET_PLACED",
+            f"[TOTAL_EVEN] DEMO bet placed: {amount:g} RUB @ {market.odds}; score={snapshot.score.text()}",
+        )
+
+        final_snapshot = await self._wait_for_total_even_finish(
+            MatchBrowser(await self.browser_manager.ensure_page()), selected_match, snapshot
+        )
+        if final_snapshot is None:
+            return
+        result = settle_total_even(final_snapshot.score)
+        budget_change = self._budget.settle(bet_id, result, amount, market.odds)
+        if budget_change is None:
+            await REPOSITORY.log("DEMO_BUDGET_DUPLICATE_IGNORED", f"bet_id={bet_id}")
+            return
+        record = await REPOSITORY.save_bet(
+            {
+                **active_record,
+                "score_after": final_snapshot.score.text(),
+                "final_total": total_goals(final_snapshot.score),
+                "total_parity": total_parity(final_snapshot.score),
+                "result": result,
+                "status": "SETTLED",
+                "settled": True,
+                "resolved_at": local_now(),
+                **budget_change,
+            }
+        )
+        await REPOSITORY.save_budget(self._budget.snapshot())
+        current_sequence = await REPOSITORY.get_sequence()
+        cumulative_pnl = Decimal(str(current_sequence["cumulative_pnl"])) + Decimal(
+            str(budget_change["pnl"])
+        )
+        cumulative_losses = Decimal(str(current_sequence["cumulative_losses"]))
+        if result == "LOSE":
+            cumulative_losses += Decimal(str(amount))
+        await REPOSITORY.save_sequence(
+            cumulative_pnl=str(cumulative_pnl.quantize(Decimal("0.01"))),
+            cumulative_losses=str(cumulative_losses.quantize(Decimal("0.01"))),
+        )
+        await REPOSITORY.log(
+            "TOTAL_EVEN_FINAL_SCORE",
+            f"[TOTAL_EVEN] final score: {final_snapshot.score.text()} total={total_goals(final_snapshot.score)}",
+        )
+        await REPOSITORY.log("TOTAL_EVEN_RESULT", f"[TOTAL_EVEN] result: {result}")
+        await REPOSITORY.add_cycle(
+            {
+                "cycle_id": cycle_id,
+                "match": match_name,
+                "mode": "DEMO",
+                "strategy_type": StrategyType.TOTAL_EVEN.value,
+                "result": result,
+                "steps": step,
+            }
+        )
+        if result == "WIN":
+            await REPOSITORY.reset_sequence()
+        elif step < self._config.max_steps:
+            await REPOSITORY.save_sequence(
+                current_step=step + 1,
+                status="WAITING_NEXT_MATCH",
+                current_match_id=None,
+                selected_team=None,
+            )
+        else:
+            await REPOSITORY.save_sequence(
+                current_step=step,
+                status="SEQUENCE_EXHAUSTED",
+                current_match_id=selected_match.get("match_id"),
+            )
+        await STATE.update(
+            status=(DemoStatus.WIN if result == "WIN" else DemoStatus.LOSE).value,
+            event=result,
+            message=f"Результат TOTAL_EVEN: {result}",
+            last_change={
+                "before": record["score_before"],
+                "after": record["score_after"],
+                "scorer": "Итог матча",
+                "result": result,
+            },
+            bet={**record, "max_steps": self._config.max_steps},
+            budget=self._budget.snapshot(),
+            sequence=await REPOSITORY.get_sequence(),
+            stats=await REPOSITORY.stats(),
+        )
+
+    async def _wait_for_total_even_market(
+        self,
+        snapshot: ScoreboardSnapshot,
+        selected_match: dict[str, Any],
+    ):
+        started = time.monotonic()
+        attempt = 0
+        locked_since: float | None = None
+        lock_count = 0
+        lock_seconds = 0.0
+        last_status: str | None = None
+        await REPOSITORY.log(
+            "TOTAL_EVEN_MARKET_SEARCH",
+            "[TOTAL_EVEN] searching market: тотал чет",
+        )
+        while not self._stop_event.is_set():
+            attempt += 1
+            page = await self.browser_manager.ensure_page()
+            browser = MatchBrowser(page)
+            try:
+                fresh = await browser.snapshot()
+                if fresh.team1 != snapshot.team1 or fresh.team2 != snapshot.team2:
+                    raise RecoverableDemoError(
+                        "SCOREBOARD_TEAMS_CHANGED",
+                        "Порядок или названия команд в scoreboard изменились.",
+                    )
+                snapshot = fresh
+                await self._publish_snapshot(snapshot, selected_match, state="LIVE" if snapshot.period else "UPCOMING")
+                if is_match_finished(snapshot):
+                    await REPOSITORY.log(
+                        "TOTAL_EVEN_MARKET_EXPIRED",
+                        "Матч завершился до создания ставки; ставка не создаётся",
+                    )
+                    return None
+                async with self._market_lock:
+                    market = await read_total_even_market(page, REPOSITORY.log)
+                if locked_since is not None:
+                    lock_seconds += time.monotonic() - locked_since
+                    locked_since = None
+                    await REPOSITORY.log("TOTAL_EVEN_MARKET_RESTORED", "[TOTAL_EVEN] market restored")
+                waited = time.monotonic() - started
+                await STATE.update(
+                    market_reader={
+                        "source": "DOM / Playwright",
+                        "status": "READY",
+                        "attempt": attempt,
+                        "market": TOTAL_EVEN_MARKET_NAME,
+                    },
+                    market_available=True,
+                    market_locked=False,
+                    odds_available=True,
+                    odds_value=market.odds,
+                    market_odds=market.odds,
+                    time_waiting_for_market=round(waited, 3),
+                    odds={
+                        "selected": market.odds,
+                        "opponent": None,
+                        "team1": None,
+                        "team2": None,
+                        "market": market.market,
+                        "selection": market.selection,
+                        "source": market.source,
+                        "backend": None,
+                        "confidence": None,
+                        "status": "ODDS_CONFIRMED",
+                    },
+                )
+                await REPOSITORY.log(
+                    "TOTAL_EVEN_MARKET_DIAGNOSTICS",
+                    "market_available=true market_locked=false odds_available=true "
+                    f"odds_value={market.odds} time_waiting_for_market={waited:.3f}",
+                )
+                await REPOSITORY.log("TOTAL_EVEN_MARKET_READY", "[TOTAL_EVEN] market found")
+                return snapshot, market, lock_count, lock_seconds, waited
+            except MarketReadError as error:
+                now = time.monotonic()
+                locked = error.status == "MARKET_LOCKED"
+                if locked and locked_since is None:
+                    locked_since = now
+                    lock_count += 1
+                    await REPOSITORY.log("TOTAL_EVEN_MARKET_LOCKED", "[TOTAL_EVEN] market locked")
+                elif not locked and locked_since is not None:
+                    lock_seconds += now - locked_since
+                    locked_since = None
+                waited = now - started
+                market_available = bool(error.details.get("market_available"))
+                await STATE.update(
+                    status=(DemoStatus.MARKET_LOCKED if locked else DemoStatus.WAITING_FOR_MARKET).value,
+                    event=error.status,
+                    market_available=market_available,
+                    market_locked=locked,
+                    odds_available=False,
+                    odds_value=None,
+                    time_waiting_for_market=round(waited, 3),
+                    market_reader={
+                        "source": "DOM / Playwright",
+                        "status": error.status,
+                        "attempt": attempt,
+                        "market": TOTAL_EVEN_MARKET_NAME,
+                    },
+                )
+                if error.status != last_status or attempt % 10 == 0:
+                    await REPOSITORY.log(error.status, str(error))
+                    await REPOSITORY.log(
+                        "TOTAL_EVEN_MARKET_DIAGNOSTICS",
+                        f"market_available={str(market_available).lower()} "
+                        f"market_locked={str(locked).lower()} odds_available=false "
+                        f"odds_value=None time_waiting_for_market={waited:.3f}",
+                    )
+                last_status = error.status
+                await self._sleep_or_stop(CONFIG.ocr_retry_delay)
+        return None
+
+    async def _wait_for_total_even_finish(
+        self,
+        browser: MatchBrowser,
+        selected_match: dict[str, Any],
+        previous: ScoreboardSnapshot,
+    ) -> ScoreboardSnapshot | None:
+        await self._status(
+            DemoStatus.WAITING_FOR_MATCH_END,
+            "[TOTAL_EVEN] ждём подтверждённый финальный счёт",
+            "WAITING_FOR_MATCH_END",
+        )
+        last_score = previous.score
+        read_errors = 0
+        while not self._stop_event.is_set():
+            await self._sleep_or_stop(CONFIG.score_poll_interval)
+            try:
+                current = await browser.snapshot()
+            except ScoreReadError as error:
+                read_errors += 1
+                if read_errors == 1 or read_errors % 20 == 0:
+                    await REPOSITORY.log("SCORE_TEMPORARILY_UNAVAILABLE", str(error))
+                continue
+            read_errors = 0
+            if current.team1 != previous.team1 or current.team2 != previous.team2:
+                raise RecoverableDemoError(
+                    "SCOREBOARD_TEAMS_CHANGED",
+                    "Порядок или названия команд в scoreboard изменились.",
+                )
+            await self._publish_snapshot(current, selected_match, state="FINISHED" if is_match_finished(current) else "LIVE")
+            if current.score != last_score:
+                await REPOSITORY.log(
+                    "TOTAL_EVEN_SCORE",
+                    f"[TOTAL_EVEN] score {current.score.text()} | total={total_goals(current.score)} | {total_parity(current.score)}",
+                )
+                last_score = current.score
+            if is_match_finished(current):
+                return current
+        return None
 
     async def _wait_for_initial_zero_score(
         self, selected_match: dict[str, Any]
@@ -1792,7 +2272,14 @@ class DemoEngine:
             url=selected_match.get("url"),
             state=state,
         )
-        await STATE.update(match=match)
+        changes: dict[str, Any] = {"match": match}
+        if self._config.strategy_type == StrategyType.TOTAL_EVEN:
+            changes.update(
+                score=snapshot.score.text(),
+                total_goals=total_goals(snapshot.score),
+                total_parity=total_parity(snapshot.score),
+            )
+        await STATE.update(**changes)
 
     @staticmethod
     def _odds_state(odds, selected: float, opponent: float) -> dict[str, Any]:

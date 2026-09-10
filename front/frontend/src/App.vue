@@ -28,6 +28,10 @@ const state = ref({
 
   mode: 'DEMO',
 
+  strategy_type: 'NEXT_GOAL',
+
+  strategy_name: 'Следующий гол',
+
   status: 'STOPPED',
 
   browser: { status: 'CLOSED', context: 'CLOSED', page: 'CLOSED' },
@@ -91,6 +95,8 @@ const history = ref([])
 const logs = ref([])
 
 const strategyConfig = ref({
+
+  strategy_type: 'NEXT_GOAL',
 
   initial_stake: 20,
 
@@ -318,6 +324,42 @@ async function saveMatchFilters() {
 
 }
 
+async function selectStrategyType(strategyType) {
+
+  if (state.value.running || actionPending.value || strategyConfig.value.strategy_type === strategyType) return
+
+  const previous = strategyConfig.value.strategy_type
+
+  strategyConfig.value.strategy_type = strategyType
+
+  if (strategyType === 'TOTAL_EVEN') selectedMode.value = 'DEMO'
+
+  pendingAction.value = 'save-strategy-type'
+
+  try {
+
+    const saved = await api('/api/demo/strategy-config', { method: 'PUT', body: JSON.stringify(strategyConfig.value) })
+
+    strategyConfig.value = { ...saved, stakes: [...saved.stakes] }
+
+    backendError.value = ''
+
+    await loadState()
+
+  } catch (error) {
+
+    strategyConfig.value.strategy_type = previous
+
+    backendError.value = error instanceof Error ? error.message : String(error)
+
+  } finally {
+
+    pendingAction.value = null
+
+  }
+
+}
+
 async function refresh() {
 
   if (refreshInFlight) return
@@ -347,6 +389,14 @@ async function refresh() {
 async function startMode(mode) {
 
   if (state.value.running || actionPending.value) return
+
+  if (mode === 'LIVE' && strategyConfig.value.strategy_type === 'TOTAL_EVEN') {
+
+    backendError.value = 'Стратегия «Тотал чёт» пока доступна только в DEMO.'
+
+    return
+
+  }
 
   selectedMode.value = mode
 
@@ -498,6 +548,11 @@ const bet = computed(() => state.value.bet || {})
 
 const stats = computed(() => ({ ...emptyStats, ...(state.value.stats || {}) }))
 
+const strategyComparison = computed(() => ([
+  ['Следующий гол', state.value.stats?.by_strategy?.NEXT_GOAL || emptyStats],
+  ['Тотал чёт', state.value.stats?.by_strategy?.TOTAL_EVEN || emptyStats],
+]))
+
 const lastChange = computed(() => state.value.last_change || {})
 
 const scanner = computed(() => state.value.scanner || {})
@@ -507,6 +562,16 @@ const marketReader = computed(() => state.value.market_reader || {})
 const budget = computed(() => state.value.budget || {})
 
 const sequence = computed(() => state.value.sequence || {})
+
+const selectedStrategyName = computed(() => (
+  strategyConfig.value.strategy_type === 'TOTAL_EVEN' ? 'Тотал чёт' : 'Следующий гол'
+))
+
+const selectedStrategyDescription = computed(() => (
+  strategyConfig.value.strategy_type === 'TOTAL_EVEN'
+    ? 'Ставка на «Тотал чёт — Да». Результат зависит от чётности общего количества голов.'
+    : 'Ставка на следующий гол выбранной команды.'
+))
 
 const strategyBudget = computed(() => strategyConfig.value.stakes.reduce((total, amount) => total + (Number(amount) || 0), 0))
 
@@ -723,7 +788,7 @@ onBeforeUnmount(() => {
 
         <button
           class="button button-danger"
-          :disabled="!canStart"
+          :disabled="!canStart || strategyConfig.strategy_type === 'TOTAL_EVEN'"
           @click="startMode('LIVE')"
         >
           {{ pendingAction === 'start' && selectedMode === 'LIVE'
@@ -837,6 +902,40 @@ onBeforeUnmount(() => {
           <strong :class="configInvalid ? 'red' : 'green'">{{ configInvalid ? 'Проверьте значения' : `Бюджет ряда: ${formatNumber(strategyBudget)} ₽` }}</strong>
 
         </header>
+
+        <div class="strategy-picker">
+
+          <div class="strategy-picker-heading">
+
+            <div><span class="eyebrow">ACTIVE STRATEGY</span><h3>Стратегия</h3></div>
+
+            <small>{{ pendingAction === 'save-strategy-type' ? 'Сохраняем...' : 'Одновременно работает только одна стратегия' }}</small>
+
+          </div>
+
+          <div class="strategy-option-grid">
+
+            <label :class="['strategy-option', { selected: strategyConfig.strategy_type === 'NEXT_GOAL' }]">
+
+              <input type="checkbox" :checked="strategyConfig.strategy_type === 'NEXT_GOAL'" :disabled="state.running || actionPending" @click.prevent="selectStrategyType('NEXT_GOAL')">
+
+              <span><strong>Следующий гол</strong><small>Текущая стратегия без изменения алгоритма</small></span>
+
+            </label>
+
+            <label :class="['strategy-option', { selected: strategyConfig.strategy_type === 'TOTAL_EVEN' }]">
+
+              <input type="checkbox" :checked="strategyConfig.strategy_type === 'TOTAL_EVEN'" :disabled="state.running || actionPending" @click.prevent="selectStrategyType('TOTAL_EVEN')">
+
+              <span><strong>Тотал чёт</strong><small>Только DEMO</small></span>
+
+            </label>
+
+          </div>
+
+          <p class="strategy-description"><strong>{{ selectedStrategyName }}</strong> · {{ selectedStrategyDescription }}</p>
+
+        </div>
 
         <div class="strategy-config-body">
 
@@ -952,7 +1051,7 @@ onBeforeUnmount(() => {
 
         <strong>{{ state.message }}</strong>
 
-        <span class="status-context">{{ state.mode }} · {{ state.league }} · {{ updatedAt }}</span>
+        <span class="status-context">Стратегия: {{ state.strategy_name || selectedStrategyName }} · {{ state.mode }} · {{ state.league }} · {{ updatedAt }}</span>
 
       </section>
 
@@ -1302,6 +1401,30 @@ onBeforeUnmount(() => {
 
           </div>
 
+          <div class="table-wrap strategy-stats-table">
+
+            <table>
+
+              <thead><tr><th>Стратегия</th><th>Ставки</th><th>WIN</th><th>LOSE</th><th>Макс. шаг</th><th>P&amp;L</th><th>MARKET_LOCKED</th><th>Средняя блокировка</th></tr></thead>
+
+              <tbody>
+
+                <tr v-for="([name, item]) in strategyComparison" :key="name">
+
+                  <td>{{ name }}</td><td>{{ item.bets || 0 }}</td><td class="green">{{ item.wins || 0 }}</td><td class="red">{{ item.losses || 0 }}</td><td>{{ item.max_step || 0 }}</td>
+
+                  <td :class="Number(item.profit_loss || 0) >= 0 ? 'green' : 'red'">{{ Number(item.profit_loss || 0) >= 0 ? '+' : '' }}{{ formatNumber(item.profit_loss || 0) }} ₽</td>
+
+                  <td>{{ item.market_locked_count || 0 }}</td><td>{{ item.average_market_locked_seconds == null ? '—' : `${formatNumber(item.average_market_locked_seconds, 3)} с` }}</td>
+
+                </tr>
+
+              </tbody>
+
+            </table>
+
+          </div>
+
         </section>
 
         <section class="data-grid">
@@ -1340,7 +1463,7 @@ onBeforeUnmount(() => {
 
                   <tr>
 
-                    <th>№</th><th>Матч</th><th>Команда</th><th>Ставка</th><th>КФ</th>
+                    <th>№</th><th>Стратегия</th><th>Матч</th><th>Выбор</th><th>Ставка</th><th>КФ</th>
 
                     <th>Шаг</th><th>Счёт до</th><th>Счёт после</th><th>Кто забил</th><th>Результат</th>
 
@@ -1355,6 +1478,8 @@ onBeforeUnmount(() => {
                   <tr v-for="(item, index) in reversedHistory" :key="item.id || `${item.cycle_id}-${item.step}`">
 
                     <td>{{ history.length - index }}</td>
+
+                    <td>{{ item.strategy_name || (item.strategy_type === 'TOTAL_EVEN' ? 'Тотал чёт' : 'Следующий гол') }}</td>
 
                     <td>{{ item.match }}</td>
 
@@ -1386,7 +1511,7 @@ onBeforeUnmount(() => {
 
                   </tr>
 
-                  <tr v-if="!history.length"><td colspan="13" class="empty-row">Виртуальных ставок пока нет</td></tr>
+                  <tr v-if="!history.length"><td colspan="14" class="empty-row">Виртуальных ставок пока нет</td></tr>
 
                 </tbody>
 

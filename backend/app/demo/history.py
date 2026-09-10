@@ -281,10 +281,59 @@ class DemoRepository:
             with self._connection() as db:
                 cycles = [json.loads(row["payload"]) for row in db.execute("SELECT payload FROM cycles").fetchall()]
         cycles = [item for item in cycles if str(item.get("mode") or "DEMO").upper() == "DEMO"]
-        settled = [item for item in bets if item.get("result") in {"WIN", "LOSE"}]
-        odds = [float(item["odds"]) for item in settled if item.get("odds") is not None]
-        wins = [item for item in settled if item["result"] == "WIN"]
-        return {"matches_processed": len(cycles), "bets": len(bets), "wins": len(wins), "losses": sum(item["result"] == "LOSE" for item in settled), "total_amount": round(sum(float(item.get("amount") or 0) for item in settled), 2), "average_odds": round(sum(odds) / len(odds), 3) if odds else None, "max_step": max((int(item.get("step") or 0) for item in bets), default=0), "average_steps_to_win": round(sum(int(item.get("steps") or 0) for item in cycles if item.get("result") == "WIN") / len(wins), 2) if wins else None}
+        def summarize(strategy_type: str | None = None) -> dict[str, Any]:
+            scoped_bets = bets
+            scoped_cycles = cycles
+            if strategy_type is not None:
+                scoped_bets = [
+                    item for item in bets
+                    if str(item.get("strategy_type") or "NEXT_GOAL").upper() == strategy_type
+                ]
+                scoped_cycles = [
+                    item for item in cycles
+                    if str(item.get("strategy_type") or "NEXT_GOAL").upper() == strategy_type
+                ]
+            scoped_settled = [
+                item for item in scoped_bets if item.get("result") in {"WIN", "LOSE"}
+            ]
+            scoped_wins = [item for item in scoped_settled if item["result"] == "WIN"]
+            scoped_odds = [
+                float(item["odds"])
+                for item in scoped_settled
+                if item.get("odds") is not None
+            ]
+            lock_count = sum(int(item.get("market_locked_count") or 0) for item in scoped_bets)
+            lock_seconds = sum(
+                float(item.get("market_locked_seconds") or 0) for item in scoped_bets
+            )
+            return {
+                "matches_processed": len(scoped_cycles),
+                "bets": len(scoped_bets),
+                "wins": len(scoped_wins),
+                "losses": sum(item["result"] == "LOSE" for item in scoped_settled),
+                "total_amount": round(sum(float(item.get("amount") or 0) for item in scoped_settled), 2),
+                "average_odds": round(sum(scoped_odds) / len(scoped_odds), 3) if scoped_odds else None,
+                "max_step": max((int(item.get("step") or 0) for item in scoped_bets), default=0),
+                "average_steps_to_win": (
+                    round(
+                        sum(int(item.get("steps") or 0) for item in scoped_cycles if item.get("result") == "WIN")
+                        / len(scoped_wins),
+                        2,
+                    )
+                    if scoped_wins
+                    else None
+                ),
+                "profit_loss": round(sum(float(item.get("pnl") or 0) for item in scoped_settled), 2),
+                "market_locked_count": lock_count,
+                "average_market_locked_seconds": round(lock_seconds / lock_count, 3) if lock_count else None,
+            }
+
+        result = summarize()
+        result["by_strategy"] = {
+            "NEXT_GOAL": summarize("NEXT_GOAL"),
+            "TOTAL_EVEN": summarize("TOTAL_EVEN"),
+        }
+        return result
 
 
 REPOSITORY = DemoRepository()

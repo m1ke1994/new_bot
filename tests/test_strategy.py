@@ -12,6 +12,7 @@ from backend.app.demo.strategy import (
     BET_STEPS,
     ScoreProgression,
     StrategyConfig,
+    StrategyType,
     detect_scorer,
     odds_for_selected_side,
     select_team_with_higher_odds,
@@ -20,6 +21,13 @@ from backend.app.demo.strategy import (
 
 
 class StrategyTests(unittest.TestCase):
+    def test_strategy_type_defaults_to_next_goal_and_accepts_total_even(self):
+        self.assertEqual(StrategyConfig.from_payload({}).strategy_type, StrategyType.NEXT_GOAL)
+        self.assertEqual(
+            StrategyConfig.from_payload({"strategy_type": "TOTAL_EVEN"}).strategy_type,
+            StrategyType.TOTAL_EVEN,
+        )
+
     def test_match_filter_flags_default_to_enabled(self):
         config = StrategyConfig.from_payload({})
         self.assertTrue(config.exclude_teams_enabled)

@@ -175,6 +175,20 @@ button { font: inherit; }
 .alert-error strong { color: var(--red); }
 
 .strategy-config { margin-top: 16px; }
+.strategy-picker { padding: 16px 19px; border-bottom: 1px solid var(--line-soft); }
+.strategy-picker-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; }
+.strategy-picker-heading h3 { margin: 3px 0 0; color: var(--text); font-size: 15px; }
+.strategy-picker-heading small, .strategy-description { color: var(--muted); font-size: 10px; }
+.strategy-option-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+.strategy-config .strategy-option { min-height: 64px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; display: flex; align-items: center; gap: 12px; background: #0d131c; cursor: pointer; }
+.strategy-config .strategy-option.selected { border-color: rgba(56, 217, 149, .38); background: var(--green-soft); }
+.strategy-config .strategy-option:has(input:disabled) { cursor: not-allowed; }
+.strategy-config .strategy-option input[type="checkbox"] { width: 18px; min-height: 18px; margin: 0; padding: 0; accent-color: var(--green); }
+.strategy-option strong, .strategy-option small { display: block; }
+.strategy-option strong { color: var(--text); font-size: 12px; }
+.strategy-option small { margin-top: 4px; color: var(--muted); font-size: 10px; }
+.strategy-description { margin: 12px 0 0; line-height: 1.5; }
+.strategy-description strong { color: var(--text); }
 .strategy-config-body, .stake-row, .strategy-config-footer {
   display: flex;
   gap: 12px;
@@ -213,10 +227,12 @@ button { font: inherit; }
 .stake-row { flex-wrap: wrap; padding-top: 12px; }
 .stake-row input { width: 104px; }
 .strategy-config-footer { padding-top: 0; justify-content: space-between; align-items: center; color: var(--muted); font-size: 11px; }
+.strategy-stats-table { margin-top: 12px; }
 @media (max-width: 720px) {
   .strategy-config-body, .strategy-config-footer { flex-wrap: wrap; }
   .strategy-config-footer { align-items: stretch; }
   .match-filter-grid { grid-template-columns: 1fr; }
+  .strategy-option-grid { grid-template-columns: 1fr; }
   .match-filters-heading { align-items: flex-start; flex-direction: column; }
 }
 

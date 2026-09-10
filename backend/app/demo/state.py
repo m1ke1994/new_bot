@@ -19,6 +19,19 @@ def initial_state() -> dict[str, Any]:
         "browser": {"status": "CLOSED", "context": "CLOSED", "page": "CLOSED"},
         "auth": {"status": "UNKNOWN"},
         "mode": "DEMO",
+        "strategy_type": "NEXT_GOAL",
+        "strategy_name": "Следующий гол",
+        "market_name": "Следующий гол",
+        "market_selection": None,
+        "market_odds": None,
+        "score": None,
+        "total_goals": None,
+        "total_parity": None,
+        "market_available": False,
+        "market_locked": False,
+        "odds_available": False,
+        "odds_value": None,
+        "time_waiting_for_market": 0.0,
         "status": DemoStatus.STOPPED.value,
         "league": CONFIG.league_name,
         "message": "Демо остановлено",
@@ -138,11 +151,16 @@ class DemoStateStore:
 
     async def restore(self, *, budget: dict[str, Any], strategy_config: dict[str, Any], sequence: dict[str, Any], stats: dict[str, Any]) -> None:
         async with self._lock:
+            strategy_type = strategy_config.get("strategy_type", "NEXT_GOAL")
             self._state.update(
                 budget=deepcopy(budget),
                 strategy_config=deepcopy(strategy_config),
                 sequence=deepcopy(sequence),
                 stats=deepcopy(stats),
+                strategy_type=strategy_type,
+                strategy_name=("Тотал чёт" if strategy_type == "TOTAL_EVEN" else "Следующий гол"),
+                market_name=("Тотал чёт" if strategy_type == "TOTAL_EVEN" else "Следующий гол"),
+                market_selection=("Да" if strategy_type == "TOTAL_EVEN" else None),
                 bet={**self._state["bet"], "step": int(sequence["current_step"]), "max_steps": strategy_config["max_steps"], "amount": strategy_config["stakes"][int(sequence["current_step"]) - 1] if int(sequence["current_step"]) <= strategy_config["max_steps"] else None},
                 updated_at=utc_now(),
             )

@@ -6,7 +6,7 @@ from typing import Any
 
 from playwright.async_api import Page, Response
 
-from backend.app.demo.models import NextGoalOdds
+from backend.app.demo.models import NextGoalOdds, TotalEvenMarket
 
 from .canvas_vision import (
     CANVAS_SELECTOR,
@@ -25,6 +25,9 @@ MARKET_BUTTON_SELECTOR = "button.game-markets-group__market"
 MARKET_NAME_SELECTOR = ".ui-market__name"
 MARKET_VALUE_SELECTOR = ".ui-market__value"
 NEXT_GOAL_TEXT = "Следующий гол"
+TOTAL_EVEN_TEXT = "Тотал чёт"
+TOTAL_EVEN_SEARCH_TEXT = "тотал чет"
+TOTAL_EVEN_SELECTION_TEXT = "Да"
 MARKET_KEYWORDS = (
     "market",
     "odds",
@@ -430,3 +433,92 @@ async def read_next_goal_odds(
         team1_locator=target_buttons[1],
         team2_locator=target_buttons[2],
     )
+
+
+async def read_total_even_market(
+    page: Page,
+    logger: Logger | None = None,
+) -> TotalEvenMarket:
+    """Read «Тотал чёт — Да» from its exact DOM group without global text lookup."""
+    search_input = page.locator(NEXT_GOAL_SEARCH_SELECTOR).first
+    try:
+        await search_input.wait_for(state="visible", timeout=5_000)
+        await search_input.fill(TOTAL_EVEN_SEARCH_TEXT)
+    except Exception as error:
+        raise MarketDomRequired(
+            "Поле поиска рынков пока недоступно.",
+            status="ELEMENT_NOT_READY",
+            details={"source": "DOM_PLAYWRIGHT"},
+        ) from error
+
+    groups = page.locator(MARKET_GROUP_SELECTOR)
+    try:
+        await groups.first.wait_for(state="attached", timeout=5_000)
+    except Exception as error:
+        raise MarketNotAvailable(
+            "Группа рынка «Тотал чёт» пока не появилась.",
+            status="MARKET_NOT_FOUND",
+            details={"source": "DOM_PLAYWRIGHT"},
+        ) from error
+
+    target_group = None
+    for index in range(await groups.count()):
+        group = groups.nth(index)
+        title = group.locator(MARKET_GROUP_TITLE_SELECTOR).first
+        if await title.count() == 0:
+            continue
+        if _clean_text(await title.inner_text()) == _clean_text(TOTAL_EVEN_TEXT):
+            target_group = group
+            break
+    if target_group is None:
+        raise MarketNotAvailable(
+            "Точная группа рынка «Тотал чёт» не найдена.",
+            status="MARKET_NOT_FOUND",
+            details={"source": "DOM_PLAYWRIGHT"},
+        )
+
+    buttons = target_group.locator(MARKET_BUTTON_SELECTOR)
+    yes_button = None
+    for index in range(await buttons.count()):
+        button = buttons.nth(index)
+        name = button.locator(MARKET_NAME_SELECTOR).first
+        if await name.count() == 0:
+            continue
+        if _clean_text(await name.inner_text()) == _clean_text(TOTAL_EVEN_SELECTION_TEXT):
+            yes_button = button
+            break
+    if yes_button is None:
+        raise MarketNotAvailable(
+            "В рынке «Тотал чёт» не найден выбор «Да».",
+            status="ODDS_NOT_FOUND",
+            details={"source": "DOM_PLAYWRIGHT", "market_available": True},
+        )
+
+    classes = (await yes_button.get_attribute("class") or "").lower()
+    if await yes_button.is_disabled() or "ui-market--locked" in classes:
+        raise MarketNotAvailable(
+            "Рынок «Тотал чёт — Да» временно заблокирован.",
+            status="MARKET_LOCKED",
+            details={"source": "DOM_PLAYWRIGHT", "market_available": True},
+        )
+
+    value = yes_button.locator(MARKET_VALUE_SELECTOR).first
+    if await value.count() == 0:
+        raise MarketNotAvailable(
+            "Коэффициент «Тотал чёт — Да» пока недоступен.",
+            status="ODDS_NOT_FOUND",
+            details={"source": "DOM_PLAYWRIGHT", "market_available": True},
+        )
+    try:
+        odds = parse_dom_odds(await value.inner_text())
+    except ValueError as error:
+        raise MarketNotAvailable(
+            "Коэффициент «Тотал чёт — Да» некорректен.",
+            status="ODDS_NOT_FOUND",
+            details={"source": "DOM_PLAYWRIGHT", "market_available": True},
+        ) from error
+
+    await _log(logger, "TOTAL_EVEN_MARKET_FOUND", TOTAL_EVEN_TEXT)
+    await _log(logger, "TOTAL_EVEN_SELECTION_FOUND", TOTAL_EVEN_SELECTION_TEXT)
+    await _log(logger, "TOTAL_EVEN_ODDS", str(odds))
+    return TotalEvenMarket(odds=odds, locator=yes_button)

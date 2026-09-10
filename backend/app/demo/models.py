@@ -27,6 +27,8 @@ class DemoStatus(StrEnum):
     TEAM_SELECTED = "TEAM_SELECTED"
     BET_SIMULATED = "BET_SIMULATED"
     WAITING_FOR_GOAL = "WAITING_FOR_NEXT_GOAL"
+    WAITING_FOR_MATCH_END = "WAITING_FOR_MATCH_END"
+    MARKET_LOCKED = "MARKET_LOCKED"
     GOAL_DETECTED = "GOAL_DETECTED"
     WIN = "WIN"
     LOSE = "LOSE"
@@ -92,6 +94,15 @@ class NextGoalOdds:
         if side == Scorer.TEAM_2:
             return self.team2_locator
         return None
+
+
+@dataclass(frozen=True)
+class TotalEvenMarket:
+    odds: float
+    market: str = "Тотал чёт"
+    selection: str = "Да"
+    source: str = "DOM_PLAYWRIGHT"
+    locator: Any | None = None
 
 
 @dataclass(frozen=True)

@@ -15,6 +15,9 @@ from backend.app.browser.market import (
     MARKET_NAME_SELECTOR,
     MARKET_VALUE_SELECTOR,
     NEXT_GOAL_SEARCH_SELECTOR,
+    TOTAL_EVEN_SEARCH_TEXT,
+    TOTAL_EVEN_SELECTION_TEXT,
+    TOTAL_EVEN_TEXT,
     parse_dom_odds,
     parse_next_goal_market_name,
 )
@@ -86,6 +89,11 @@ class SelectorTests(unittest.TestCase):
         self.assertEqual(parse_next_goal_market_name("Команда 2 — 7-й гол"), (2, 7))
         self.assertIsNone(parse_next_goal_market_name("Не будет 3-го гола"))
         self.assertEqual(parse_dom_odds(" 1,984 "), 1.984)
+
+    def test_total_even_dom_labels_are_explicit(self):
+        self.assertEqual(TOTAL_EVEN_SEARCH_TEXT, "тотал чет")
+        self.assertEqual(TOTAL_EVEN_TEXT, "Тотал чёт")
+        self.assertEqual(TOTAL_EVEN_SELECTION_TEXT, "Да")
 
 
 if __name__ == "__main__":

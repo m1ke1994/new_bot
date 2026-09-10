@@ -10,6 +10,18 @@ from .models import NextGoalOdds, Score, Scorer, TeamSelection
 MONEY_QUANTUM = Decimal("0.01")
 
 
+class StrategyType(StrEnum):
+    NEXT_GOAL = "NEXT_GOAL"
+    TOTAL_EVEN = "TOTAL_EVEN"
+
+    @property
+    def display_name(self) -> str:
+        return {
+            self.NEXT_GOAL: "Следующий гол",
+            self.TOTAL_EVEN: "Тотал чёт",
+        }[self]
+
+
 def money(value: Decimal | float | int | str) -> Decimal:
     return Decimal(str(value)).quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
 
@@ -24,6 +36,7 @@ class StrategyConfig:
     stakes: tuple[Decimal, ...]
     exclude_teams_enabled: bool
     min_initial_odds_enabled: bool
+    strategy_type: StrategyType
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "StrategyConfig":
@@ -38,6 +51,12 @@ class StrategyConfig:
         min_initial_odds_enabled = _boolean_setting(
             payload, "min_initial_odds_enabled", default=True
         )
+        try:
+            strategy_type = StrategyType(
+                str(payload.get("strategy_type", StrategyType.NEXT_GOAL.value)).strip().upper()
+            )
+        except ValueError as error:
+            raise ValueError("strategy_type must be NEXT_GOAL or TOTAL_EVEN") from error
         config = cls(
             initial_stake,
             multiplier,
@@ -45,6 +64,7 @@ class StrategyConfig:
             stakes,
             exclude_teams_enabled,
             min_initial_odds_enabled,
+            strategy_type,
         )
         config.validate()
         return config
@@ -68,6 +88,7 @@ class StrategyConfig:
             "required_budget": float(sum(self.stakes, Decimal("0"))),
             "exclude_teams_enabled": self.exclude_teams_enabled,
             "min_initial_odds_enabled": self.min_initial_odds_enabled,
+            "strategy_type": self.strategy_type.value,
         }
 
 
