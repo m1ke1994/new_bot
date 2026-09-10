@@ -1,8 +1,11 @@
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from backend.app.table_tennis.first_candidate_scanner import (
+    FirstCandidateTableTennisScanner,
+    first_monitorable_candidate,
+)
 from backend.app.table_tennis.models import TableTennisLeague, TableTennisMatch
-from backend.app.table_tennis.scanner import TableTennisScanner, first_monitorable_candidate
 from backend.app.table_tennis.state import TableTennisStateStore
 
 
@@ -73,31 +76,31 @@ class FirstCandidateTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(selected, second)
 
-    async def test_background_catalog_stops_after_first_league_with_candidate(self):
+    async def test_background_search_stops_after_first_league_with_candidate(self):
         state = TableTennisStateStore()
         manager = FakeManager()
-        scanner = TableTennisScanner(manager, state)
+        scanner = FirstCandidateTableTennisScanner(manager, state)
         leagues = [
             TableTennisLeague("1", "First", "/1", "https://example.test/1"),
             TableTennisLeague("2", "Second", "/2", "https://example.test/2"),
         ]
         candidate = self.make_match("101", 1)
         later = self.make_match("202", 2)
-        scan_mock = AsyncMock(side_effect=[[candidate], [later]])
+        scanner._scan_league_until_candidate = AsyncMock(
+            side_effect=[([candidate], candidate), ([later], later)]
+        )
 
-        with (
-            patch("backend.app.table_tennis.scanner.scan_leagues", AsyncMock(return_value=leagues)),
-            patch("backend.app.table_tennis.scanner.scan_league_matches", scan_mock),
+        with patch(
+            "backend.app.table_tennis.first_candidate_scanner.scan_leagues",
+            AsyncMock(return_value=leagues),
         ):
-            result = await scanner._scan_catalog(
+            result = await scanner._find_first_candidate(
                 manager.page,
                 "https://example.test/ru/live/table-tennis",
-                keep_running=True,
-                stop_on_first_candidate=True,
             )
 
-        self.assertEqual([item.event_id for item in result], ["101"])
-        self.assertEqual(scan_mock.await_count, 1)
+        self.assertIs(result, candidate)
+        self.assertEqual(scanner._scan_league_until_candidate.await_count, 1)
         snapshot = await state.snapshot()
         self.assertEqual(snapshot["status"], "CANDIDATE_FOUND")
         self.assertIsNone(snapshot["current_league"])
