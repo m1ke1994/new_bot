@@ -1,12 +1,18 @@
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from backend.app.demo.engine import ENGINE
-from backend.app.table_tennis.first_candidate_scanner import TABLE_TENNIS_SCANNER
+from backend.app.table_tennis.forks_scanner import TABLE_TENNIS_SCANNER
 from backend.app.table_tennis.scanner import ScanAlreadyRunning, TableTennisScanError
 from backend.app.table_tennis.state import TABLE_TENNIS_STATE
 
 
 router = APIRouter(prefix="/api/table-tennis", tags=["table-tennis"])
+
+
+class ForksStartRequest(BaseModel):
+    budget: float = Field(gt=0)
+    initial_stake: float = Field(gt=0)
 
 
 def _ensure_football_worker_stopped() -> None:
@@ -18,11 +24,14 @@ def _ensure_football_worker_stopped() -> None:
 
 
 @router.post("/start")
-async def start_table_tennis():
+async def start_table_tennis(payload: ForksStartRequest):
     _ensure_football_worker_stopped()
     try:
-        return await TABLE_TENNIS_SCANNER.start()
-    except ScanAlreadyRunning as error:
+        return await TABLE_TENNIS_SCANNER.start_with_config(
+            budget=payload.budget,
+            initial_stake=payload.initial_stake,
+        )
+    except (ScanAlreadyRunning, ValueError) as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
 
 
@@ -62,3 +71,13 @@ async def table_tennis_matches():
 @router.get("/candidates")
 async def table_tennis_candidates():
     return {"items": await TABLE_TENNIS_STATE.candidates()}
+
+
+@router.get("/forks")
+async def table_tennis_forks():
+    return {"items": await TABLE_TENNIS_SCANNER.forks()}
+
+
+@router.delete("/forks")
+async def clear_table_tennis_forks():
+    return await TABLE_TENNIS_SCANNER.clear_forks()
