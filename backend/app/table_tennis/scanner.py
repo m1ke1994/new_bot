@@ -11,10 +11,7 @@ from playwright.async_api import Locator, Page, TimeoutError as PlaywrightTimeou
 
 from auth import authorize
 from backend.app.browser.manager import BROWSER_MANAGER, BrowserManager
-from xbet_config import (
-    get_table_tennis_odds_poll_interval,
-    get_table_tennis_url,
-)
+from xbet_config import get_table_tennis_odds_poll_interval, get_table_tennis_url
 
 from .models import TableTennisLeague, TableTennisMatch, TableTennisObservation
 from .monitoring import (
@@ -27,7 +24,6 @@ from .monitoring import (
     read_current_party,
     read_target_market_odds,
     select_candidate_matches,
-    target_market_title,
     target_set_for,
 )
 from .selectors import (
@@ -68,7 +64,7 @@ def normalize_text(value: str | None) -> str:
 
 
 def parse_league_id(href: str | None) -> str | None:
-    """Accept only a real league URL, never a nested event URL."""
+    """Return an id only for a league URL, never for a nested match URL."""
     if not href:
         return None
     match = LEAGUE_PATH_RE.fullmatch(urlparse(href).path)
@@ -92,67 +88,37 @@ def parse_league_label(value: str) -> tuple[str, int | None]:
 
 def parse_odd(value: str | None) -> float | None:
     text = normalize_text(value).replace(",", ".")
-    match = re.fullmatch(r"\d+(?:\.\d+)?", text)
-    if match is None:
+    if re.fullmatch(r"\d+(?:\.\d+)?", text) is None:
         return None
-    result = float(match.group(0))
+    result = float(text)
     return result if result > 0 else None
+
+
+def _match_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    event_id = item.get("event_id")
+    if event_id:
+        return ("event_id", str(event_id))
+    return (
+        "fallback",
+        item.get("league_id") or item.get("league_name"),
+        item.get("player_1"),
+        item.get("player_2"),
+        item.get("url") or item.get("href"),
+    )
 
 
 def deduplicate_matches(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     unique: dict[tuple[Any, ...], dict[str, Any]] = {}
     for item in items:
-        event_id = item.get("event_id")
-        if event_id:
-            key = ("event_id", str(event_id))
-        else:
-            key = (
-                "fallback",
-                item.get("league_id") or item.get("league_name"),
-                item.get("player_1"),
-                item.get("player_2"),
-                item.get("url") or item.get("href"),
-            )
-        unique.setdefault(key, item)
+        unique.setdefault(_match_key(item), item)
     return list(unique.values())
 
 
-def deduplicate_match_models(
-    items: list[TableTennisMatch],
-) -> list[TableTennisMatch]:
-    unique_payloads = deduplicate_matches([item.to_dict() for item in items])
-    by_key: dict[tuple[Any, ...], TableTennisMatch] = {}
+def deduplicate_match_models(items: list[TableTennisMatch]) -> list[TableTennisMatch]:
+    unique: dict[tuple[Any, ...], TableTennisMatch] = {}
     for item in items:
-        payload = item.to_dict()
-        event_id = payload.get("event_id")
-        key = (
-            ("event_id", str(event_id))
-            if event_id
-            else (
-                "fallback",
-                payload.get("league_id") or payload.get("league_name"),
-                payload.get("player_1"),
-                payload.get("player_2"),
-                payload.get("url") or payload.get("href"),
-            )
-        )
-        by_key.setdefault(key, item)
-    result: list[TableTennisMatch] = []
-    for payload in unique_payloads:
-        event_id = payload.get("event_id")
-        key = (
-            ("event_id", str(event_id))
-            if event_id
-            else (
-                "fallback",
-                payload.get("league_id") or payload.get("league_name"),
-                payload.get("player_1"),
-                payload.get("player_2"),
-                payload.get("url") or payload.get("href"),
-            )
-        )
-        result.append(by_key[key])
-    return result
+        unique.setdefault(_match_key(item.to_dict()), item)
+    return list(unique.values())
 
 
 async def _safe_text(locator: Locator) -> str | None:
@@ -188,11 +154,7 @@ async def _group_name_for_link(link: Locator) -> str | None:
         trigger_text = await _safe_text(group.locator(ACCORDION_TRIGGER_SELECTOR))
         if not trigger_text:
             return None
-        first_line = next(
-            (normalize_text(line) for line in trigger_text.splitlines() if normalize_text(line)),
-            trigger_text,
-        )
-        return parse_league_label(first_line)[0] or None
+        return parse_league_label(trigger_text)[0] or None
     except Exception:
         return None
 
@@ -206,13 +168,13 @@ async def expand_league_groups(page: Page, log) -> None:
             continue
         group_name = parse_league_label(await _safe_text(trigger) or "")[0]
         try:
-            expanded = (await trigger.get_attribute("aria-expanded") or "").lower()
-            classes = (await trigger.get_attribute("class") or "").lower()
+            expanded = (await trigger.get_attribute("aria-expanded") or "").casefold()
+            classes = (await trigger.get_attribute("class") or "").casefold()
             child_links = group.locator(LEAGUE_LINK_SELECTOR)
-            is_expanded = expanded == "true" or any(
+            already_open = expanded == "true" or any(
                 marker in classes for marker in ("expanded", "opened", "active")
             )
-            if is_expanded or (expanded == "" and await child_links.count() > 0):
+            if already_open or (not expanded and await child_links.count() > 0):
                 continue
             await trigger.scroll_into_view_if_needed()
             await trigger.click()
@@ -238,6 +200,7 @@ async def scan_leagues(page: Page, base_url: str, log) -> list[TableTennisLeague
         league_id = parse_league_id(href)
         if league_id is None:
             continue
+
         title = await _safe_text(link.locator(LEAGUE_TITLE_SELECTOR))
         count_text = await _safe_text(link.locator(LEAGUE_GAMES_COUNT_SELECTOR))
         fallback_text = await _safe_text(link) or ""
@@ -252,6 +215,7 @@ async def scan_leagues(page: Page, base_url: str, log) -> list[TableTennisLeague
             declared_count = fallback_count
         if not name:
             name = f"Лига {league_id}"
+
         leagues.setdefault(
             league_id,
             TableTennisLeague(
@@ -294,6 +258,7 @@ async def parse_match_card(
     players = await _all_text(card.locator(PLAYER_SELECTOR))
     if len(players) < 2:
         return None
+
     link = card.locator(MATCH_LINK_SELECTOR).first
     href = await link.get_attribute("href") if await link.count() else None
     event_id = parse_event_id(href)
@@ -301,6 +266,7 @@ async def parse_match_card(
     score = f"{score_values[0]}:{score_values[1]}" if len(score_values) == 2 else None
     period = await _safe_text(card.locator(PERIOD_SELECTOR))
     time_value = await _safe_text(card.locator(TIME_SELECTOR))
+
     from .monitoring import parse_party_number
 
     current_set = parse_party_number(period)
@@ -319,28 +285,31 @@ async def parse_match_card(
     else:
         status = "UNKNOWN"
         started = None
-    return mark_candidate(TableTennisMatch(
-        event_id=event_id,
-        league_id=league.league_id,
-        league_name=league.name,
-        player_1=players[0],
-        player_2=players[1],
-        score=score,
-        sets_score=None,
-        current_set=current_set,
-        points_player_1=None,
-        points_player_2=None,
-        status=status,
-        started=started,
-        time=time_value,
-        href=href,
-        url=urljoin(base_url, href) if href else None,
-        odds=odds,
-        markets=markets,
-        raw_score_values=score_values,
-        period=period,
-        collected_at=datetime.now(timezone.utc).isoformat(),
-    ))
+
+    return mark_candidate(
+        TableTennisMatch(
+            event_id=event_id,
+            league_id=league.league_id,
+            league_name=league.name,
+            player_1=players[0],
+            player_2=players[1],
+            score=score,
+            sets_score=None,
+            current_set=current_set,
+            points_player_1=None,
+            points_player_2=None,
+            status=status,
+            started=started,
+            time=time_value,
+            href=href,
+            url=urljoin(base_url, href) if href else None,
+            odds=odds,
+            markets=markets,
+            raw_score_values=score_values,
+            period=period,
+            collected_at=datetime.now(timezone.utc).isoformat(),
+        )
+    )
 
 
 async def scan_league_matches(
@@ -354,6 +323,7 @@ async def scan_league_matches(
         await cards.first.wait_for(state="attached", timeout=8_000)
     except PlaywrightTimeoutError:
         return []
+
     matches: list[TableTennisMatch] = []
     for index in range(await cards.count()):
         try:
@@ -381,9 +351,8 @@ class TableTennisScanner:
 
     @property
     def scanning(self) -> bool:
-        return (
-            self._scan_lock.locked()
-            or (self._task is not None and not self._task.done())
+        return self._scan_lock.locked() or (
+            self._task is not None and not self._task.done()
         )
 
     @property
@@ -398,18 +367,13 @@ class TableTennisScanner:
         try:
             print(output)
         except UnicodeEncodeError:
-            # Windows consoles may still use cp1251 while Playwright emits
-            # characters outside that code page. Logging must never hide the
-            # original scanner/browser error.
             print(output.encode("ascii", errors="backslashreplace").decode("ascii"))
 
     async def start(self) -> dict[str, Any]:
-        """Start one scan in the background so the STOP endpoint stays responsive."""
+        """Start continuous candidate scanning/monitoring in the background."""
         async with self._control_lock:
             if self._task is not None and not self._task.done():
-                raise ScanAlreadyRunning(
-                    "Сканирование настольного тенниса уже выполняется."
-                )
+                raise ScanAlreadyRunning("Сканирование настольного тенниса уже выполняется.")
             if self._task is not None and self._task.done():
                 self._task = None
             self._stop_event.clear()
@@ -420,7 +384,8 @@ class TableTennisScanner:
                 browser=await self.browser_manager.snapshot(),
             )
             self._task = asyncio.create_task(
-                self._run_background(), name="table-tennis-scanner"
+                self._run_background(),
+                name="table-tennis-scanner",
             )
         await asyncio.sleep(0)
         return await self.state.snapshot()
@@ -431,11 +396,9 @@ class TableTennisScanner:
         except asyncio.CancelledError:
             raise
         except TableTennisScanError:
-            # The strategy runner has already published the full diagnostic state.
             pass
 
     async def stop(self) -> dict[str, Any]:
-        """Stop the forks scanner and close the shared persistent Chromium."""
         async with self._control_lock:
             self._stop_event.set()
             task = self._task
@@ -446,11 +409,9 @@ class TableTennisScanner:
         async with self._control_lock:
             if self._task is task:
                 self._task = None
+
         await self.browser_manager.stop()
-        await self._log(
-            "TABLE_TENNIS_STOPPED",
-            "[TABLE_TENNIS] scanner stopped; Playwright browser closed",
-        )
+        await self._log("TABLE_TENNIS_STOPPED", "scanner stopped; Playwright browser closed")
         return await self.state.update(
             status="STOPPED",
             scanning=False,
@@ -488,14 +449,13 @@ class TableTennisScanner:
             raise TableTennisScanError("Авторизация была остановлена.")
         if self._stop_event.is_set():
             raise asyncio.CancelledError
+
         auth_status = str(auth_result.get("status") or "UNKNOWN")
         authorized = auth_status == "AUTHORIZED"
         await self.state.update(authorized=authorized, auth_status=auth_status)
         await self._log(
             "TABLE_TENNIS_AUTH",
-            "[TABLE_TENNIS] authorization OK"
-            if authorized
-            else f"authorization status: {auth_status}",
+            "authorization OK" if authorized else f"authorization status: {auth_status}",
         )
 
         table_tennis_url = get_table_tennis_url()
@@ -519,36 +479,25 @@ class TableTennisScanner:
             error=None,
             league_errors=[],
         )
-        await self._log(
-            "TABLE_TENNIS_NAVIGATING",
-            f"[TABLE_TENNIS] navigating to {table_tennis_url}",
-        )
-        await page.goto(
-            table_tennis_url,
-            wait_until="domcontentloaded",
-            timeout=60_000,
-        )
-        root_candidates = page.locator(
-            f"{LEAGUE_GROUP_SELECTOR}, {LEAGUE_LINK_SELECTOR}"
-        )
+        await self._log("TABLE_TENNIS_NAVIGATING", f"navigating to {table_tennis_url}")
+        await page.goto(table_tennis_url, wait_until="domcontentloaded", timeout=60_000)
+        root_candidates = page.locator(f"{LEAGUE_GROUP_SELECTOR}, {LEAGUE_LINK_SELECTOR}")
         await root_candidates.first.wait_for(state="attached", timeout=20_000)
 
         await self.state.update(status="SCANNING_LEAGUES", current_url=page.url)
         leagues = await scan_leagues(page, table_tennis_url, self._log)
-        await self._log(
-            "TABLE_TENNIS_LEAGUES_FOUND",
-            f"[TABLE_TENNIS] leagues found: {len(leagues)}",
-        )
+        await self._log("TABLE_TENNIS_LEAGUES_FOUND", f"leagues found: {len(leagues)}")
         await self.state.update(leagues_found=len(leagues))
 
         collected: list[TableTennisMatch] = []
-        scanned_leagues: list[TableTennisLeague] = list(leagues)
+        scanned_leagues = list(leagues)
         league_errors: list[dict[str, str]] = []
         await self.state.replace_results(
             [item.to_dict() for item in scanned_leagues],
             [],
             [],
         )
+
         for league_index, league in enumerate(leagues):
             if self._stop_event.is_set():
                 raise asyncio.CancelledError
@@ -557,16 +506,9 @@ class TableTennisScanner:
                 current_league=league.name,
                 current_url=league.url,
             )
-            await self._log(
-                "TABLE_TENNIS_SCANNING_LEAGUE",
-                f"[TABLE_TENNIS] scanning league: {league.name}",
-            )
+            await self._log("TABLE_TENNIS_SCANNING_LEAGUE", f"scanning league: {league.name}")
             try:
-                league_matches = await scan_league_matches(
-                    page,
-                    league,
-                    table_tennis_url,
-                )
+                league_matches = await scan_league_matches(page, league, table_tennis_url)
                 collected.extend(league_matches)
                 scanned_leagues[league_index] = replace(
                     league,
@@ -574,14 +516,11 @@ class TableTennisScanner:
                 )
                 await self._log(
                     "TABLE_TENNIS_MATCHES_FOUND",
-                    f"[TABLE_TENNIS] {league.name}: matches found: {len(league_matches)}",
+                    f"{league.name}: matches found: {len(league_matches)}",
                 )
             except Exception as error:
                 league_errors.append(
-                    {
-                        "league": league.name,
-                        "error": f"{type(error).__name__}: {error}",
-                    }
+                    {"league": league.name, "error": f"{type(error).__name__}: {error}"}
                 )
                 await self._log(
                     "TABLE_TENNIS_LEAGUE_ERROR",
@@ -602,21 +541,16 @@ class TableTennisScanner:
 
         unique_matches = deduplicate_match_models(collected)
         candidates = select_candidate_matches(unique_matches)
-        await self._log(
-            "FORKS_CANDIDATES_FOUND",
-            f"[FORKS] candidates found: {len(candidates)}",
-        )
+        await self._log("FORKS_CANDIDATES_FOUND", f"candidates found: {len(candidates)}")
+
         try:
-            await page.goto(
-                table_tennis_url,
-                wait_until="domcontentloaded",
-                timeout=60_000,
-            )
+            await page.goto(table_tennis_url, wait_until="domcontentloaded", timeout=60_000)
         except Exception as error:
             await self._log(
                 "TABLE_TENNIS_RETURN_WARNING",
                 f"Не удалось вернуться в раздел: {type(error).__name__}: {error}",
             )
+
         await self.state.replace_results(
             [item.to_dict() for item in scanned_leagues],
             [item.to_dict() for item in unique_matches],
@@ -636,8 +570,7 @@ class TableTennisScanner:
         )
         await self._log(
             "TABLE_TENNIS_SCAN_FINISHED",
-            f"[TABLE_TENNIS] scan finished; leagues: {len(scanned_leagues)}; "
-            f"unique matches: {len(unique_matches)}",
+            f"scan finished; leagues: {len(scanned_leagues)}; unique matches: {len(unique_matches)}",
         )
         return candidates
 
@@ -663,10 +596,7 @@ class TableTennisScanner:
     ) -> str:
         observation.monitoring_status = status
         await self._publish_observation(observation, active=False)
-        await self._log(
-            "FORKS_MONITORING_FINISHED",
-            f"[FORKS] monitoring finished: {status}",
-        )
+        await self._log("FORKS_MONITORING_FINISHED", f"monitoring finished: {status}")
         return status
 
     async def _wait_for_market(
@@ -683,6 +613,7 @@ class TableTennisScanner:
             current_set = await read_current_party(page)
             if current_set is not None and current_set >= observation.target_set:
                 return "TARGET_SET_STARTED"
+
             market = await read_target_market_odds(
                 page,
                 observation.event_id,
@@ -693,9 +624,10 @@ class TableTennisScanner:
                 if market.available:
                     return market
                 if observation.mark_market_locked(utc_now()):
-                    await self._log("FORKS_MARKET_LOCKED", "[FORKS] market locked")
+                    await self._log("FORKS_MARKET_LOCKED", "market locked")
                 await self._publish_observation(observation)
             await self._sleep_or_stop(0.25)
+
         return "MARKET_LOCKED" if market_seen else "MARKET_NOT_AVAILABLE"
 
     async def _monitor_odds(
@@ -709,14 +641,8 @@ class TableTennisScanner:
             ensure_same_event(page, observation.event_id)
             current_set = await read_current_party(page)
             if current_set is not None and current_set >= observation.target_set:
-                await self._log(
-                    "FORKS_TARGET_SET_STARTED",
-                    "[FORKS] target party started",
-                )
-                return await self._finish_observation(
-                    observation,
-                    "TARGET_SET_STARTED",
-                )
+                await self._log("FORKS_TARGET_SET_STARTED", "target party started")
+                return await self._finish_observation(observation, "TARGET_SET_STARTED")
 
             if market is None:
                 market = await read_target_market_odds(
@@ -724,44 +650,38 @@ class TableTennisScanner:
                     observation.event_id,
                     observation.target_set,
                 )
+
             if market is None or not market.available:
                 if observation.mark_market_locked(utc_now()):
-                    await self._log("FORKS_MARKET_LOCKED", "[FORKS] market locked")
+                    await self._log("FORKS_MARKET_LOCKED", "market locked")
                 await self._publish_observation(observation)
             else:
                 assert market.p1 is not None and market.p2 is not None
                 change = observation.record_odds(market.p1, market.p2, utc_now())
                 if change["first"]:
-                    await self._log(
-                        "FORKS_MARKET_FOUND",
-                        f"[FORKS] market found: {market.title}",
-                    )
+                    await self._log("FORKS_MARKET_FOUND", f"market found: {market.title}")
                     await self._log(
                         "FORKS_INITIAL_ODDS",
-                        f"[FORKS] initial odds: P1={market.p1} P2={market.p2}",
+                        f"initial odds: P1={market.p1} P2={market.p2}",
                     )
                 elif change["restored"]:
                     await self._log(
                         "FORKS_MARKET_RESTORED",
-                        f"[FORKS] market restored: P1={market.p1} P2={market.p2}",
+                        f"market restored: P1={market.p1} P2={market.p2}",
                     )
                 elif change["changed"]:
                     await self._log(
                         "FORKS_ODDS_CHANGED",
-                        "[FORKS] odds changed: "
-                        f"P1 {change['previous_p1']} -> {market.p1}; "
+                        f"odds changed: P1 {change['previous_p1']} -> {market.p1}; "
                         f"P2 {change['previous_p2']} -> {market.p2}",
                     )
                 await self._publish_observation(observation)
+
             market = None
             await self._sleep_or_stop(get_table_tennis_odds_poll_interval())
         raise asyncio.CancelledError
 
-    async def _observe_candidate(
-        self,
-        page: Page,
-        match: TableTennisMatch,
-    ) -> str:
+    async def _observe_candidate(self, page: Page, match: TableTennisMatch) -> str:
         selected = candidate_payload(match)
         selected["monitoring_status"] = "MATCH_SELECTED"
         await self.state.update_candidate(selected)
@@ -771,10 +691,7 @@ class TableTennisScanner:
             scanning=True,
             active_match_id=match.event_id,
         )
-        await self._log(
-            "FORKS_MATCH_SELECTED",
-            f"[FORKS] selected: {match.player_1} — {match.player_2}",
-        )
+        await self._log("FORKS_MATCH_SELECTED", f"selected: {match.player_1} — {match.player_2}")
 
         if not match.event_id or not match.url:
             selected["monitoring_status"] = "EVENT_ID_NOT_AVAILABLE"
@@ -785,11 +702,9 @@ class TableTennisScanner:
         try:
             await page.goto(match.url, wait_until="domcontentloaded", timeout=60_000)
             ensure_same_event(page, match.event_id)
-            current_set = await read_current_party(
-                page,
-                allow_selected_fallback=True,
-            )
-            if target_set_for(current_set) is None:
+            current_set = await read_current_party(page, allow_selected_fallback=True)
+            target_set = target_set_for(current_set)
+            if target_set is None:
                 selected.update(
                     current_set=current_set,
                     target_set=None,
@@ -800,68 +715,55 @@ class TableTennisScanner:
                 await self.state.set_active_match(None)
                 return "NO_LONGER_CANDIDATE"
 
-            target_set = target_set_for(current_set)
-            assert current_set is not None and target_set is not None
+            assert current_set is not None
             observation = TableTennisObservation.from_match(
                 match,
                 current_set=current_set,
                 target_set=target_set,
             )
             await self._publish_observation(observation)
-            await self._log(
-                "FORKS_CURRENT_PARTY",
-                f"[FORKS] current party: {current_set}",
-            )
-            await self._log(
-                "FORKS_TARGET_PARTY",
-                f"[FORKS] target party: {target_set}",
-            )
-            await self._log(
-                "FORKS_OPENING_TARGET_PARTY",
-                f"[FORKS] opening target party: {target_set}",
-            )
+            await self._log("FORKS_CURRENT_PARTY", f"current party: {current_set}")
+            await self._log("FORKS_TARGET_PARTY", f"target party: {target_set}")
+            await self._log("FORKS_OPENING_TARGET_PARTY", f"opening target party: {target_set}")
+
             await open_target_party(
                 page,
                 observation.event_id,
                 observation.target_set,
                 self._stop_event,
             )
+
             market = await self._wait_for_market(page, observation)
             if market == "TARGET_SET_STARTED":
-                await self._log(
-                    "FORKS_TARGET_SET_STARTED",
-                    "[FORKS] target party started",
-                )
-                return await self._finish_observation(
-                    observation,
-                    "TARGET_SET_STARTED",
-                )
+                await self._log("FORKS_TARGET_SET_STARTED", "target party started")
+                return await self._finish_observation(observation, "TARGET_SET_STARTED")
             if market == "MARKET_NOT_AVAILABLE":
                 observation.market_status = "MARKET_NOT_AVAILABLE"
                 return await self._finish_observation(observation, "SKIPPED")
+            if market == "MARKET_LOCKED":
+                return await self._monitor_odds(page, observation)
             return await self._monitor_odds(page, observation, market)
+
         except TargetPartyNotAvailable:
             selected["market_status"] = "TARGET_PARTY_NOT_AVAILABLE"
             selected["monitoring_status"] = "TARGET_PARTY_NOT_AVAILABLE"
             await self.state.update_candidate(selected)
             await self.state.set_active_match(None)
-            await self._log(
-                "FORKS_TARGET_PARTY_NOT_AVAILABLE",
-                "[FORKS] target party not available",
-            )
+            await self._log("FORKS_TARGET_PARTY_NOT_AVAILABLE", "target party not available")
             return "TARGET_PARTY_NOT_AVAILABLE"
         except StaleMatchError as error:
             selected["monitoring_status"] = "STALE_MATCH"
             await self.state.update_candidate(selected)
             await self.state.set_active_match(None)
-            await self._log("FORKS_STALE_MATCH", f"[FORKS] {error}")
+            await self._log("FORKS_STALE_MATCH", str(error))
             return "STALE_MATCH"
 
     async def _run_strategy(self) -> None:
         if self._scan_lock.locked():
             raise ScanAlreadyRunning("Сканирование настольного тенниса уже выполняется.")
+
         async with self._scan_lock:
-            await self._log("TABLE_TENNIS_SCAN_STARTED", "[TABLE_TENNIS] scanner started")
+            await self._log("TABLE_TENNIS_SCAN_STARTED", "scanner started")
             try:
                 page, table_tennis_url = await self._authorize_page()
                 while not self._stop_event.is_set():
@@ -875,23 +777,33 @@ class TableTennisScanner:
                             status="WAITING_FOR_CANDIDATES",
                             scanning=True,
                         )
-                        await self._sleep_or_stop(
-                            get_table_tennis_odds_poll_interval()
-                        )
+                        await self._sleep_or_stop(get_table_tennis_odds_poll_interval())
                         continue
 
                     refresh_catalog = False
                     for candidate in candidates:
                         if self._stop_event.is_set():
                             raise asyncio.CancelledError
-                        outcome = await self._observe_candidate(page, candidate)
+                        try:
+                            outcome = await self._observe_candidate(page, candidate)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as error:
+                            await self.state.set_active_match(None)
+                            await self._log(
+                                "FORKS_CANDIDATE_ERROR",
+                                f"{candidate.player_1} — {candidate.player_2}: "
+                                f"{type(error).__name__}: {error}",
+                            )
+                            continue
                         if outcome == "TARGET_SET_STARTED":
                             refresh_catalog = True
                             break
+
                     if not refresh_catalog:
-                        await self._sleep_or_stop(
-                            get_table_tennis_odds_poll_interval()
-                        )
+                        await self._sleep_or_stop(get_table_tennis_odds_poll_interval())
+            except asyncio.CancelledError:
+                raise
             except Exception as error:
                 await self._publish_error(error)
 
@@ -907,10 +819,7 @@ class TableTennisScanner:
             browser=await self.browser_manager.snapshot(),
             error=f"{type(error).__name__}: {error}",
         )
-        await self._log(
-            "TABLE_TENNIS_SCAN_ERROR",
-            f"{type(error).__name__}: {error}",
-        )
+        await self._log("TABLE_TENNIS_SCAN_ERROR", f"{type(error).__name__}: {error}")
         if isinstance(error, TableTennisScanError):
             raise error
         raise TableTennisScanError(str(error)) from error
@@ -924,10 +833,12 @@ class TableTennisScanner:
             raise asyncio.CancelledError
 
     async def scan(self) -> dict[str, Any]:
+        """Run one read-only catalog scan without entering continuous monitoring."""
         if self._scan_lock.locked():
             raise ScanAlreadyRunning("Сканирование настольного тенниса уже выполняется.")
         if asyncio.current_task() is not self._task:
             self._stop_event.clear()
+
         async with self._scan_lock:
             await self.state.update(
                 status="STARTING",
@@ -936,15 +847,13 @@ class TableTennisScanner:
                 error=None,
                 browser=await self.browser_manager.snapshot(),
             )
-            await self._log("TABLE_TENNIS_SCAN_STARTED", "[TABLE_TENNIS] scanner started")
+            await self._log("TABLE_TENNIS_SCAN_STARTED", "scanner started")
             try:
                 page, table_tennis_url = await self._authorize_page()
-                await self._scan_catalog(
-                    page,
-                    table_tennis_url,
-                    keep_running=False,
-                )
+                await self._scan_catalog(page, table_tennis_url, keep_running=False)
                 return await self.state.snapshot()
+            except asyncio.CancelledError:
+                raise
             except Exception as error:
                 await self._publish_error(error)
 

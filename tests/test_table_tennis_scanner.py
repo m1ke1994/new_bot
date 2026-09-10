@@ -174,6 +174,7 @@ class TableTennisDomTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result.time)
         self.assertEqual(result.odds, {})
         self.assertEqual(result.markets, {})
+        self.assertFalse(result.is_candidate)
 
 
 class FakeManager:
@@ -200,7 +201,7 @@ class TableTennisScannerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ScanAlreadyRunning):
                 await scanner.scan()
 
-    async def test_start_runs_in_background_and_stop_closes_playwright(self):
+    async def test_start_runs_strategy_in_background_and_stop_closes_playwright(self):
         manager = FakeManager()
         state = TableTennisStateStore()
         scanner = TableTennisScanner(manager, state)
@@ -210,7 +211,7 @@ class TableTennisScannerTests(unittest.IsolatedAsyncioTestCase):
             started.set()
             await asyncio.Event().wait()
 
-        scanner.scan = worker
+        scanner._run_strategy = worker
         result = await scanner.start()
         await started.wait()
 
