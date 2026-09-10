@@ -16,7 +16,7 @@ from .fork_math import (
     zero_fork_capital_required,
     zero_zero_candidate_payload,
 )
-from .models import TableTennisLeague, TableTennisMatch
+from .models import TableTennisMatch
 from .monitoring import (
     StaleMatchError,
     TargetPartyNotAvailable,
@@ -196,6 +196,10 @@ class ForksTableTennisScanner(TableTennisScanner):
             zero_fork_capital_required=required,
             monitoring_status="WAITING_SECOND_LEG",
         )
+        await self.state.update(
+            fork_reserved=self._initial_stake,
+            fork_available_budget=max(0.0, self._budget - self._initial_stake),
+        )
         await self._publish_active(payload)
         await self._log(
             "FORKS_FIRST_LEG_PAPER",
@@ -303,7 +307,8 @@ class ForksTableTennisScanner(TableTennisScanner):
                     current_odds_p2=market.p2,
                     odds_updated_at=utc_now(),
                 )
-                if initial is None:
+                just_initialized = initial is None
+                if just_initialized:
                     initial = (market.p1, market.p2)
                     payload.update(initial_odds_p1=market.p1, initial_odds_p2=market.p2)
                 payload.setdefault("odds_history", []).append(
@@ -312,15 +317,20 @@ class ForksTableTennisScanner(TableTennisScanner):
                 payload["odds_history"] = payload["odds_history"][-200:]
 
                 if payload.get("first_leg") is None:
-                    delta1 = market.p1 - initial[0]
-                    delta2 = market.p2 - initial[1]
-                    if delta1 > 0 or delta2 > 0:
-                        if delta1 == delta2:
-                            side = "p1" if market.p1 >= market.p2 else "p2"
-                        else:
-                            side = "p1" if delta1 > delta2 else "p2"
+                    if just_initialized and market.p1 != market.p2:
+                        side = "p1" if market.p1 > market.p2 else "p2"
                         odds = market.p1 if side == "p1" else market.p2
                         await self._record_first_leg(payload, side=side, odds=odds)
+                    elif initial is not None:
+                        delta1 = market.p1 - initial[0]
+                        delta2 = market.p2 - initial[1]
+                        if delta1 > 0 or delta2 > 0:
+                            if delta1 == delta2:
+                                side = "p1" if market.p1 >= market.p2 else "p2"
+                            else:
+                                side = "p1" if delta1 > delta2 else "p2"
+                            odds = market.p1 if side == "p1" else market.p2
+                            await self._record_first_leg(payload, side=side, odds=odds)
                 else:
                     side = str(payload.get("second_side"))
                     odds = market.p1 if side == "p1" else market.p2
