@@ -10,7 +10,7 @@ from playwright.async_api import Locator, Page, TimeoutError as PlaywrightTimeou
 
 from auth import authorize
 from backend.app.browser.manager import BROWSER_MANAGER, BrowserManager
-from xbet_config import TABLE_TENNIS_PATH, get_xbet_url
+from xbet_config import get_table_tennis_url
 
 from .models import TableTennisLeague, TableTennisMatch
 from .selectors import (
@@ -32,7 +32,6 @@ from .selectors import (
 from .state import TABLE_TENNIS_STATE, TableTennisStateStore, utc_now
 
 
-TABLE_TENNIS_URL = get_xbet_url(TABLE_TENNIS_PATH)
 LEAGUE_PATH_RE = re.compile(r"^/ru/live/table-tennis/(\d+)(?:-[^/?#]+)?/?$")
 EVENT_PATH_RE = re.compile(
     r"^/ru/live/table-tennis/\d+(?:-[^/?#]+)?/(\d+)(?:-[^/?#]+)?/?$"
@@ -449,19 +448,20 @@ class TableTennisScanner:
                     "[TABLE_TENNIS] authorization OK" if authorized else f"authorization status: {auth_status}",
                 )
 
-                if not TABLE_TENNIS_URL:
-                    raise TableTennisScanError("XBET_URL отсутствует в .env")
-                await self.state.update(status="NAVIGATING", current_url=TABLE_TENNIS_URL)
+                table_tennis_url = get_table_tennis_url()
+                if not table_tennis_url:
+                    raise TableTennisScanError("TABLE_TENNIS_URL отсутствует в .env")
+                await self.state.update(status="NAVIGATING", current_url=table_tennis_url)
                 await self._log(
                     "TABLE_TENNIS_NAVIGATING",
-                    f"[TABLE_TENNIS] navigating to /{TABLE_TENNIS_PATH}",
+                    f"[TABLE_TENNIS] navigating to {table_tennis_url}",
                 )
-                await page.goto(TABLE_TENNIS_URL, wait_until="domcontentloaded", timeout=60_000)
+                await page.goto(table_tennis_url, wait_until="domcontentloaded", timeout=60_000)
                 root_candidates = page.locator(f"{LEAGUE_GROUP_SELECTOR}, {LEAGUE_LINK_SELECTOR}")
                 await root_candidates.first.wait_for(state="attached", timeout=20_000)
 
                 await self.state.update(status="SCANNING_LEAGUES", current_url=page.url)
-                leagues = await scan_leagues(page, TABLE_TENNIS_URL, self._log)
+                leagues = await scan_leagues(page, table_tennis_url, self._log)
                 await self._log(
                     "TABLE_TENNIS_LEAGUES_FOUND",
                     f"[TABLE_TENNIS] leagues found: {len(leagues)}",
@@ -488,7 +488,7 @@ class TableTennisScanner:
                     )
                     try:
                         league_matches = await scan_league_matches(
-                            page, league, TABLE_TENNIS_URL
+                            page, league, table_tennis_url
                         )
                         collected.extend(item.to_dict() for item in league_matches)
                         scanned_leagues[league_index] = replace(
@@ -520,7 +520,7 @@ class TableTennisScanner:
 
                 unique_matches = deduplicate_matches(collected)
                 try:
-                    await page.goto(TABLE_TENNIS_URL, wait_until="domcontentloaded", timeout=60_000)
+                    await page.goto(table_tennis_url, wait_until="domcontentloaded", timeout=60_000)
                 except Exception as error:
                     await self._log(
                         "TABLE_TENNIS_RETURN_WARNING",

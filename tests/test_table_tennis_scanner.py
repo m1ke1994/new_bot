@@ -237,7 +237,7 @@ class TableTennisScannerTests(unittest.IsolatedAsyncioTestCase):
             status="LIVE", started=True, time=None, href=None, url=None,
         )
         with (
-            patch("backend.app.table_tennis.scanner.TABLE_TENNIS_URL", "https://example.test/ru/live/table-tennis"),
+            patch("backend.app.table_tennis.scanner.get_table_tennis_url", return_value="https://example.test/ru/live/table-tennis"),
             patch("backend.app.table_tennis.scanner.authorize", AsyncMock(return_value={"ok": True, "status": "AUTHORIZED"})),
             patch("backend.app.table_tennis.scanner.scan_leagues", AsyncMock(return_value=leagues)),
             patch("backend.app.table_tennis.scanner.scan_league_matches", AsyncMock(side_effect=[RuntimeError("timeout"), [match]])),
