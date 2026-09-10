@@ -1,11 +1,8 @@
 from fastapi import APIRouter, HTTPException
 
 from backend.app.demo.engine import ENGINE
-from backend.app.table_tennis.scanner import (
-    ScanAlreadyRunning,
-    TABLE_TENNIS_SCANNER,
-    TableTennisScanError,
-)
+from backend.app.table_tennis.first_candidate_scanner import TABLE_TENNIS_SCANNER
+from backend.app.table_tennis.scanner import ScanAlreadyRunning, TableTennisScanError
 from backend.app.table_tennis.state import TABLE_TENNIS_STATE
 
 
