@@ -25,11 +25,13 @@ def is_zero_zero_score(score: str | None) -> bool:
 
 
 def is_zero_zero_match(match: Any) -> bool:
+    """Keep only already started LIVE matches whose current score is exactly 0:0."""
     return bool(
         is_zero_zero_score(getattr(match, "score", None))
         and getattr(match, "event_id", None)
         and getattr(match, "url", None)
-        and getattr(match, "status", None) != "FINISHED"
+        and getattr(match, "status", None) == "LIVE"
+        and getattr(match, "started", None) is True
     )
 
 
@@ -44,7 +46,7 @@ def _time_distance_minutes(value: str | None, now_minutes: int) -> int | None:
 
 
 def select_zero_zero_matches(matches: list[Any]) -> list[Any]:
-    """Expose only 0:0 events and put the nearest parseable start time first."""
+    """Expose only active LIVE 0:0 events and keep scanner order stable when time is absent."""
     filtered = [match for match in matches if is_zero_zero_match(match)]
     now = datetime.now()
     now_minutes = now.hour * 60 + now.minute
