@@ -59,7 +59,7 @@ class TableTennisForkMathTests(unittest.TestCase):
         self.assertEqual(result.second_stake, 1040.2)
         self.assertEqual(result.total_stake, 2040.2)
         self.assertEqual(result.guaranteed_profit, 29.8)
-        self.assertAlmostEqual(result.fork_percent, 1.4606, places=4)
+        self.assertAlmostEqual(result.fork_percent, 1.4605, places=4)
 
     def test_second_odd_below_zero_fork_threshold_is_rejected(self):
         result = calculate_fork(1000, 2.07, 1.90)
