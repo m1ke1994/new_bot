@@ -60,3 +60,8 @@ async def table_tennis_leagues():
 @router.get("/matches")
 async def table_tennis_matches():
     return {"items": await TABLE_TENNIS_STATE.matches()}
+
+
+@router.get("/candidates")
+async def table_tennis_candidates():
+    return {"items": await TABLE_TENNIS_STATE.candidates()}

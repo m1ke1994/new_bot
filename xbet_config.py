@@ -17,3 +17,12 @@ def get_xbet_url(path: str = "") -> str:
 def get_table_tennis_url() -> str:
     """Return the dedicated table-tennis page configured in .env."""
     return os.getenv("TABLE_TENNIS_URL", "").strip().rstrip("/")
+
+
+def get_table_tennis_odds_poll_interval() -> float:
+    """Return a bounded polling interval for the read-only odds monitor."""
+    try:
+        configured = float(os.getenv("TABLE_TENNIS_ODDS_POLL_INTERVAL", "1.5"))
+    except ValueError:
+        configured = 1.5
+    return max(0.5, configured)
