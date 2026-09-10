@@ -2,6 +2,7 @@ import unittest
 
 from backend.app.main import app
 
+
 class ApiRouteTests(unittest.TestCase):
     def test_demo_lifecycle_and_history_routes_are_registered(self):
         routes = {
@@ -18,6 +19,9 @@ class ApiRouteTests(unittest.TestCase):
         self.assertIn(("/api/table-tennis/leagues", "GET"), routes)
         self.assertIn(("/api/table-tennis/matches", "GET"), routes)
         self.assertIn(("/api/table-tennis/candidates", "GET"), routes)
+        self.assertIn(("/api/table-tennis/forks", "GET"), routes)
+        self.assertIn(("/api/table-tennis/forks", "DELETE"), routes)
+
 
 if __name__ == "__main__":
     unittest.main()
