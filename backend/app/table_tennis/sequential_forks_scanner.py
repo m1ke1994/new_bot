@@ -672,6 +672,11 @@ class SequentialForksTableTennisScanner(ForksTableTennisScanner):
                 await self._publish_active(payload)
                 await self._sleep_or_stop(get_table_tennis_odds_poll_interval())
 
+        except ArbitrageLocked:
+            # This is a successful terminal state for the current match, not an
+            # error. Let _run_strategy catch it, mark the event processed and move
+            # to the next queued match. Never retry the same completed arbitrage.
+            raise
         except StaleMatchError as error:
             payload.update(
                 monitoring_status="ERROR",
