@@ -27,6 +27,10 @@ _SELECTED_PARTY_SELECTOR = (
 _PARTY_RE = re.compile(r"^\s*(\d+)\s*[-–—]?\s*(?:я|й|ая)?\s*партия\s*$", re.IGNORECASE)
 _PARTY_TWO_RE = re.compile(r"\b2\s*[-–—]?\s*(?:я|й|ая)?\s+партия\b", re.IGNORECASE)
 
+# Importing the idempotent scanner above applies its older Party-2 helper patch.
+# Keep it only as a fallback for a future target_set other than 2.
+_PREVIOUS_OPEN_TARGET_PARTY = sequential_module.open_target_party
+
 # Prevent a fast click/reload/click loop on the same event. One click is sent and
 # then the site is given time to finish its SPA/full-page refresh before another
 # attempt is allowed.
@@ -115,7 +119,7 @@ async def open_party_two_stable(
     sends one click per cooldown window and waits for Party 2 to remain selected.
     """
     if target_set != 2:
-        return await sequential_module._ORIGINAL_OPEN_TARGET_PARTY(  # type: ignore[attr-defined]
+        return await _PREVIOUS_OPEN_TARGET_PARTY(
             page,
             event_id,
             target_set,
@@ -197,9 +201,10 @@ async def read_party_two_1x2_stable(
         if normalized == "1x2":
             exact_group = group
             break
-        fallback_group = fallback_group or group
+        if fallback_group is None:
+            fallback_group = group
 
-    matched_group = exact_group or fallback_group
+    matched_group = exact_group if exact_group is not None else fallback_group
     if matched_group is None:
         return None
 
