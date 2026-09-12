@@ -213,11 +213,26 @@ class SequentialForksTableTennisScanner(ForksTableTennisScanner):
                         f"event={candidate.event_id}; {candidate.player_1} - "
                         f"{candidate.player_2}; score={candidate.score}",
                     )
-                    try:
-                        outcome = await self._observe_zero_zero(page, candidate)
-                    except ArbitrageLocked:
-                        outcome = "ARB_LOCKED"
 
+                    # Pin this exact candidate. A temporary strategy/DOM error is
+                    # retried on the same URL instead of advancing to another match.
+                    while not self._stop_event.is_set():
+                        try:
+                            outcome = await self._observe_zero_zero(page, candidate)
+                        except ArbitrageLocked:
+                            outcome = "ARB_LOCKED"
+
+                        if outcome != "ERROR":
+                            break
+
+                        await self._log(
+                            "FORKS_MATCH_RETRY",
+                            f"event={candidate.event_id}; остаёмся на выбранном матче и повторяем",
+                        )
+                        await self._sleep_or_stop(0.5)
+
+                    if self._stop_event.is_set():
+                        break
                     if candidate.event_id:
                         self._processed_event_ids.add(str(candidate.event_id))
                     await self._log(
