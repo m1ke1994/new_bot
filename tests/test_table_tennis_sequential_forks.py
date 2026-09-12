@@ -1,3 +1,4 @@
+import inspect
 import unittest
 from copy import deepcopy
 
@@ -82,6 +83,18 @@ class SequentialForksTests(unittest.IsolatedAsyncioTestCase):
         not_zero = make_match("300", score="1:0", time="00:00")
         selected = select_zero_zero_in_scan_order([first, second, not_zero])
         self.assertEqual([item.event_id for item in selected], ["100", "200"])
+
+    def test_arbitrage_locked_is_terminal_not_generic_error(self):
+        # Regression for production loop:
+        # SECOND LEG -> ARB CLOSED -> FORKS_MATCH_ERROR(ArbitrageLocked) -> retry.
+        # The success signal must escape _observe_zero_zero so _run_strategy can
+        # mark this match processed and advance to the next candidate.
+        source = inspect.getsource(SequentialForksTableTennisScanner._observe_zero_zero)
+        terminal_handler = source.find("except ArbitrageLocked:")
+        generic_handler = source.find("except Exception as error:")
+        self.assertGreaterEqual(terminal_handler, 0)
+        self.assertGreater(generic_handler, terminal_handler)
+        self.assertIn("raise", source[terminal_handler:generic_handler])
 
     async def test_locked_arb_releases_budget_and_signals_next_match(self):
         state = RecordingState()
