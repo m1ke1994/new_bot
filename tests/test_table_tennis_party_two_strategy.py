@@ -156,7 +156,11 @@ class PartyTwoStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.values["reserved_balance"], 0.0)
         self.assertEqual(state.values["current_balance"], 1003.2)
 
-    async def test_equal_odds_wait_then_first_leg_can_finish_without_hedge(self):
+    async def test_equal_odds_places_first_leg_immediately_and_can_finish_without_hedge(self):
+        # Importing the production sequential runner installs the stable equal-odds
+        # tie-break used by the inherited Party-2 state machine: P1 is chosen at once.
+        import backend.app.table_tennis.sequential_forks_scanner  # noqa: F401
+
         state = RecordingState()
         scanner = ForksTableTennisScanner(browser_manager=object(), state=state)
         await scanner.configure(budget=10_000, initial_stake=1000)
@@ -193,17 +197,13 @@ class PartyTwoStrategyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(outcome, "HEDGE_NOT_FOUND")
         statuses = [item["monitoring_status"] for item in state.active_updates]
-        self.assertIn("WAITING_ODDS_DIVERGENCE", statuses)
-        equal_state = next(
-            item for item in state.active_updates
-            if item["monitoring_status"] == "WAITING_ODDS_DIVERGENCE"
-            and item.get("first_bet_wait_reason")
-        )
-        self.assertIsNone(equal_state["first_leg"])
+        self.assertNotIn("WAITING_ODDS_DIVERGENCE", statuses)
         first_placed = next(
             item for item in state.active_updates
             if item["monitoring_status"] == "FIRST_BET_PLACED"
         )
+        self.assertEqual(first_placed["first_leg"]["side"], "p1")
+        self.assertEqual(first_placed["first_leg"]["accepted_odd"], 1.87)
         self.assertEqual(first_placed["available_balance"], 9000.0)
         self.assertEqual(first_placed["reserved_balance"], 1000.0)
 
@@ -211,8 +211,8 @@ class PartyTwoStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(history), 1)
         self.assertIsNone(history[0]["second_leg"])
         self.assertEqual(history[0]["status"], "HEDGE_NOT_FOUND")
-        self.assertEqual(history[0]["profit_loss"], 650.0)
-        self.assertEqual(state.values["current_balance"], 10650.0)
+        self.assertEqual(history[0]["profit_loss"], 870.0)
+        self.assertEqual(state.values["current_balance"], 10870.0)
 
     async def test_direct_first_leg_only_loss_is_settled_once(self):
         state = RecordingState()
