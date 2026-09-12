@@ -33,6 +33,7 @@ _MARKET_BUTTON_SELECTOR = (
 )
 _MARKET_NAME_SELECTOR = ".ui-market__name"
 _MARKET_VALUE_SELECTOR = ".ui-market__value"
+_PARTY_TWO_LOOKUP_TIMEOUT = 5.0
 
 # Strategy state is intentionally tiny: one active catalog match at a time and a
 # single Party-2 click for that match. We do not compare/validate URLs after the
@@ -97,12 +98,13 @@ async def open_party_two_once(
     target_set: int,
     stop_event: asyncio.Event,
     *,
-    timeout: float = 15.0,
+    timeout: float = _PARTY_TWO_LOOKUP_TIMEOUT,
 ) -> None:
     """Find `2-я Партия`, click it exactly once, then let the page render.
 
     There is no URL check, no selected-CSS check and no second click. If the tab
-    has not appeared yet, stay on the same page and wait for it.
+    does not appear inside the short lookup window, raise TargetPartyNotAvailable
+    so the active scanner can skip this match and move to the next queue item.
     """
     if target_set != 2:
         raise TargetPartyNotAvailable(
@@ -114,7 +116,7 @@ async def open_party_two_once(
         return
 
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + max(float(timeout), 15.0)
+    deadline = loop.time() + max(float(timeout), 0.25)
     while loop.time() < deadline and not stop_event.is_set():
         item = await _find_party_two_item(page)
         if item is None:
@@ -127,9 +129,10 @@ async def open_party_two_once(
         except asyncio.CancelledError:
             raise
         except Exception:
-            # The DOM may be re-rendering. Do not navigate anywhere; just keep
-            # waiting for the same Party-2 tab and try the first click later.
-            await asyncio.sleep(0.5)
+            # The DOM may be re-rendering. Do not navigate anywhere. Keep trying
+            # only inside this short lookup window; after it expires the match is
+            # skipped instead of being retried forever.
+            await asyncio.sleep(0.35)
             continue
 
         _party_two_clicked_events.add(key)
@@ -143,7 +146,7 @@ async def open_party_two_once(
     if stop_event.is_set():
         raise asyncio.CancelledError
     raise TargetPartyNotAvailable(
-        "Вкладка «2-я Партия» пока не появилась; остаёмся на текущем матче."
+        "Вкладка «2-я Партия» не найдена в этом матче."
     )
 
 
@@ -295,8 +298,31 @@ class SimplePartyTwoForksScanner(IdempotentSequentialForksTableTennisScanner):
             await asyncio.sleep(2.0)
             await self._log(
                 "MATCH OPENED",
-                f"event={event_id}; opened once; waiting for «2-я Партия»",
+                f"event={event_id}; opened once; looking for «2-я Партия»",
             )
+
+            # New rule: a match without Party 2 is not pinned forever. Give the DOM
+            # a short window to render the tab. If it is still absent, finish this
+            # queue item with a non-error outcome so the parent run loop advances
+            # to the next scanned match instead of retrying the same one.
+            try:
+                await open_party_two_once(
+                    page,
+                    event_id,
+                    self.TARGET_SET,
+                    self._stop_event,
+                    timeout=_PARTY_TWO_LOOKUP_TIMEOUT,
+                )
+            except TargetPartyNotAvailable:
+                await self._log(
+                    "PARTY2_NOT_FOUND",
+                    f"event={event_id}; no «2-я Партия»; skip and open next match",
+                )
+                await self.state.update(
+                    status="PARTY2_NOT_FOUND",
+                    active_match_id=event_id,
+                )
+                return "PARTY2_NOT_FOUND"
 
         return await super()._observe_zero_zero(page, match)
 
