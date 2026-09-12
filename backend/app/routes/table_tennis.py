@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field
 
 from backend.app.demo.engine import ENGINE
 from backend.app.table_tennis.scanner import ScanAlreadyRunning, TableTennisScanError
-from backend.app.table_tennis.idempotent_sequential_forks_scanner import TABLE_TENNIS_SCANNER
+from backend.app.table_tennis.stable_forks_scanner import TABLE_TENNIS_SCANNER
 from backend.app.table_tennis.state import TABLE_TENNIS_STATE
 
 
