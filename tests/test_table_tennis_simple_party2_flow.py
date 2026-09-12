@@ -2,6 +2,7 @@ import asyncio
 import unittest
 
 from backend.app.table_tennis import simple_party2_forks_scanner as module
+from backend.app.table_tennis.monitoring import TargetPartyNotAvailable
 
 
 class _Empty:
@@ -61,8 +62,12 @@ class _Collection:
 
 
 class _Page:
-    def __init__(self):
-        self.items = [_Item("Основная игра"), _Item("2-я Партия"), _Item("3-я Партия")]
+    def __init__(self, *, include_party_two=True):
+        captions = ["Основная игра"]
+        if include_party_two:
+            captions.append("2-я Партия")
+        captions.append("3-я Партия")
+        self.items = [_Item(text) for text in captions]
 
     def locator(self, selector):
         if selector == module._PARTY_ITEM_SELECTOR:
@@ -84,6 +89,15 @@ class SimplePartyTwoFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(page.items[1].clicks, 1)
         self.assertEqual(await module.read_selected_party_simple(page), 2)
+
+    async def test_missing_party_two_expires_instead_of_waiting_forever(self):
+        page = _Page(include_party_two=False)
+        stop = asyncio.Event()
+
+        with self.assertRaises(TargetPartyNotAvailable):
+            await module.open_party_two_once(page, "123", 2, stop, timeout=0.05)
+
+        self.assertNotIn("123", module._party_two_clicked_events)
 
     def test_market_titles_for_party_two_are_supported(self):
         self.assertEqual(module._market_title_kind("1X2"), 2)
