@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from backend.app.table_tennis.models import TableTennisMatch, TableTennisObservation
 from backend.app.table_tennis.monitoring import (
@@ -6,6 +7,8 @@ from backend.app.table_tennis.monitoring import (
     is_candidate_set,
     map_outcomes_to_players,
     parse_party_number,
+    read_second_set_1x2_odds,
+    read_target_market_odds,
     select_candidate_matches,
     target_market_title,
     target_set_for,
@@ -157,6 +160,134 @@ class TableTennisMarketLookupTests(unittest.IsolatedAsyncioTestCase):
         selected = await find_target_market_group(page, 3)
         self.assertIsNotNone(selected)
         self.assertEqual(selected.title, "1X2. 3-я Партия")
+
+
+class _MarketCollection:
+    def __init__(self, nodes):
+        self.nodes = nodes
+
+    @property
+    def first(self):
+        return self.nodes[0] if self.nodes else _DomNode()
+
+    async def count(self):
+        return len(self.nodes)
+
+    def nth(self, index):
+        return self.nodes[index]
+
+
+class _DomNode:
+    def __init__(self, *, text="", title="", outcomes=None, opened=True):
+        self.text = text
+        self.title = title
+        self.outcomes = outcomes or []
+        self.opened = opened
+        self.clicked = False
+
+    @property
+    def first(self):
+        return self
+
+    async def count(self):
+        return 1 if self.text or self.title or self.outcomes else 0
+
+    async def inner_text(self):
+        return self.text or self.title
+
+    async def get_attribute(self, _name):
+        return ""
+
+    async def is_disabled(self):
+        return False
+
+    async def is_visible(self):
+        return self.opened
+
+    async def click(self, **_kwargs):
+        self.clicked = True
+        self.opened = True
+
+    async def wait_for(self, **_kwargs):
+        return None
+
+    def locator(self, selector):
+        if "game-markets-group-header-title" in selector:
+            return _DomNode(text=self.title)
+        if selector == ".game-markets-group__header":
+            header = _DomNode(text="header", opened=True)
+
+            async def open_market(**_kwargs):
+                header.clicked = True
+                self.opened = True
+
+            header.click = open_market
+            self.header = header
+            return header
+        if selector == ".game-markets-group__market":
+            buttons = []
+            for name, value in self.outcomes:
+                button = _DomNode(text="button", opened=self.opened)
+                button.locator = lambda child, n=name, v=value: _DomNode(
+                    text=n if child == ".ui-market__name" else v
+                )
+                buttons.append(button)
+            return _MarketCollection(buttons)
+        return _DomNode()
+
+
+class _ExactMarketPage:
+    url = "https://example.test/event/42"
+
+    def __init__(self):
+        self.total = _DomNode(
+            title="Тотал. 2-я Партия",
+            outcomes=[("П1", "9.99"), ("П2", "8.88")],
+        )
+        self.target = _DomNode(
+            title="1X2. 2-я Партия",
+            outcomes=[("П1", "1.65"), ("П2", "2.15")],
+            opened=False,
+        )
+
+    def locator(self, _selector):
+        return _MarketCollection([self.total, self.target])
+
+
+class ExactSecondSetOddsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reads_only_exact_second_set_1x2_and_opens_accordion(self):
+        page = _ExactMarketPage()
+        with (
+            patch("backend.app.table_tennis.monitoring.ensure_same_event"),
+            patch(
+                "backend.app.table_tennis.monitoring.read_selected_party",
+                new=AsyncMock(return_value=2),
+            ),
+        ):
+            market = await read_target_market_odds(page, "42", 2)
+
+        self.assertIsNotNone(market)
+        self.assertTrue(market.available)
+        self.assertEqual((market.p1, market.p2), (1.65, 2.15))
+        self.assertTrue(page.target.header.clicked)
+
+    async def test_second_set_reader_returns_frontend_shape(self):
+        page = _ExactMarketPage()
+        with (
+            patch("backend.app.table_tennis.monitoring.ensure_same_event"),
+            patch(
+                "backend.app.table_tennis.monitoring.read_selected_party",
+                new=AsyncMock(return_value=2),
+            ),
+        ):
+            result = await read_second_set_1x2_odds(page, "42")
+
+        self.assertEqual(result, {
+            "player1_odd": 1.65,
+            "player2_odd": 2.15,
+            "market": "1X2. 2-я Партия",
+            "available": True,
+        })
 
 
 if __name__ == "__main__":

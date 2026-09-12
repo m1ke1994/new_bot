@@ -11,9 +11,6 @@ from .selectors import (
     CAPTION_SELECTOR,
     MARKET_CONTENT_ITEM_SELECTOR,
     MARKET_GROUP_HEADER_SELECTOR,
-    MARKET_GROUP_LIST_SELECTOR,
-    MARKET_GROUP_SELECTION_SELECTOR,
-    MARKET_GROUP_SELECTOR,
     MARKET_GROUP_TITLE_SELECTOR,
     MARKET_NAME_SELECTOR,
     MARKET_VALUE_SELECTOR,
@@ -29,8 +26,7 @@ PARTY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 TARGET_MARKET_BUTTON_SELECTOR = (
-    f"{MARKET_GROUP_LIST_SELECTOR} .game-markets-group__market, "
-    f"{MARKET_GROUP_LIST_SELECTOR} .market"
+    ".game-markets-group__market"
 )
 
 
@@ -56,6 +52,14 @@ class TargetMarketOdds:
             and self.p1 is not None
             and self.p2 is not None
         )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "player1_odd": self.p1,
+            "player2_odd": self.p2,
+            "market": self.title,
+            "available": self.available,
+        }
 
 
 def normalize_text(value: str | None) -> str:
@@ -302,26 +306,42 @@ async def open_target_party(
 
 
 async def find_target_market_group(page: Page, target_set: int) -> Locator | None:
-    """Find the 1X2 market inside the already selected party.
-
-    On the current site, after selecting «1-я партия» the accordion is titled simply
-    «1X2». Older layouts used «1X2. 1-я Партия», so both forms are supported.
-    """
+    """Find the exact party 1X2 accordion, never a global/adjacent market value."""
     expected_party_title = normalize_text(target_market_title(target_set)).casefold().replace("х", "x")
-    groups = page.locator(
-        f"{MARKET_CONTENT_ITEM_SELECTOR} {MARKET_GROUP_SELECTOR}, "
-        f"{MARKET_GROUP_SELECTOR}"
+    containers = page.locator(MARKET_CONTENT_ITEM_SELECTOR)
+    title_selector = (
+        f"{MARKET_GROUP_TITLE_SELECTOR} {CAPTION_SELECTOR}, "
+        f"{MARKET_GROUP_TITLE_SELECTOR}"
     )
-    title_selector = f"{MARKET_GROUP_HEADER_SELECTOR} {MARKET_GROUP_TITLE_SELECTOR}"
-    for index in range(await groups.count()):
-        group = groups.nth(index)
-        title = group.locator(title_selector).first
+    for index in range(await containers.count()):
+        container = containers.nth(index)
+        title = container.locator(title_selector).first
         if await title.count() == 0:
             continue
         actual = normalize_text(await title.inner_text()).casefold().replace("х", "x")
-        if actual == "1x2" or actual == expected_party_title:
-            return group
+        if actual == expected_party_title or expected_party_title in actual:
+            return container
     return None
+
+
+async def _ensure_market_accordion_open(container: Locator) -> bool:
+    buttons = container.locator(TARGET_MARKET_BUTTON_SELECTOR)
+    if await buttons.count() > 0:
+        try:
+            if await buttons.first.is_visible():
+                return True
+        except Exception:
+            return True
+
+    header = container.locator(MARKET_GROUP_HEADER_SELECTOR).first
+    if await header.count() == 0:
+        return False
+    try:
+        await header.click(timeout=3_000)
+        await buttons.first.wait_for(state="visible", timeout=3_000)
+    except Exception:
+        return False
+    return await buttons.count() > 0
 
 
 async def read_target_market_odds(
@@ -330,9 +350,19 @@ async def read_target_market_odds(
     target_set: int,
 ) -> TargetMarketOdds | None:
     ensure_same_event(page, event_id)
+    if await read_selected_party(page) != target_set:
+        return None
     group = await find_target_market_group(page, target_set)
     if group is None:
         return None
+
+    if not await _ensure_market_accordion_open(group):
+        return TargetMarketOdds(
+            title=target_market_title(target_set),
+            p1=None,
+            p2=None,
+            status="MARKET_LOCKED",
+        )
 
     values: dict[str, float] = {}
     locked = False
@@ -381,3 +411,16 @@ async def read_target_market_odds(
         p2=values["п2"],
         status="MARKET_AVAILABLE",
     )
+
+
+async def read_second_set_1x2_odds(page: Page, event_id: str) -> dict[str, Any]:
+    """Read the exact «1X2. 2-я Партия» market in a frontend-friendly shape."""
+    market = await read_target_market_odds(page, event_id, 2)
+    if market is None:
+        return {
+            "player1_odd": None,
+            "player2_odd": None,
+            "market": target_market_title(2),
+            "available": False,
+        }
+    return market.to_dict()

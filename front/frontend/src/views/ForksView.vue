@@ -9,6 +9,7 @@ const budget = ref(10000)
 const initialStake = ref(1000)
 const pending = ref('')
 const errorMessage = ref('')
+const liveMatchesOpen = ref(true)
 let poll = null
 
 async function api(path, options = {}) {
@@ -93,22 +94,59 @@ function show(value, fallback = '—') {
 }
 
 function odd(value) {
+  if (value === null || value === undefined || value === '') return '—'
   const number = Number(value)
   return Number.isFinite(number) ? number.toFixed(3).replace(/0+$/, '').replace(/\.$/, '') : '—'
 }
 
 function money(value) {
+  if (value === null || value === undefined || value === '') return '—'
   const number = Number(value)
   return Number.isFinite(number) ? `${number.toFixed(2)} ₽` : '—'
 }
 
+function signedMoney(value) {
+  if (value === null || value === undefined || value === '') return '—'
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '—'
+  return `${number >= 0 ? '+' : ''}${number.toFixed(2)} ₽`
+}
+
 function percent(value) {
+  if (value === null || value === undefined || value === '') return '—'
   const number = Number(value)
   return Number.isFinite(number) ? `${number.toFixed(2)}%` : '—'
 }
 
 const active = computed(() => state.value.active_match || null)
 const queue = computed(() => candidates.value.filter((item) => item.event_id !== active.value?.event_id))
+const statusLabels = {
+  SEARCHING_MATCH: 'Ищем подходящий матч',
+  OPENING_MATCH: 'Открываем текущий матч',
+  SECOND_SET_SELECTED: 'Партия 2 выбрана',
+  WAITING_SECOND_SET_MARKET: 'Ожидаем рынок «1X2. 2-я Партия»',
+  WAITING_ODDS_DIVERGENCE: 'Ожидаем расхождение коэффициентов',
+  FIRST_BET_PLACED: 'Первое плечо зафиксировано',
+  WAITING_FOR_ARB: 'Ожидаем коэффициент противоположного игрока',
+  ARB_FOUND: 'Арбитраж найден',
+  SECOND_BET_PLACED: 'Второе плечо зафиксировано',
+  ARB_LOCKED: 'Вилка зафиксирована',
+  WAITING_RESULT: 'Ожидаем результат второй партии',
+  HEDGE_NOT_FOUND: 'Партия завершилась без второго плеча',
+  FINISHED: 'Серия рассчитана',
+  MARKET_LOCKED: 'Рынок временно заблокирован',
+  INSUFFICIENT_BUDGET: 'Недостаточно бюджета для первого плеча',
+  INSUFFICIENT_BUDGET_SECOND_LEG: 'Недостаточно свободного бюджета для второго плеча',
+  ERROR: 'Ошибка стратегии',
+}
+const activeStatus = computed(() => {
+  const value = active.value?.monitoring_status || state.value.status
+  return statusLabels[value] || show(value)
+})
+const hedgePlayerName = computed(() => {
+  if (!active.value?.second_side) return 'противоположного игрока'
+  return active.value.second_side === 'p1' ? active.value.player_1 : active.value.player_2
+})
 const canStart = computed(() => (
   !pending.value
   && !state.value.scanning
@@ -132,8 +170,8 @@ onBeforeUnmount(() => {
     <header class="hero">
       <div>
         <span class="eyebrow">PAPER TRADING · TABLE TENNIS</span>
-        <h1>Вилки — настольный теннис</h1>
-        <p>Сканирование всех LIVE-лиг, отбор матчей со счётом 0:0, мониторинг 1-й партии и расчёт двух плеч вилки без записи в БД.</p>
+        <h1>Вилки — мониторинг</h1>
+        <p>DEMO-стратегия выбирает «Партию 2», фиксирует фаворита и следит только за коэффициентом противоположного игрока.</p>
       </div>
       <RouterLink class="btn secondary" to="/">К стратегиям</RouterLink>
     </header>
@@ -169,12 +207,30 @@ onBeforeUnmount(() => {
     </section>
 
     <section class="stats-grid">
-      <article><span>Статус</span><strong>{{ show(state.status) }}</strong></article>
+      <article><span>Статус</span><strong>{{ statusLabels[state.status] || show(state.status) }}</strong></article>
       <article><span>Авторизация</span><strong>{{ state.authorized ? 'Да' : show(state.auth_status, 'Нет') }}</strong></article>
       <article><span>Матчей 0:0</span><strong>{{ state.matches_found || matches.length }}</strong></article>
       <article><span>Вилок</span><strong>{{ state.forks_count || forks.length }}</strong></article>
-      <article><span>Бюджет</span><strong>{{ money(state.fork_budget) }}</strong></article>
-      <article><span>Свободно</span><strong>{{ money(state.fork_available_budget) }}</strong></article>
+      <article><span>Начальный бюджет</span><strong>{{ money(state.fork_initial_budget ?? state.fork_budget) }}</strong></article>
+      <article><span>Свободный бюджет</span><strong>{{ money(state.fork_available_budget) }}</strong></article>
+    </section>
+
+    <section class="panel">
+      <div class="section-heading">
+        <div><span class="section-label">ДВИЖЕНИЕ СРЕДСТВ</span><h2>DEMO-банк</h2></div>
+      </div>
+      <div class="funds-grid">
+        <div><span>Начальный банк</span><strong>{{ money(state.starting_balance) }}</strong></div>
+        <div><span>Текущий банк</span><strong>{{ money(state.current_balance) }}</strong></div>
+        <div><span>Свободно</span><strong>{{ money(state.available_balance) }}</strong></div>
+        <div><span>В активных ставках</span><strong>{{ money(state.reserved_balance) }}</strong></div>
+        <div><span>Результат текущей серии</span><strong>{{ signedMoney(state.current_series_profit) }}</strong></div>
+        <div><span>Общая прибыль/убыток</span><strong>{{ signedMoney(state.realized_profit) }}</strong></div>
+        <div><span>ROI</span><strong>{{ percent(state.roi_percent) }}</strong></div>
+        <div><span>Завершённых серий</span><strong>{{ state.completed_series || 0 }}</strong></div>
+        <div><span>Плюсовых</span><strong>{{ state.winning_series || 0 }}</strong></div>
+        <div><span>Минусовых</span><strong>{{ state.losing_series || 0 }}</strong></div>
+      </div>
     </section>
 
     <section class="panel" v-if="active">
@@ -185,23 +241,33 @@ onBeforeUnmount(() => {
 
       <div class="active-grid">
         <div><span>Лига</span><strong>{{ show(active.league_name) }}</strong></div>
-        <div><span>Счёт при отборе</span><strong>{{ show(active.score) }}</strong></div>
-        <div><span>П1 сейчас</span><strong>{{ odd(active.current_odds_p1) }}</strong></div>
-        <div><span>П2 сейчас</span><strong>{{ odd(active.current_odds_p2) }}</strong></div>
-        <div><span>Первое плечо</span><strong>{{ active.first_leg ? `${active.first_leg.player} · ${odd(active.first_leg.odds)} · ${money(active.first_leg.stake)}` : 'ожидание' }}</strong></div>
-        <div><span>Минимум второго кф</span><strong>{{ odd(active.minimum_second_odds) }}</strong></div>
+        <div><span>Текущий счёт</span><strong>{{ show(active.current_score || active.score) }}</strong></div>
+        <div><span>Партия</span><strong>{{ active.party || active.target_set || 2 }}</strong></div>
+        <div><span>Начальный П1</span><strong>{{ odd(active.initial_odds_p1) }}</strong></div>
+        <div><span>Начальный П2</span><strong>{{ odd(active.initial_odds_p2) }}</strong></div>
+        <div><span>Текущий П1</span><strong>{{ odd(active.current_odds_p1) }}</strong></div>
+        <div><span>Текущий П2</span><strong>{{ odd(active.current_odds_p2) }}</strong></div>
+        <div><span>Первое плечо</span><strong>{{ active.first_leg ? `${active.first_leg.player} / ${active.first_leg.side.toUpperCase()} · ${odd(active.first_leg.accepted_odd ?? active.first_leg.odds)} · ${money(active.first_leg.stake)}` : 'ожидание' }}</strong></div>
+        <div><span>Второе плечо</span><strong>{{ active.second_leg ? `${active.second_leg.player} / ${active.second_leg.side.toUpperCase()} · ${odd(active.second_leg.accepted_odd ?? active.second_leg.odds)} · ${money(active.second_leg.stake)}` : 'ожидание' }}</strong></div>
+        <div><span>Следим за</span><strong>{{ hedgePlayerName }}</strong></div>
+        <div><span>Нулевой коэффициент</span><strong>&gt; {{ odd(active.minimum_second_odds) }}</strong></div>
+        <div><span>Текущий коэффициент хеджа</span><strong>{{ odd(active.current_hedge_odd) }}</strong></div>
         <div><span>Расчёт второй суммы</span><strong>{{ money(active.required_second_stake) }}</strong></div>
-        <div><span>Текущий % вилки</span><strong>{{ percent(active.fork_percent_preview) }}</strong></div>
+        <div><span>Задействовано средств</span><strong>{{ money(active.fork?.total_stake ?? state.fork_reserved) }}</strong></div>
+        <div><span>Арбитраж</span><strong>{{ percent(active.arbitrage_percent_preview ?? active.fork_percent_preview) }}</strong></div>
+        <div><span>При победе первого плеча</span><strong>{{ money(active.fork?.profit_if_first ?? active.profit_if_first_preview) }}</strong></div>
+        <div><span>При победе второго плеча</span><strong>{{ money(active.fork?.profit_if_second ?? active.profit_if_second_preview) }}</strong></div>
       </div>
-      <div class="status-strip">{{ show(active.monitoring_status) }}</div>
+      <p v-if="active.first_bet_wait_reason" class="reason">Причина: {{ active.first_bet_wait_reason }}</p>
+      <div class="status-strip">Статус: {{ activeStatus }}</div>
     </section>
 
     <section class="panel">
       <div class="section-heading">
         <div><span class="section-label">ОЧЕРЕДЬ</span><h2>Матчи со счётом 0:0</h2></div>
-        <b>{{ queue.length }}</b>
+        <button class="btn secondary" @click="liveMatchesOpen = !liveMatchesOpen">{{ liveMatchesOpen ? 'Скрыть' : 'Показать' }} · {{ queue.length }}</button>
       </div>
-      <div class="table-wrap">
+      <div v-show="liveMatchesOpen" class="table-wrap">
         <table>
           <thead><tr><th>Лига</th><th>Матч</th><th>Счёт</th><th>Время</th><th>П1</th><th>П2</th><th>Ссылка</th></tr></thead>
           <tbody>
@@ -222,22 +288,24 @@ onBeforeUnmount(() => {
 
     <section class="panel">
       <div class="section-heading">
-        <div><span class="section-label">ИСТОРИЯ В ПАМЯТИ</span><h2>Зафиксированные вилки</h2></div>
+        <div><span class="section-label">ИСТОРИЯ В ПАМЯТИ</span><h2>Завершённые серии</h2></div>
         <b>{{ forks.length }}</b>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Матч</th><th>1-е плечо</th><th>2-е плечо</th><th>Всего</th><th>Гарант. плюс</th><th>Вилка</th></tr></thead>
+          <thead><tr><th>Матч / серия</th><th>Партия</th><th>FIRST LEG</th><th>HEDGE LEG</th><th>Задействовано</th><th>Результаты</th><th>Арбитраж</th><th>Статус</th></tr></thead>
           <tbody>
-            <tr v-for="item in forks" :key="`${item.event_id}-${item.completed_at}`">
-              <td><strong>{{ item.player_1 }} — {{ item.player_2 }}</strong><small>{{ show(item.league_name) }}</small></td>
+            <tr v-for="item in forks" :key="item.sequence_id || `${item.event_id}-${item.completed_at}`">
+              <td><strong>{{ item.player_1 }} — {{ item.player_2 }}</strong><small>{{ show(item.sequence_id) }}</small></td>
+              <td>{{ item.party || 2 }}</td>
               <td>{{ item.first_leg.player }} · {{ odd(item.first_leg.odds) }} · {{ money(item.first_leg.stake) }}</td>
-              <td>{{ item.second_leg.player }} · {{ odd(item.second_leg.odds) }} · {{ money(item.second_leg.stake) }}</td>
-              <td>{{ money(item.fork.total_stake) }}</td>
-              <td>{{ money(item.fork.guaranteed_profit) }}</td>
-              <td><strong>{{ percent(item.fork.fork_percent) }}</strong></td>
+              <td>{{ item.second_leg ? `${item.second_leg.player} · ${odd(item.second_leg.odds)} · ${money(item.second_leg.stake)}` : 'не найдено' }}</td>
+              <td>{{ money(item.total_invested ?? item.fork?.total_stake) }}</td>
+              <td>{{ show(item.winner) }}<small>P&amp;L: {{ signedMoney(item.profit_loss) }}</small><small>{{ money(item.balance_before) }} → {{ money(item.balance_after) }}</small></td>
+              <td><strong>{{ percent(item.arb_percent ?? item.fork?.arbitrage_percent) }}</strong></td>
+              <td>{{ item.status || 'CLOSED' }}</td>
             </tr>
-            <tr v-if="!forks.length"><td colspan="6" class="empty">Завершённых вилок пока нет</td></tr>
+            <tr v-if="!forks.length"><td colspan="8" class="empty">Завершённых вилок пока нет</td></tr>
           </tbody>
         </table>
       </div>
@@ -254,12 +322,14 @@ h2 { margin: 4px 0 0; }
 p { color: #9ba9bb; max-width: 820px; }
 .eyebrow, .section-label { font-size: 12px; letter-spacing: .12em; color: #7f8da0; }
 .panel { background: #0e1824; border: 1px solid #1e2a39; border-radius: 16px; padding: 20px; margin-bottom: 18px; }
-.settings-grid, .stats-grid, .active-grid { display: grid; gap: 12px; }
+.settings-grid, .stats-grid, .active-grid, .funds-grid { display: grid; gap: 12px; }
 .settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 18px 0; }
 .stats-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); margin-bottom: 18px; }
 .active-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 18px; }
-.stats-grid article, .active-grid > div { background: #111f2d; border: 1px solid #223246; border-radius: 12px; padding: 14px; }
-.stats-grid span, .active-grid span { display: block; color: #8f9db0; font-size: 12px; margin-bottom: 6px; }
+.funds-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); margin-top: 18px; }
+.stats-grid article, .active-grid > div, .funds-grid > div { background: #111f2d; border: 1px solid #223246; border-radius: 12px; padding: 14px; }
+.stats-grid span, .active-grid span, .funds-grid span { display: block; color: #8f9db0; font-size: 12px; margin-bottom: 6px; }
+.reason { margin: 14px 0 0; color: #f2c879; }
 label { display: grid; gap: 8px; color: #9daabd; }
 input { background: #08121c; color: #fff; border: 1px solid #2a3a4e; border-radius: 10px; padding: 12px; font-size: 16px; }
 .btn { border: 0; border-radius: 10px; padding: 11px 16px; cursor: pointer; background: #fff; color: #0b1118; font-weight: 700; text-decoration: none; }
@@ -275,6 +345,6 @@ th { color: #7f8da0; font-weight: 600; }
 td small { display: block; color: #7f8da0; margin-top: 4px; }
 a { color: #c7ddff; }
 .empty { text-align: center; color: #738195; padding: 26px; }
-@media (max-width: 1100px) { .stats-grid { grid-template-columns: repeat(3, 1fr); } .active-grid { grid-template-columns: repeat(2, 1fr); } }
-@media (max-width: 700px) { .forks-page { padding: 16px; } .hero, .section-heading, .actions { align-items: stretch; flex-direction: column; } .settings-grid, .stats-grid, .active-grid { grid-template-columns: 1fr; } }
+@media (max-width: 1100px) { .stats-grid, .funds-grid { grid-template-columns: repeat(3, 1fr); } .active-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 700px) { .forks-page { padding: 16px; } .hero, .section-heading, .actions { align-items: stretch; flex-direction: column; } .settings-grid, .stats-grid, .active-grid, .funds-grid { grid-template-columns: 1fr; } }
 </style>

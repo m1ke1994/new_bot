@@ -1,9 +1,16 @@
 import unittest
 
 from backend.app.table_tennis.fork_math import (
+    calculate_arbitrage_percent,
     calculate_fork,
+    calculate_hedge_stake,
+    calculate_outcome_profit,
+    calculate_series_settlement,
+    calculate_zero_hedge_odd,
+    is_arbitrage_available,
     is_zero_zero_score,
     minimum_second_odds,
+    select_favorite,
     select_zero_zero_matches,
     zero_fork_capital_required,
 )
@@ -66,6 +73,67 @@ class TableTennisForkMathTests(unittest.TestCase):
 
         self.assertFalse(result.profitable)
         self.assertLess(result.guaranteed_profit, 0)
+
+    def test_150_has_zero_boundary_at_300_and_requires_positive_margin(self):
+        self.assertEqual(calculate_zero_hedge_odd(1.50), 3.0)
+        self.assertEqual(calculate_arbitrage_percent(1.50, 3.00), 0.0)
+        self.assertFalse(is_arbitrage_available(1.50, 3.00, min_arb_percent=0.0))
+        self.assertGreater(calculate_arbitrage_percent(1.50, 3.01), 0.0)
+        self.assertTrue(is_arbitrage_available(1.50, 3.01, min_arb_percent=0.0))
+        self.assertFalse(is_arbitrage_available(1.50, 3.01))
+
+    def test_hedge_stake_and_both_outcome_profits_match_reference(self):
+        second_stake = calculate_hedge_stake(100, 1.50, 3.10)
+        profit_first, profit_second = calculate_outcome_profit(
+            100,
+            1.50,
+            second_stake,
+            3.10,
+        )
+
+        self.assertEqual(second_stake, 48.39)
+        self.assertEqual(profit_first, 1.61)
+        self.assertEqual(profit_second, 1.62)
+
+    def test_first_leg_always_selects_the_lower_odd(self):
+        self.assertEqual(select_favorite(1.34, 4.11), "p1")
+        self.assertEqual(select_favorite(3.75, 1.29), "p2")
+
+    def test_equal_odds_within_epsilon_have_no_favorite(self):
+        with self.assertRaises(ValueError):
+            select_favorite(1.87, 1.87)
+        with self.assertRaises(ValueError):
+            select_favorite(1.870, 1.874)
+        self.assertEqual(select_favorite(1.50, 2.50), "p1")
+        self.assertEqual(select_favorite(3.00, 1.40), "p2")
+
+    def test_299_is_not_a_fork_and_310_is_profitable(self):
+        self.assertFalse(is_arbitrage_available(1.50, 2.99))
+        self.assertTrue(is_arbitrage_available(1.50, 3.10))
+
+    def test_settlement_when_first_leg_wins(self):
+        result = calculate_series_settlement(
+            10_000, "p1", 1000, 1.50, "p1",
+            hedge_side="p2", hedge_stake=483.87, hedge_odds=3.10,
+        )
+        self.assertEqual(result.balance_after, 10016.13)
+        self.assertEqual(result.profit_loss, 16.13)
+        self.assertEqual(result.winning_leg, "FIRST_LEG")
+
+    def test_settlement_when_hedge_leg_wins(self):
+        result = calculate_series_settlement(
+            10_000, "p1", 1000, 1.50, "p2",
+            hedge_side="p2", hedge_stake=483.87, hedge_odds=3.10,
+        )
+        self.assertEqual(result.balance_after, 10016.13)
+        self.assertEqual(result.profit_loss, 16.13)
+        self.assertEqual(result.winning_leg, "HEDGE_LEG")
+
+    def test_first_leg_only_settlement_records_real_win_and_loss(self):
+        won = calculate_series_settlement(10_000, "p1", 1000, 1.50, "p1")
+        lost = calculate_series_settlement(10_000, "p1", 1000, 1.50, "p2")
+        self.assertEqual((won.balance_after, won.profit_loss), (10500.0, 500.0))
+        self.assertEqual((lost.balance_after, lost.profit_loss), (9000.0, -1000.0))
 
 
 if __name__ == "__main__":

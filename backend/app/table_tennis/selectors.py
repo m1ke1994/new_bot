@@ -22,7 +22,13 @@ MARKET_VALUE_SELECTOR = ".ui-market__value"
 
 SUB_GAMES_LIST_SELECTOR = ".game-sub-games__list"
 SUB_GAME_ITEM_SELECTOR = ".game-sub-games__item"
-SELECTED_SUB_GAME_SELECTOR = ".game-sub-games__item--is-selected"
+SELECTED_SUB_GAME_SELECTOR = (
+    ".game-sub-games__item:is("
+    ".game-sub-games__item--is-selected, "
+    ".game-sub-games__item--active, "
+    ".active, .selected, [aria-selected=\"true\"]"
+    ")"
+)
 CAPTION_SELECTOR = ".ui-caption"
 
 MARKET_CONTENT_ITEM_SELECTOR = ".game-markets-content__item"

@@ -26,3 +26,12 @@ def get_table_tennis_odds_poll_interval() -> float:
     except ValueError:
         configured = 1.5
     return max(0.5, configured)
+
+
+def get_table_tennis_min_arb_percent() -> float:
+    """Return the safety margin required before the paper hedge is recorded."""
+    try:
+        configured = float(os.getenv("TABLE_TENNIS_MIN_ARB_PERCENT", "0.5"))
+    except ValueError:
+        configured = 0.5
+    return max(0.0, configured)
