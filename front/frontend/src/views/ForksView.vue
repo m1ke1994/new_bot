@@ -288,24 +288,24 @@ onBeforeUnmount(() => {
 
     <section class="panel">
       <div class="section-heading">
-        <div><span class="section-label">ИСТОРИЯ В ПАМЯТИ</span><h2>Завершённые серии</h2></div>
+        <div><span class="section-label">ИСТОРИЯ СТАВОК</span><h2>История ставок</h2></div>
         <b>{{ forks.length }}</b>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Матч / серия</th><th>Партия</th><th>FIRST LEG</th><th>HEDGE LEG</th><th>Задействовано</th><th>Результаты</th><th>Арбитраж</th><th>Статус</th></tr></thead>
+          <thead><tr><th>Матч / ставка</th><th>Партия</th><th>Первая ставка</th><th>Вторая ставка</th><th>Задействовано</th><th>Результаты</th><th>Арбитраж</th><th>Статус</th></tr></thead>
           <tbody>
             <tr v-for="item in forks" :key="item.sequence_id || `${item.event_id}-${item.completed_at}`">
               <td><strong>{{ item.player_1 }} — {{ item.player_2 }}</strong><small>{{ show(item.sequence_id) }}</small></td>
               <td>{{ item.party || 2 }}</td>
               <td>{{ item.first_leg.player }} · {{ odd(item.first_leg.odds) }} · {{ money(item.first_leg.stake) }}</td>
-              <td>{{ item.second_leg ? `${item.second_leg.player} · ${odd(item.second_leg.odds)} · ${money(item.second_leg.stake)}` : 'не найдено' }}</td>
+              <td>{{ item.second_leg ? `${item.second_leg.player} · ${odd(item.second_leg.odds)} · ${money(item.second_leg.stake)}` : 'ожидание' }}</td>
               <td>{{ money(item.total_invested ?? item.fork?.total_stake) }}</td>
               <td>{{ show(item.winner) }}<small>P&amp;L: {{ signedMoney(item.profit_loss) }}</small><small>{{ money(item.balance_before) }} → {{ money(item.balance_after) }}</small></td>
               <td><strong>{{ percent(item.arb_percent ?? item.fork?.arbitrage_percent) }}</strong></td>
-              <td>{{ item.status || 'CLOSED' }}</td>
+              <td>{{ item.status || 'OPEN' }}</td>
             </tr>
-            <tr v-if="!forks.length"><td colspan="8" class="empty">Завершённых вилок пока нет</td></tr>
+            <tr v-if="!forks.length"><td colspan="8" class="empty">Ставок пока нет</td></tr>
           </tbody>
         </table>
       </div>
