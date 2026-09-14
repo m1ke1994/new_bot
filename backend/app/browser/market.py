@@ -29,7 +29,6 @@ TOTAL_EVEN_TEXT = "Тотал чёт"
 TOTAL_EVEN_SEARCH_TEXT = "тотал чет"
 TOTAL_EVEN_SELECTION_TEXT = "Да"
 FIRST_HALF_1X2_TEXT = "1X2. 1-й тайм"
-FIRST_HALF_1X2_SEARCH_TEXT = "1x2. 1-й тайм"
 FIRST_HALF_DRAW_SELECTION_TEXT = "Ничья"
 MARKET_KEYWORDS = (
     "market",
@@ -531,18 +530,7 @@ async def read_first_half_draw_market(
     page: Page,
     logger: Logger | None = None,
 ) -> FirstHalfDrawMarket:
-    """Read only «Ничья» from the exact «1X2. 1-й тайм» DOM group."""
-    search_input = page.locator(NEXT_GOAL_SEARCH_SELECTOR).first
-    try:
-        await search_input.wait_for(state="visible", timeout=5_000)
-        await search_input.fill(FIRST_HALF_1X2_SEARCH_TEXT)
-    except Exception as error:
-        raise MarketDomRequired(
-            "Поле поиска рынков пока недоступно.",
-            status="ELEMENT_NOT_READY",
-            details={"source": "DOM_PLAYWRIGHT"},
-        ) from error
-
+    """Read «Ничья» directly from «1X2. 1-й тайм» without using market search."""
     groups = page.locator(MARKET_GROUP_SELECTOR)
     try:
         await groups.first.wait_for(state="attached", timeout=5_000)
