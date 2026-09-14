@@ -173,6 +173,18 @@ class FirstHalfDrawRuleTests(unittest.TestCase):
         self.assertFalse(is_first_half_finished(snapshot(0, 1, period="")))
         self.assertFalse(is_first_half_finished(snapshot(1, 1)))
 
+    def test_exact_three_minutes_finishes_first_half(self):
+        self.assertTrue(
+            is_first_half_finished(
+                snapshot(3, 3, period="1-й тайм", timer="03:00")
+            )
+        )
+        self.assertFalse(
+            is_first_half_finished(
+                snapshot(3, 3, period="1-й тайм", timer="02:59")
+            )
+        )
+
     def test_explicit_period_transitions_finish_first_half(self):
         self.assertEqual(
             classify_first_half_phase("1-й тайм 08:12"), FirstHalfPhase.FIRST_HALF
@@ -197,7 +209,7 @@ class FirstHalfDrawRuleTests(unittest.TestCase):
 
 
 class FirstHalfScoreboardFlagTests(unittest.IsolatedAsyncioTestCase):
-    async def test_exact_scoreboard_timer_marks_first_half_running(self):
+    async def test_exact_scoreboard_timer_marks_first_half_finished(self):
         page = FakeStatusPage("1-й тайм, 03:00")
 
         phase, text = await first_half_timer_flag(page)
@@ -205,10 +217,23 @@ class FirstHalfScoreboardFlagTests(unittest.IsolatedAsyncioTestCase):
             page, snapshot(3, 3, period="1-й тайм", timer="03:00")
         )
 
-        self.assertEqual(phase, FirstHalfPhase.FIRST_HALF)
+        self.assertEqual(phase, FirstHalfPhase.FINISHED)
         self.assertEqual(text, "1-й тайм, 03:00")
-        self.assertFalse(finished)
+        self.assertTrue(finished)
         self.assertIn("scoreboard-timer=1-й тайм, 03:00", evidence)
+
+    async def test_scoreboard_timer_before_three_minutes_is_still_running(self):
+        page = FakeStatusPage("1-й тайм, 02:59")
+
+        phase, text = await first_half_timer_flag(page)
+        finished, evidence = await first_half_end_signal(
+            page, snapshot(3, 3, period="1-й тайм", timer="02:59")
+        )
+
+        self.assertEqual(phase, FirstHalfPhase.FIRST_HALF)
+        self.assertEqual(text, "1-й тайм, 02:59")
+        self.assertFalse(finished)
+        self.assertIn("scoreboard-timer=1-й тайм, 02:59", evidence)
 
     async def test_scoreboard_timer_transition_marks_first_half_finished(self):
         page = FakeStatusPage("2-й тайм, 00:01")
