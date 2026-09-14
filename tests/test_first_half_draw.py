@@ -3,6 +3,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from backend.app.browser.first_half import (
+    SCOREBOARD_TIMER_STATUS_SELECTOR,
+    first_half_end_signal,
+    first_half_timer_flag,
+)
 from backend.app.browser.market import (
     MARKET_BUTTON_SELECTOR,
     MARKET_GROUP_SELECTOR,
@@ -57,6 +62,9 @@ class FakeNode:
     async def fill(self, value):
         self.filled = value
 
+    async def is_visible(self):
+        return True
+
     def locator(self, selector):
         return FakeLocatorList(self.children.get(selector, []))
 
@@ -91,14 +99,26 @@ def market_group(title, buttons):
 class FakeMarketPage:
     def __init__(self, groups):
         self.search = FakeNode()
+        self.search_requested = False
         self.groups = groups
 
     def locator(self, selector):
         if selector == NEXT_GOAL_SEARCH_SELECTOR:
+            self.search_requested = True
             return FakeLocatorList([self.search])
         if selector == MARKET_GROUP_SELECTOR:
             return FakeLocatorList(self.groups)
         raise AssertionError(f"Unexpected selector: {selector}")
+
+
+class FakeStatusPage:
+    def __init__(self, status_text):
+        self.status_text = status_text
+
+    def locator(self, selector):
+        if selector == SCOREBOARD_TIMER_STATUS_SELECTOR:
+            return FakeLocatorList([FakeNode(self.status_text)])
+        return FakeLocatorList([])
 
 
 class FakeManager:
@@ -168,6 +188,7 @@ class FirstHalfDrawRuleTests(unittest.TestCase):
             (0, 0): "WIN",
             (1, 1): "WIN",
             (2, 2): "WIN",
+            (3, 3): "WIN",
             (0, 1): "LOSE",
             (2, 1): "LOSE",
         }.items():
@@ -175,8 +196,36 @@ class FirstHalfDrawRuleTests(unittest.TestCase):
                 self.assertEqual(settle_first_half_draw(Score(*values)), result)
 
 
+class FirstHalfScoreboardFlagTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exact_scoreboard_timer_marks_first_half_running(self):
+        page = FakeStatusPage("1-й тайм, 03:00")
+
+        phase, text = await first_half_timer_flag(page)
+        finished, evidence = await first_half_end_signal(
+            page, snapshot(3, 3, period="1-й тайм", timer="03:00")
+        )
+
+        self.assertEqual(phase, FirstHalfPhase.FIRST_HALF)
+        self.assertEqual(text, "1-й тайм, 03:00")
+        self.assertFalse(finished)
+        self.assertIn("scoreboard-timer=1-й тайм, 03:00", evidence)
+
+    async def test_scoreboard_timer_transition_marks_first_half_finished(self):
+        page = FakeStatusPage("2-й тайм, 00:01")
+
+        phase, text = await first_half_timer_flag(page)
+        finished, evidence = await first_half_end_signal(
+            page, snapshot(3, 3, period="", timer="00:01")
+        )
+
+        self.assertEqual(phase, FirstHalfPhase.FINISHED)
+        self.assertEqual(text, "2-й тайм, 00:01")
+        self.assertTrue(finished)
+        self.assertIn("scoreboard-timer=2-й тайм, 00:01", evidence)
+
+
 class FirstHalfDrawMarketTests(unittest.IsolatedAsyncioTestCase):
-    async def test_draw_is_selected_by_text_not_array_index(self):
+    async def test_draw_is_selected_by_text_not_array_index_or_search_input(self):
         wrong_group = market_group("1X2", [market_button("Ничья", "9.99")])
         target_group = market_group(
             "1X2. 1-й тайм",
@@ -190,7 +239,8 @@ class FirstHalfDrawMarketTests(unittest.IsolatedAsyncioTestCase):
 
         result = await read_first_half_draw_market(page)
 
-        self.assertEqual(page.search.filled, "1x2. 1-й тайм")
+        self.assertFalse(page.search_requested)
+        self.assertIsNone(page.search.filled)
         self.assertEqual(result.market, "1X2. 1-й тайм")
         self.assertEqual(result.selection, "Ничья")
         self.assertEqual(result.odds, 5.33)
