@@ -11,11 +11,18 @@ from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from auth import authorize
 from backend.app.browser.canvas_vision import load_latest_analysis
+from backend.app.browser.first_half import (
+    FirstHalfNotReady,
+    first_half_draw_market_present,
+    first_half_end_signal,
+    open_first_half,
+)
 from backend.app.browser.league import LeagueBrowser, MatchAlreadyStarted
 from backend.app.browser.manager import BROWSER_MANAGER, BrowserManager
 from backend.app.browser.market import (
     MarketReadError,
     market_canvas_debug,
+    read_first_half_draw_market,
     read_next_goal_odds,
     read_total_even_market,
 )
@@ -59,6 +66,13 @@ from .strategies.total_even import (
     total_goals,
     total_parity,
 )
+from .strategies.first_half_draw import (
+    MARKET_NAME as FIRST_HALF_DRAW_MARKET_NAME,
+    MARKET_SELECTION as FIRST_HALF_DRAW_SELECTION,
+    PERIOD_KEY as FIRST_HALF_DRAW_PERIOD,
+    STRATEGY_NAME as FIRST_HALF_DRAW_STRATEGY_NAME,
+    settle_first_half_draw,
+)
 
 
 class RecoverableDemoError(RuntimeError):
@@ -81,6 +95,14 @@ class DatabaseClearBlockedError(RuntimeError):
 
 class ModeConflictError(RuntimeError):
     pass
+
+
+def strategy_market_presentation(strategy_type: StrategyType) -> tuple[str, str | None]:
+    if strategy_type == StrategyType.TOTAL_EVEN:
+        return TOTAL_EVEN_MARKET_NAME, TOTAL_EVEN_SELECTION
+    if strategy_type == StrategyType.FIRST_HALF_DRAW:
+        return FIRST_HALF_DRAW_MARKET_NAME, FIRST_HALF_DRAW_SELECTION
+    return strategy_type.display_name, None
 
 
 def local_now() -> str:
@@ -290,15 +312,14 @@ class DemoEngine:
             )
             await REPOSITORY.save_sequence(status="WAITING_FOR_MATCH")
             await STATE.reset_for_start(await REPOSITORY.stats())
+            market_name, market_selection = strategy_market_presentation(
+                self._config.strategy_type
+            )
             await STATE.update(
                 strategy_type=self._config.strategy_type.value,
                 strategy_name=self._config.strategy_type.display_name,
-                market_name=self._config.strategy_type.display_name,
-                market_selection=(
-                    TOTAL_EVEN_SELECTION
-                    if self._config.strategy_type == StrategyType.TOTAL_EVEN
-                    else None
-                ),
+                market_name=market_name,
+                market_selection=market_selection,
                 strategy_config=(await REPOSITORY.get_config()),
                 sequence=(await REPOSITORY.get_sequence()),
             )
@@ -325,6 +346,9 @@ class DemoEngine:
                 )
                 raise BrowserStartError(str(error)) from error
             await REPOSITORY.log("BROWSER_OPENED", "Playwright browser/context/page готовы")
+            market_name, market_selection = strategy_market_presentation(
+                self._config.strategy_type
+            )
             await STATE.update(
                 status=DemoStatus.STARTING.value,
                 mode=requested_mode,
@@ -336,12 +360,8 @@ class DemoEngine:
                 sequence=(await REPOSITORY.get_sequence()),
                 strategy_type=self._config.strategy_type.value,
                 strategy_name=self._config.strategy_type.display_name,
-                market_name=self._config.strategy_type.display_name,
-                market_selection=(
-                    TOTAL_EVEN_SELECTION
-                    if self._config.strategy_type == StrategyType.TOTAL_EVEN
-                    else None
-                ),
+                market_name=market_name,
+                market_selection=market_selection,
             )
             await REPOSITORY.log(f"{requested_mode}_START", f"Запущен background {requested_mode} worker")
             self._task = asyncio.create_task(self._run_guarded(), name=f"{requested_mode.lower()}-worker")
@@ -499,6 +519,9 @@ class DemoEngine:
         return True
 
     async def _process_next_match(self, page: Page) -> None:
+        if self._config.strategy_type == StrategyType.FIRST_HALF_DRAW:
+            await self._process_first_half_draw_match(page)
+            return
         if self._config.strategy_type == StrategyType.TOTAL_EVEN:
             await self._process_total_even_match(page)
             return
@@ -1120,6 +1143,691 @@ class DemoEngine:
                 stats=await REPOSITORY.stats(),
             )
             await REPOSITORY.log("RETURNING_TO_LEAGUE", CONFIG.league_url)
+
+    async def _process_first_half_draw_match(self, page: Page) -> None:
+        """Run one complete «Ничья в 1-м тайме» bet on one match."""
+        prefix = "[FIRST_HALF_DRAW]"
+        await REPOSITORY.log(
+            "FIRST_HALF_DRAW_SEARCHING_MATCH", f"{prefix} Searching next match"
+        )
+        page = await self.browser_manager.ensure_page()
+        league = LeagueBrowser(
+            page,
+            exclude_teams_enabled=self._config.exclude_teams_enabled,
+        )
+        await self._status(
+            DemoStatus.OPENING_LEAGUE,
+            "Открываем страницу Conference League 3x3",
+            "LEAGUE_OPENING",
+        )
+        await league.open()
+        await STATE.update(
+            strategy_type=StrategyType.FIRST_HALF_DRAW.value,
+            strategy_name=FIRST_HALF_DRAW_STRATEGY_NAME,
+            market_name=FIRST_HALF_DRAW_MARKET_NAME,
+            market_selection=FIRST_HALF_DRAW_SELECTION,
+            selected_team=FIRST_HALF_DRAW_SELECTION,
+            selected_side=None,
+            selection_reason=FIRST_HALF_DRAW_MARKET_NAME,
+            market_odds=None,
+            market_available=False,
+            market_locked=False,
+            odds_available=False,
+            odds_value=None,
+            time_waiting_for_market=0.0,
+            last_result=(await STATE.snapshot()).get("last_result"),
+            bet={
+                "step": 0,
+                "max_steps": self._config.max_steps,
+                "amount": None,
+                "market": FIRST_HALF_DRAW_MARKET_NAME,
+                "selection": FIRST_HALF_DRAW_SELECTION,
+                "odds": None,
+                "score_before": None,
+                "period": FIRST_HALF_DRAW_PERIOD,
+                "status": "SEARCHING_MATCH",
+            },
+            budget=self._budget.snapshot(),
+        )
+
+        selected_match: dict[str, Any] | None = None
+        selected_identity = ""
+        while selected_match is None and not self._stop_event.is_set():
+            league = LeagueBrowser(
+                await self.browser_manager.ensure_page(),
+                exclude_teams_enabled=self._config.exclude_teams_enabled,
+            )
+            await self._status(
+                DemoStatus.SCANNING_MATCHES,
+                "Ищем следующий ближайший матч для ничьей в 1-м тайме",
+                "FIRST_HALF_DRAW_SEARCHING_MATCH",
+            )
+            matches = await league.scan()
+            processed = await REPOSITORY.processed_match_ids(
+                StrategyType.FIRST_HALF_DRAW.value,
+                mode=self._mode,
+                period=FIRST_HALF_DRAW_PERIOD,
+            )
+            eligible: list[tuple[dict[str, Any], str]] = []
+            for item in matches:
+                identity = str(
+                    item.get("match_id") or item.get("href") or item.get("url") or ""
+                )
+                if not identity:
+                    await REPOSITORY.log(
+                        "FIRST_HALF_DRAW_MATCH_SKIPPED_NO_ID",
+                        f"{prefix} {item['team1']} - {item['team2']}",
+                    )
+                    continue
+                if identity in processed:
+                    await REPOSITORY.log(
+                        "FIRST_HALF_DRAW_MATCH_ALREADY_PROCESSED",
+                        f"{prefix} match_id={identity}",
+                    )
+                    continue
+                eligible.append((item, identity))
+            await STATE.update(
+                scanner={
+                    **league.last_scan_stats,
+                    "processed": len(processed),
+                    "selected": eligible[0][0] if eligible else None,
+                }
+            )
+            if eligible:
+                selected_match, selected_identity = eligible[0]
+                break
+            await self._status(
+                DemoStatus.NO_UPCOMING_MATCHES,
+                "Подходящих необработанных матчей пока нет",
+                "NO_UPCOMING_MATCHES",
+            )
+            await self._sleep_or_stop(CONFIG.league_retry_interval)
+
+        if selected_match is None or self._stop_event.is_set():
+            return
+
+        match_name = f"{selected_match['team1']} — {selected_match['team2']}"
+        await REPOSITORY.log(
+            "FIRST_HALF_DRAW_MATCH_SELECTED", f"{prefix} Match selected: {match_name}"
+        )
+        await self._status(
+            DemoStatus.MATCH_SELECTED,
+            f"Выбран ближайший матч: {match_name}",
+            "FIRST_HALF_DRAW_MATCH_SELECTED",
+            match={
+                "id": selected_identity,
+                "team1": selected_match["team1"],
+                "team2": selected_match["team2"],
+                "score1": None,
+                "score2": None,
+                "timer": selected_match.get("time") or "",
+                "period": selected_match.get("period") or "",
+                "url": selected_match.get("url"),
+                "state": "UPCOMING",
+            },
+        )
+        await self._status(
+            DemoStatus.OPENING_MATCH,
+            f"Открываем матч: {match_name}",
+            "FIRST_HALF_DRAW_OPENING_MATCH",
+        )
+        try:
+            opened = await league.open_match(selected_match)
+        except MatchAlreadyStarted as error:
+            await REPOSITORY.log("MATCH_ALREADY_STARTED", str(error))
+            return
+        await REPOSITORY.log("MATCH_OPENED", opened["url"])
+
+        if not await self._open_first_half_subgame(selected_match):
+            return
+        snapshot = await self._wait_for_initial_zero_score(selected_match)
+        if snapshot is None:
+            return
+        excluded_team = excluded_team_in_match(
+            snapshot.team1,
+            snapshot.team2,
+            enabled=self._config.exclude_teams_enabled,
+        )
+        if excluded_team is not None:
+            await REPOSITORY.log(
+                "FIRST_HALF_DRAW_MATCH_SKIPPED_EXCLUDED_TEAM",
+                f"{snapshot.team1} — {snapshot.team2} ({excluded_team})",
+            )
+            return
+
+        market_result = await self._wait_for_first_half_draw_market(
+            snapshot, selected_match
+        )
+        if market_result is None:
+            return
+        snapshot, market, wait_seconds = market_result
+        sequence = await REPOSITORY.get_sequence()
+        step = int(sequence["current_step"])
+        if step > self._config.max_steps:
+            await REPOSITORY.save_sequence(status="SEQUENCE_EXHAUSTED")
+            return
+        amount = float(self._config.stakes[step - 1])
+        cycle_id = str(sequence["sequence_id"])
+        idempotency_key = (
+            f"{self._mode}:{cycle_id}:{StrategyType.FIRST_HALF_DRAW.value}:"
+            f"{selected_identity}:{FIRST_HALF_DRAW_PERIOD}:step{step}:attempt1"
+        )
+        active_record = {
+            "id": idempotency_key,
+            "idempotency_key": idempotency_key,
+            "attempt": 1,
+            "mode": self._mode,
+            "strategy_type": StrategyType.FIRST_HALF_DRAW.value,
+            "strategy_name": FIRST_HALF_DRAW_STRATEGY_NAME,
+            "cycle_id": cycle_id,
+            "match_id": selected_identity,
+            "match": match_name,
+            "period": FIRST_HALF_DRAW_PERIOD,
+            "selected_team": FIRST_HALF_DRAW_SELECTION,
+            "selected_side": None,
+            "side_label": FIRST_HALF_DRAW_SELECTION,
+            "step": step,
+            "amount": amount,
+            "odds": market.odds,
+            "score_before": snapshot.score.text(),
+            "score_after": None,
+            "result": "ACTIVE",
+            "status": DemoStatus.BET_ACTIVE.value,
+            "strategy_state": DemoStatus.BET_ACTIVE.value,
+            "settled": False,
+            "market": FIRST_HALF_DRAW_MARKET_NAME,
+            "market_selection": FIRST_HALF_DRAW_SELECTION,
+            "created_at": local_now(),
+            "resolved_at": None,
+            "budget_before": (
+                float(self._budget.current_budget) if self._mode == "DEMO" else None
+            ),
+            "budget_change": None,
+            "budget_after": None,
+            "time_waiting_for_market": round(wait_seconds, 3),
+        }
+        await self._status(
+            DemoStatus.PLACING_BET,
+            f"{prefix} Step {step}; stake {amount:g} RUB; draw @ {market.odds}",
+            "FIRST_HALF_DRAW_PLACING_BET",
+        )
+        await REPOSITORY.log("FIRST_HALF_DRAW_STEP", f"{prefix} Step: {step}")
+        await REPOSITORY.log(
+            "FIRST_HALF_DRAW_STAKE", f"{prefix} Stake: {amount:g} RUB"
+        )
+
+        if self._mode == "LIVE":
+            placed = await self._place_first_half_draw_live(
+                selected_match=selected_match,
+                snapshot=snapshot,
+                market=market,
+                record=active_record,
+            )
+            if placed is None:
+                return
+            active_record, snapshot = placed
+        else:
+            await REPOSITORY.save_sequence(
+                status="ACTIVE",
+                current_match_id=selected_identity,
+                selected_team=FIRST_HALF_DRAW_SELECTION,
+            )
+            await REPOSITORY.save_bet(active_record)
+
+        await STATE.update(
+            status=DemoStatus.BET_ACTIVE.value,
+            event="FIRST_HALF_DRAW_BET_PLACED",
+            message=f"{prefix} Bet placed",
+            market_odds=market.odds,
+            odds_value=market.odds,
+            current_stake=amount,
+            current_step=step,
+            bet={**active_record, "max_steps": self._config.max_steps},
+            sequence=await REPOSITORY.get_sequence(),
+            stats=await REPOSITORY.stats(),
+        )
+        await REPOSITORY.log(
+            "FIRST_HALF_DRAW_BET_PLACED", f"{prefix} Bet placed"
+        )
+
+        finished = await self._wait_for_first_half_finish(
+            MatchBrowser(await self.browser_manager.ensure_page()),
+            selected_match,
+            snapshot,
+        )
+        if finished is None:
+            return
+        final_snapshot, finish_evidence = finished
+        await self._status(
+            DemoStatus.SETTLING,
+            f"{prefix} Settling first-half result",
+            "FIRST_HALF_DRAW_SETTLING",
+        )
+        result = settle_first_half_draw(final_snapshot.score)
+        budget_change: dict[str, Any] = {}
+        if self._mode == "DEMO":
+            applied = self._budget.settle(
+                idempotency_key, result, amount, market.odds
+            )
+            if applied is None:
+                await REPOSITORY.log(
+                    "DEMO_BUDGET_DUPLICATE_IGNORED", f"bet_id={idempotency_key}"
+                )
+                return
+            budget_change = applied
+            await REPOSITORY.save_budget(self._budget.snapshot())
+
+        settled_record = await REPOSITORY.save_bet(
+            {
+                **active_record,
+                "score_after": final_snapshot.score.text(),
+                "first_half_end_evidence": finish_evidence,
+                "result": result,
+                "status": "SETTLED",
+                "strategy_state": DemoStatus.SETTLING.value,
+                "settled": True,
+                "resolved_at": local_now(),
+                **budget_change,
+            }
+        )
+        if self._mode == "LIVE":
+            self._active_live_bet = None
+
+        current_sequence = await REPOSITORY.get_sequence()
+        if self._mode == "DEMO":
+            cumulative_pnl = Decimal(
+                str(current_sequence["cumulative_pnl"])
+            ) + Decimal(str(budget_change["pnl"]))
+            cumulative_losses = Decimal(str(current_sequence["cumulative_losses"]))
+            if result == "LOSE":
+                cumulative_losses += Decimal(str(amount))
+            await REPOSITORY.save_sequence(
+                cumulative_pnl=str(cumulative_pnl.quantize(Decimal("0.01"))),
+                cumulative_losses=str(cumulative_losses.quantize(Decimal("0.01"))),
+            )
+
+        await REPOSITORY.log(
+            "FIRST_HALF_DRAW_FIRST_HALF_FINISHED",
+            f"{prefix} First half finished: {finish_evidence}",
+        )
+        await REPOSITORY.log(
+            "FIRST_HALF_DRAW_FINAL_SCORE",
+            f"{prefix} Final first-half score: {final_snapshot.score.text()}",
+        )
+        await REPOSITORY.log(
+            "FIRST_HALF_DRAW_RESULT", f"{prefix} Result: {result}"
+        )
+        await REPOSITORY.add_cycle(
+            {
+                "cycle_id": cycle_id,
+                "match": match_name,
+                "match_id": selected_identity,
+                "mode": self._mode,
+                "strategy_type": StrategyType.FIRST_HALF_DRAW.value,
+                "result": result,
+                "steps": step,
+            }
+        )
+
+        if result == "WIN":
+            sequence_after = await REPOSITORY.reset_sequence()
+            await REPOSITORY.log(
+                "FIRST_HALF_DRAW_STEP_RESET", f"{prefix} Reset step -> 1"
+            )
+        elif step < self._config.max_steps:
+            sequence_after = await REPOSITORY.save_sequence(
+                current_step=step + 1,
+                status="WAITING_NEXT_MATCH",
+                current_match_id=None,
+                selected_team=None,
+            )
+            await REPOSITORY.log(
+                "FIRST_HALF_DRAW_STEP_ADVANCED",
+                f"{prefix} Step {step} -> Step {step + 1}",
+            )
+            await REPOSITORY.log(
+                "FIRST_HALF_DRAW_NEXT_STAKE",
+                f"{prefix} Next stake: {float(self._config.stakes[step]):g} RUB",
+            )
+        else:
+            sequence_after = await REPOSITORY.save_sequence(
+                current_step=step,
+                status="SEQUENCE_EXHAUSTED",
+                current_match_id=selected_identity,
+            )
+
+        await STATE.update(
+            status=(DemoStatus.WIN if result == "WIN" else DemoStatus.LOSE).value,
+            event=result,
+            message=f"{prefix} Result: {result}",
+            last_result=result,
+            last_change={
+                "before": settled_record["score_before"],
+                "after": settled_record["score_after"],
+                "scorer": "Итог 1-го тайма",
+                "result": result,
+            },
+            bet={**settled_record, "max_steps": self._config.max_steps},
+            budget=self._budget.snapshot(),
+            sequence=sequence_after,
+            stats=await REPOSITORY.stats(),
+        )
+        if sequence_after["status"] != "SEQUENCE_EXHAUSTED":
+            await self._status(
+                DemoStatus.SWITCHING_MATCH,
+                f"{prefix} Searching next match",
+                "FIRST_HALF_DRAW_SWITCHING_MATCH",
+                last_result=result,
+            )
+
+    async def _open_first_half_subgame(
+        self, selected_match: dict[str, Any]
+    ) -> bool:
+        await self._status(
+            DemoStatus.OPENING_FIRST_HALF,
+            "Открываем sub-game «1-й тайм»",
+            "FIRST_HALF_DRAW_OPENING_FIRST_HALF",
+        )
+        attempts = 0
+        while not self._stop_event.is_set():
+            attempts += 1
+            page = await self.browser_manager.ensure_page()
+            try:
+                await open_first_half(page, REPOSITORY.log)
+                return True
+            except FirstHalfNotReady as error:
+                if attempts == 1 or attempts % 10 == 0:
+                    await REPOSITORY.log("FIRST_HALF_NOT_READY", str(error))
+                try:
+                    snapshot = await MatchBrowser(page).snapshot()
+                    finished, evidence = await first_half_end_signal(page, snapshot)
+                    if finished:
+                        await REPOSITORY.log(
+                            "FIRST_HALF_DRAW_MATCH_SKIPPED_FINISHED",
+                            f"Первый тайм уже завершён: {evidence}",
+                        )
+                        return False
+                except ScoreReadError:
+                    pass
+                await self._sleep_or_stop(CONFIG.ocr_retry_delay)
+        return False
+
+    async def _wait_for_first_half_draw_market(
+        self,
+        snapshot: ScoreboardSnapshot,
+        selected_match: dict[str, Any],
+    ):
+        started = time.monotonic()
+        attempt = 0
+        last_status: str | None = None
+        await REPOSITORY.log(
+            "FIRST_HALF_DRAW_MARKET_SEARCH",
+            "[FIRST_HALF_DRAW] Market search: 1X2. 1-й тайм -> Ничья",
+        )
+        while not self._stop_event.is_set():
+            attempt += 1
+            page = await self.browser_manager.ensure_page()
+            browser = MatchBrowser(page)
+            try:
+                fresh = await browser.snapshot()
+                if fresh.team1 != snapshot.team1 or fresh.team2 != snapshot.team2:
+                    raise RecoverableDemoError(
+                        "SCOREBOARD_TEAMS_CHANGED",
+                        "Порядок или названия команд в scoreboard изменились.",
+                    )
+                snapshot = fresh
+                finished, evidence = await first_half_end_signal(page, snapshot)
+                await self._publish_snapshot(
+                    snapshot,
+                    selected_match,
+                    state="FIRST_HALF_FINISHED" if finished else "FIRST_HALF",
+                )
+                if finished:
+                    await REPOSITORY.log(
+                        "FIRST_HALF_DRAW_MARKET_EXPIRED",
+                        f"Первый тайм завершён до ставки: {evidence}",
+                    )
+                    return None
+                await self._status(
+                    DemoStatus.SEARCHING_MARKET,
+                    "Ищем рынок 1X2. 1-й тайм и выбор Ничья",
+                    "FIRST_HALF_DRAW_SEARCHING_MARKET",
+                )
+                async with self._market_lock:
+                    market = await read_first_half_draw_market(page, REPOSITORY.log)
+                waited = time.monotonic() - started
+                await STATE.update(
+                    market_reader={
+                        "source": "DOM / Playwright",
+                        "status": "READY",
+                        "attempt": attempt,
+                        "market": FIRST_HALF_DRAW_MARKET_NAME,
+                        "selection": FIRST_HALF_DRAW_SELECTION,
+                    },
+                    market_available=True,
+                    market_locked=False,
+                    odds_available=True,
+                    odds_value=market.odds,
+                    market_odds=market.odds,
+                    initial_selected_odds=market.odds,
+                    time_waiting_for_market=round(waited, 3),
+                    odds={
+                        "selected": market.odds,
+                        "opponent": None,
+                        "team1": None,
+                        "team2": None,
+                        "market": market.market,
+                        "selection": market.selection,
+                        "source": market.source,
+                        "backend": None,
+                        "confidence": None,
+                        "status": "ODDS_CONFIRMED",
+                    },
+                )
+                await REPOSITORY.log(
+                    "FIRST_HALF_DRAW_MARKET_READY",
+                    f"[FIRST_HALF_DRAW] Draw odds: {market.odds}",
+                )
+                return snapshot, market, waited
+            except MarketReadError as error:
+                waited = time.monotonic() - started
+                locked = error.status == "MARKET_LOCKED"
+                await STATE.update(
+                    status=(
+                        DemoStatus.MARKET_LOCKED
+                        if locked
+                        else DemoStatus.WAITING_FOR_MARKET
+                    ).value,
+                    event=error.status,
+                    market_available=bool(error.details.get("market_available")),
+                    market_locked=locked,
+                    odds_available=False,
+                    odds_value=None,
+                    time_waiting_for_market=round(waited, 3),
+                    market_reader={
+                        "source": "DOM / Playwright",
+                        "status": error.status,
+                        "attempt": attempt,
+                        "market": FIRST_HALF_DRAW_MARKET_NAME,
+                        "selection": FIRST_HALF_DRAW_SELECTION,
+                    },
+                )
+                if error.status != last_status or attempt % 10 == 0:
+                    await REPOSITORY.log(error.status, str(error))
+                last_status = error.status
+                await self._sleep_or_stop(CONFIG.ocr_retry_delay)
+        return None
+
+    async def _place_first_half_draw_live(
+        self,
+        *,
+        selected_match: dict[str, Any],
+        snapshot: ScoreboardSnapshot,
+        market: Any,
+        record: dict[str, Any],
+    ) -> tuple[dict[str, Any], ScoreboardSnapshot] | None:
+        """Use the shared LIVE coupon executor for the first-half draw market."""
+        attempt_id = str(record["id"])
+        record.update(result="PENDING", status=LiveStatus.IDLE.value)
+        decision = LiveDecision(
+            attempt_id=attempt_id,
+            match_id=str(record["match_id"]),
+            team=FIRST_HALF_DRAW_SELECTION,
+            side=Scorer.UNKNOWN,
+            strategy_step=int(record["step"]),
+            amount=float(record["amount"]),
+            goal_number=0,
+            coefficient=float(market.odds),
+            coefficient_locator=market.locator,
+        )
+        await REPOSITORY.save_sequence(
+            status="PLACING_BET",
+            current_match_id=record["match_id"],
+            selected_team=FIRST_HALF_DRAW_SELECTION,
+        )
+        await REPOSITORY.save_bet(record)
+
+        async def publish_live(status: LiveStatus, message: str) -> None:
+            record["status"] = status.value
+            await REPOSITORY.save_bet(record)
+            await STATE.update(
+                mode="LIVE",
+                status=status.value,
+                message=message,
+                event=status.value,
+                bet={**record, "max_steps": self._config.max_steps},
+            )
+
+        try:
+            page = await self.browser_manager.ensure_page()
+            browser = MatchBrowser(page)
+            await self.live_executor.prepare(page, decision, publish_live)
+            observation, latest = await self._wait_for_live_confirmation_or_score(
+                page,
+                browser,
+                selected_match,
+                snapshot,
+                decision,
+                publish_live,
+            )
+            if observation is None:
+                clicked = await self.live_executor.manual_click_seen(attempt_id)
+                record.update(
+                    result="SUBMISSION_UNKNOWN" if clicked else "NOT_PLACED",
+                    status=self.live_executor.state(attempt_id).value,
+                    settled=not clicked,
+                    resolved_at=local_now(),
+                )
+                await REPOSITORY.save_bet(record)
+                if clicked:
+                    self._stop_event.set()
+                return None
+            if not observation.placed:
+                await self._invalidate_live_attempt(
+                    record, decision, observation.signal, publish_live
+                )
+                if observation.signal == BLOCKED_EVENT_SIGNAL:
+                    await self.live_executor.remove_blocked_coupon(page, attempt_id)
+                return None
+
+            placement_snapshot = await self._read_fresh_score(
+                browser, selected_match, latest or snapshot
+            )
+            record.update(
+                result="ACTIVE",
+                status=LiveStatus.ACTIVE.value,
+                score_before=placement_snapshot.score.text(),
+                placement_signal=observation.signal,
+                placement_confirmed_at=local_now(),
+            )
+            await REPOSITORY.save_sequence(status="ACTIVE")
+            await REPOSITORY.save_bet(record)
+            return record, placement_snapshot
+        except LivePreparationError as error:
+            record.update(
+                result="NOT_PLACED",
+                status=error.status,
+                settled=True,
+                resolved_at=local_now(),
+                error=str(error),
+            )
+            await REPOSITORY.save_bet(record)
+            await REPOSITORY.log(error.status, str(error))
+            if self.live_executor.market_was_selected(attempt_id):
+                self._stop_event.set()
+                await STATE.update(
+                    running=False,
+                    status=LiveStatus.ERROR.value,
+                    error=str(error),
+                    message="LIVE остановлен после открытия coupon: повтор запрещён.",
+                )
+            return None
+
+    async def _wait_for_first_half_finish(
+        self,
+        browser: MatchBrowser,
+        selected_match: dict[str, Any],
+        previous: ScoreboardSnapshot,
+    ) -> tuple[ScoreboardSnapshot, str] | None:
+        await self._status(
+            DemoStatus.WAITING_FIRST_HALF_END,
+            "[FIRST_HALF_DRAW] Waiting for first half end",
+            "WAITING_FIRST_HALF_END",
+        )
+        await REPOSITORY.log(
+            "FIRST_HALF_DRAW_WAITING_FIRST_HALF_END",
+            "[FIRST_HALF_DRAW] Waiting for first half end",
+        )
+        await REPOSITORY.log(
+            "FIRST_HALF_DRAW_SCORE",
+            f"[FIRST_HALF_DRAW] Current score: {previous.score.text()}",
+        )
+        last_score = previous.score
+        saw_running_timer = bool(previous.timer)
+        market_missing_reads = 0
+        read_errors = 0
+        while not self._stop_event.is_set():
+            await self._sleep_or_stop(CONFIG.score_poll_interval)
+            try:
+                current = await browser.snapshot()
+            except ScoreReadError as error:
+                read_errors += 1
+                if read_errors == 1 or read_errors % 20 == 0:
+                    await REPOSITORY.log("SCORE_TEMPORARILY_UNAVAILABLE", str(error))
+                continue
+            read_errors = 0
+            if current.team1 != previous.team1 or current.team2 != previous.team2:
+                raise RecoverableDemoError(
+                    "SCOREBOARD_TEAMS_CHANGED",
+                    "Порядок или названия команд в scoreboard изменились.",
+                )
+            page = await self.browser_manager.ensure_page()
+            finished, evidence = await first_half_end_signal(page, current)
+            saw_running_timer = saw_running_timer or bool(current.timer)
+            if await first_half_draw_market_present(page):
+                market_missing_reads = 0
+            else:
+                market_missing_reads += 1
+            market_and_timer_confirmed_end = (
+                market_missing_reads >= 2 and saw_running_timer and not current.timer
+            )
+            if market_and_timer_confirmed_end:
+                finished = True
+                evidence = "LIVE-рынок 1-го тайма исчез; scoreboard timer завершён"
+            await self._publish_snapshot(
+                current,
+                selected_match,
+                state="FIRST_HALF_FINISHED" if finished else "FIRST_HALF",
+            )
+            if current.score != last_score:
+                await REPOSITORY.log(
+                    "FIRST_HALF_DRAW_SCORE",
+                    f"[FIRST_HALF_DRAW] Current score: {current.score.text()}",
+                )
+                last_score = current.score
+            if finished:
+                return current, evidence
+        return None
 
     async def _process_total_even_match(self, page: Page) -> None:
         """Run one isolated «Тотал чёт — Да» DEMO bet for one complete match."""
@@ -2287,6 +2995,8 @@ class DemoEngine:
                 total_goals=total_goals(snapshot.score),
                 total_parity=total_parity(snapshot.score),
             )
+        elif self._config.strategy_type == StrategyType.FIRST_HALF_DRAW:
+            changes.update(score=snapshot.score.text())
         await STATE.update(**changes)
 
     @staticmethod

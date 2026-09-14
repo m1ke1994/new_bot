@@ -551,6 +551,7 @@ const stats = computed(() => ({ ...emptyStats, ...(state.value.stats || {}) }))
 const strategyComparison = computed(() => ([
   ['Следующий гол', state.value.stats?.by_strategy?.NEXT_GOAL || emptyStats],
   ['Тотал чёт', state.value.stats?.by_strategy?.TOTAL_EVEN || emptyStats],
+  ['Ничья — 1-й тайм', state.value.stats?.by_strategy?.FIRST_HALF_DRAW || emptyStats],
 ]))
 
 const lastChange = computed(() => state.value.last_change || {})
@@ -563,15 +564,31 @@ const budget = computed(() => state.value.budget || {})
 
 const sequence = computed(() => state.value.sequence || {})
 
+const strategyPresentation = {
+  NEXT_GOAL: {
+    name: 'Следующий гол',
+    description: 'Ставка на следующий гол выбранной команды.',
+  },
+  TOTAL_EVEN: {
+    name: 'Тотал чёт',
+    description: 'Ставка на «Тотал чёт — Да». Результат зависит от чётности общего количества голов.',
+  },
+  FIRST_HALF_DRAW: {
+    name: 'Ничья — 1-й тайм',
+    description: 'Ставка на «Ничья» в рынке «1X2. 1-й тайм» с расчётом после окончания тайма.',
+  },
+}
+
 const selectedStrategyName = computed(() => (
-  strategyConfig.value.strategy_type === 'TOTAL_EVEN' ? 'Тотал чёт' : 'Следующий гол'
+  strategyPresentation[strategyConfig.value.strategy_type]?.name || 'Следующий гол'
 ))
 
 const selectedStrategyDescription = computed(() => (
-  strategyConfig.value.strategy_type === 'TOTAL_EVEN'
-    ? 'Ставка на «Тотал чёт — Да». Результат зависит от чётности общего количества голов.'
-    : 'Ставка на следующий гол выбранной команды.'
+  strategyPresentation[strategyConfig.value.strategy_type]?.description
+    || strategyPresentation.NEXT_GOAL.description
 ))
+
+const isFirstHalfDraw = computed(() => state.value.strategy_type === 'FIRST_HALF_DRAW')
 
 const strategyBudget = computed(() => strategyConfig.value.stakes.reduce((total, amount) => total + (Number(amount) || 0), 0))
 
@@ -931,6 +948,14 @@ onBeforeUnmount(() => {
 
             </label>
 
+            <label :class="['strategy-option', { selected: strategyConfig.strategy_type === 'FIRST_HALF_DRAW' }]">
+
+              <input type="checkbox" :checked="strategyConfig.strategy_type === 'FIRST_HALF_DRAW'" :disabled="state.running || actionPending" @click.prevent="selectStrategyType('FIRST_HALF_DRAW')">
+
+              <span><strong>Ничья — 1-й тайм</strong><small>DEMO и LIVE · расчёт после окончания тайма</small></span>
+
+            </label>
+
             <RouterLink class="strategy-option forks-strategy-option" to="/forks">
 
               <span class="forks-strategy-icon">TT</span>
@@ -1149,7 +1174,7 @@ onBeforeUnmount(() => {
 
                 <span class="eyebrow amber">СТРАТЕГИЯ</span>
 
-                <h2>Выбранная команда</h2>
+                <h2>{{ isFirstHalfDraw ? 'Выбранная ставка' : 'Выбранная команда' }}</h2>
 
               </div>
 
@@ -1161,13 +1186,13 @@ onBeforeUnmount(() => {
 
               <div class="reason">
 
-                <span>ПРИЧИНА ВЫБОРА</span>
+                  <span>{{ isFirstHalfDraw ? 'РЫНОК' : 'ПРИЧИНА ВЫБОРА' }}</span>
 
                 <strong>{{ state.selection_reason }}</strong>
 
               </div>
 
-              <div class="odds-compare">
+              <div v-if="!isFirstHalfDraw" class="odds-compare">
 
                 <div>
 
@@ -1189,7 +1214,7 @@ onBeforeUnmount(() => {
 
               <div class="selection-details">
 
-                <span>{{ state.selected_side === 'TEAM_1' ? 'Команда 1 / левая' : 'Команда 2 / правая' }}</span>
+                <span>{{ isFirstHalfDraw ? 'Выбор: Ничья' : (state.selected_side === 'TEAM_1' ? 'Команда 1 / левая' : 'Команда 2 / правая') }}</span>
 
                 <span>КФ при выборе: {{ show(state.initial_selected_odds) }}</span>
 
@@ -1199,7 +1224,7 @@ onBeforeUnmount(() => {
 
               </div>
 
-              <div class="selection-proof">Команда зафиксирована по большему начальному КФ</div>
+              <div class="selection-proof">{{ isFirstHalfDraw ? 'Результат определяется только по финальному счёту 1-го тайма' : 'Команда зафиксирована по большему начальному КФ' }}</div>
 
             </div>
 
@@ -1231,7 +1256,7 @@ onBeforeUnmount(() => {
 
               </div>
 
-              <div>
+              <div v-if="!isFirstHalfDraw && state.strategy_type !== 'TOTAL_EVEN'">
 
                 <span>СЛЕДУЮЩИЙ ГОЛ</span>
 
@@ -1245,7 +1270,7 @@ onBeforeUnmount(() => {
 
                 <strong>Playwright DOM · попытка {{ marketReader.attempt || 0 }}</strong>
 
-                <small>Canvas/OCR для рынка «Следующий гол» не используется.</small>
+                <small>Рынки читаются напрямую через Playwright DOM.</small>
 
               </div>
 
@@ -1281,7 +1306,7 @@ onBeforeUnmount(() => {
 
               <div><span>РЫНОК</span><strong>{{ show(bet.market, 'Следующий гол') }}</strong></div>
 
-              <div><span>КОМАНДА</span><strong>{{ show(state.selected_team) }}</strong></div>
+              <div><span>{{ isFirstHalfDraw ? 'ВЫБОР' : 'КОМАНДА' }}</span><strong>{{ show(state.selected_team) }}</strong></div>
 
               <div><span>СТОРОНА</span><strong>{{ show(bet.side_label) }}</strong></div>
 
@@ -1289,9 +1314,11 @@ onBeforeUnmount(() => {
 
               <div><span>СЧЁТ ПЕРЕД СТАВКОЙ</span><strong>{{ show(bet.score_before) }}</strong></div>
 
-              <div><span>НОМЕР СЛЕДУЮЩЕГО ГОЛА</span><strong>{{ show(bet.next_goal_number) }}</strong></div>
+              <div v-if="!isFirstHalfDraw"><span>НОМЕР СЛЕДУЮЩЕГО ГОЛА</span><strong>{{ show(bet.next_goal_number) }}</strong></div>
 
               <div><span>STATUS</span><strong>{{ show(bet.status, state.status) }}</strong></div>
+
+              <div><span>ПОСЛЕДНИЙ РЕЗУЛЬТАТ</span><strong>{{ show(state.last_result, lastChange.result) }}</strong></div>
 
             </div>
 
@@ -1374,6 +1401,14 @@ onBeforeUnmount(() => {
             <span>P&L ТЕКУЩЕЙ СЕРИИ · ШАГ {{ sequence.current_step || 1 }}</span>
 
             <strong :class="Number(sequence.cumulative_pnl || 0) >= 0 ? 'green' : 'red'">{{ Number(sequence.cumulative_pnl || 0) >= 0 ? '+' : '' }}{{ formatNumber(sequence.cumulative_pnl || 0) }} ₽</strong>
+
+          </article>
+
+          <article>
+
+            <span>ПОСЛЕДНИЙ РЕЗУЛЬТАТ</span>
+
+            <strong>{{ show(state.last_result, lastChange.result) }}</strong>
 
           </article>
 
@@ -1487,7 +1522,7 @@ onBeforeUnmount(() => {
 
                     <td>{{ history.length - index }}</td>
 
-                    <td>{{ item.strategy_name || (item.strategy_type === 'TOTAL_EVEN' ? 'Тотал чёт' : 'Следующий гол') }}</td>
+                    <td>{{ item.strategy_name || strategyPresentation[item.strategy_type]?.name || 'Следующий гол' }}</td>
 
                     <td>{{ item.match }}</td>
 

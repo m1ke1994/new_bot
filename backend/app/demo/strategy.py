@@ -13,12 +13,14 @@ MONEY_QUANTUM = Decimal("0.01")
 class StrategyType(StrEnum):
     NEXT_GOAL = "NEXT_GOAL"
     TOTAL_EVEN = "TOTAL_EVEN"
+    FIRST_HALF_DRAW = "FIRST_HALF_DRAW"
 
     @property
     def display_name(self) -> str:
         return {
             self.NEXT_GOAL: "Следующий гол",
             self.TOTAL_EVEN: "Тотал чёт",
+            self.FIRST_HALF_DRAW: "Ничья — 1-й тайм",
         }[self]
 
 
@@ -56,7 +58,9 @@ class StrategyConfig:
                 str(payload.get("strategy_type", StrategyType.NEXT_GOAL.value)).strip().upper()
             )
         except ValueError as error:
-            raise ValueError("strategy_type must be NEXT_GOAL or TOTAL_EVEN") from error
+            raise ValueError(
+                "strategy_type must be NEXT_GOAL, TOTAL_EVEN or FIRST_HALF_DRAW"
+            ) from error
         config = cls(
             initial_stake,
             multiplier,

@@ -181,6 +181,30 @@ class DemoRepository:
                 return item
         return None
 
+    async def processed_match_ids(
+        self,
+        strategy_type: str,
+        *,
+        mode: str,
+        period: str | None = None,
+    ) -> set[str]:
+        """Return durable match identities already attempted by one strategy.
+
+        Keeping this in the repository makes repeated polling and worker loops use
+        the same source of truth as bet history instead of an in-memory global set.
+        """
+        expected_strategy = strategy_type.strip().upper()
+        result: set[str] = set()
+        for item in await self.history(5000, mode=mode):
+            if str(item.get("strategy_type") or "").upper() != expected_strategy:
+                continue
+            if period is not None and str(item.get("period") or "").upper() != period.upper():
+                continue
+            match_id = item.get("match_id")
+            if match_id:
+                result.add(str(match_id))
+        return result
+
     async def verified_active_live_bet(self) -> dict[str, Any] | None:
         for item in reversed(await self.history(5000, mode="LIVE")):
             if item.get("result") == "ACTIVE" and item.get("placement_confirmed_at"):
@@ -332,6 +356,7 @@ class DemoRepository:
         result["by_strategy"] = {
             "NEXT_GOAL": summarize("NEXT_GOAL"),
             "TOTAL_EVEN": summarize("TOTAL_EVEN"),
+            "FIRST_HALF_DRAW": summarize("FIRST_HALF_DRAW"),
         }
         return result
 

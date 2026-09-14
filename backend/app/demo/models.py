@@ -28,6 +28,13 @@ class DemoStatus(StrEnum):
     BET_SIMULATED = "BET_SIMULATED"
     WAITING_FOR_GOAL = "WAITING_FOR_NEXT_GOAL"
     WAITING_FOR_MATCH_END = "WAITING_FOR_MATCH_END"
+    OPENING_FIRST_HALF = "OPENING_FIRST_HALF"
+    SEARCHING_MARKET = "SEARCHING_MARKET"
+    PLACING_BET = "PLACING_BET"
+    BET_ACTIVE = "BET_ACTIVE"
+    WAITING_FIRST_HALF_END = "WAITING_FIRST_HALF_END"
+    SETTLING = "SETTLING"
+    SWITCHING_MATCH = "SWITCHING_MATCH"
     MARKET_LOCKED = "MARKET_LOCKED"
     GOAL_DETECTED = "GOAL_DETECTED"
     WIN = "WIN"
@@ -101,6 +108,15 @@ class TotalEvenMarket:
     odds: float
     market: str = "Тотал чёт"
     selection: str = "Да"
+    source: str = "DOM_PLAYWRIGHT"
+    locator: Any | None = None
+
+
+@dataclass(frozen=True)
+class FirstHalfDrawMarket:
+    odds: float
+    market: str = "1X2. 1-й тайм"
+    selection: str = "Ничья"
     source: str = "DOM_PLAYWRIGHT"
     locator: Any | None = None
 

@@ -9,6 +9,13 @@ from .strategy import DEFAULT_STRATEGY_CONFIG
 from .models import DemoStatus
 
 
+STRATEGY_PRESENTATION = {
+    "NEXT_GOAL": ("Следующий гол", "Следующий гол", None),
+    "TOTAL_EVEN": ("Тотал чёт", "Тотал чёт", "Да"),
+    "FIRST_HALF_DRAW": ("Ничья — 1-й тайм", "1X2. 1-й тайм", "Ничья"),
+}
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -92,6 +99,7 @@ def initial_state() -> dict[str, Any]:
             "cumulative_losses": 0,
         },
         "last_change": None,
+        "last_result": None,
         "stats": {
             "matches_processed": 0,
             "bets": 0,
@@ -152,15 +160,18 @@ class DemoStateStore:
     async def restore(self, *, budget: dict[str, Any], strategy_config: dict[str, Any], sequence: dict[str, Any], stats: dict[str, Any]) -> None:
         async with self._lock:
             strategy_type = strategy_config.get("strategy_type", "NEXT_GOAL")
+            strategy_name, market_name, market_selection = STRATEGY_PRESENTATION.get(
+                strategy_type, STRATEGY_PRESENTATION["NEXT_GOAL"]
+            )
             self._state.update(
                 budget=deepcopy(budget),
                 strategy_config=deepcopy(strategy_config),
                 sequence=deepcopy(sequence),
                 stats=deepcopy(stats),
                 strategy_type=strategy_type,
-                strategy_name=("Тотал чёт" if strategy_type == "TOTAL_EVEN" else "Следующий гол"),
-                market_name=("Тотал чёт" if strategy_type == "TOTAL_EVEN" else "Следующий гол"),
-                market_selection=("Да" if strategy_type == "TOTAL_EVEN" else None),
+                strategy_name=strategy_name,
+                market_name=market_name,
+                market_selection=market_selection,
                 bet={**self._state["bet"], "step": int(sequence["current_step"]), "max_steps": strategy_config["max_steps"], "amount": strategy_config["stakes"][int(sequence["current_step"]) - 1] if int(sequence["current_step"]) <= strategy_config["max_steps"] else None},
                 updated_at=utc_now(),
             )
