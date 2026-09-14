@@ -8,7 +8,11 @@ from typing import Any
 from playwright.async_api import Page
 
 from backend.app.demo.models import ScoreboardSnapshot
-from backend.app.demo.strategies.first_half_draw import is_first_half_finished
+from backend.app.demo.strategies.first_half_draw import (
+    FirstHalfPhase,
+    classify_first_half_phase,
+    is_first_half_finished,
+)
 
 from .market import (
     FIRST_HALF_1X2_TEXT,
@@ -29,6 +33,10 @@ SUBGAME_SELECTED_CLASS = "game-sub-games__item--is-selected"
 FIRST_HALF_OPEN_RETRIES = 3
 FIRST_HALF_VERIFY_POLLS = 20
 FIRST_HALF_VERIFY_DELAY = 0.15
+SCOREBOARD_TIMER_STATUS_SELECTOR = (
+    ".scoreboard-layout-head__footer "
+    ".scoreboard-live__status .scoreboard-timer .ui-caption"
+)
 PERIOD_SIGNAL_SELECTORS = (
     ".scoreboard-live__status",
     '[role="tab"][aria-selected="true"]',
@@ -180,12 +188,36 @@ async def open_first_half(page: Page, logger: Logger | None = None) -> str:
     )
 
 
+async def first_half_timer_flag(page: Page) -> tuple[FirstHalfPhase, str]:
+    """Read the live first-half flag from the exact scoreboard timer caption.
+
+    Example while the period is running: ``1-й тайм, 03:00``.  When that
+    caption changes to an explicit terminal/next-period value such as
+    ``Перерыв`` or ``2-й тайм, 00:01``, the phase becomes FINISHED.
+    """
+    locator = page.locator(SCOREBOARD_TIMER_STATUS_SELECTOR).first
+    try:
+        if await locator.count() == 0 or not await locator.is_visible():
+            return FirstHalfPhase.UNKNOWN, ""
+        text = " ".join((await locator.inner_text()).split())
+    except Exception:
+        return FirstHalfPhase.UNKNOWN, ""
+    if not text:
+        return FirstHalfPhase.UNKNOWN, ""
+    return classify_first_half_phase(text), text
+
+
 async def first_half_end_signal(
     page: Page, snapshot: ScoreboardSnapshot
 ) -> tuple[bool, str]:
-    """Read explicit period/terminal signals from scoreboard and active controls."""
+    """Use the scoreboard timer flag first, then fallback explicit site signals."""
+    timer_phase, timer_status = await first_half_timer_flag(page)
     signals = [snapshot.period, snapshot.timer]
     evidence = [value for value in signals if value]
+    if timer_status:
+        signals.append(timer_status)
+        evidence.append(f"scoreboard-timer={timer_status}")
+
     for selector in PERIOD_SIGNAL_SELECTORS:
         locator = page.locator(selector)
         try:
@@ -203,7 +235,10 @@ async def first_half_end_signal(
             if text and not re.fullmatch(r"\d{1,3}:\d{2}", text):
                 signals.append(text)
                 evidence.append(text)
-    finished = is_first_half_finished(snapshot, *signals)
+
+    finished = timer_phase == FirstHalfPhase.FINISHED or is_first_half_finished(
+        snapshot, *signals
+    )
     return finished, " | ".join(dict.fromkeys(evidence))
 
 
