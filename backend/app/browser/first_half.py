@@ -11,6 +11,7 @@ from backend.app.demo.models import ScoreboardSnapshot
 from backend.app.demo.strategies.first_half_draw import (
     FirstHalfPhase,
     classify_first_half_phase,
+    is_first_half_end_timer,
     is_first_half_finished,
 )
 
@@ -22,6 +23,7 @@ from .market import (
     MARKET_GROUP_TITLE_SELECTOR,
     MARKET_NAME_SELECTOR,
 )
+from .scoreboard import parse_timer_and_period
 
 
 Logger = Callable[[str, str], Awaitable[Any]]
@@ -189,11 +191,11 @@ async def open_first_half(page: Page, logger: Logger | None = None) -> str:
 
 
 async def first_half_timer_flag(page: Page) -> tuple[FirstHalfPhase, str]:
-    """Read the live first-half flag from the exact scoreboard timer caption.
+    """Read the first-half completion flag from the exact scoreboard timer caption.
 
-    Example while the period is running: ``1-й тайм, 03:00``.  When that
-    caption changes to an explicit terminal/next-period value such as
-    ``Перерыв`` or ``2-й тайм, 00:01``, the phase becomes FINISHED.
+    For this FIFA 3x3 feed ``1-й тайм, 03:00`` means the first half has
+    FINISHED. At that exact flag the scoreboard score is the final H1 score and
+    must be settled immediately. Values before 03:00 remain FIRST_HALF.
     """
     locator = page.locator(SCOREBOARD_TIMER_STATUS_SELECTOR).first
     try:
@@ -204,6 +206,10 @@ async def first_half_timer_flag(page: Page) -> tuple[FirstHalfPhase, str]:
         return FirstHalfPhase.UNKNOWN, ""
     if not text:
         return FirstHalfPhase.UNKNOWN, ""
+
+    timer, period = parse_timer_and_period(text)
+    if is_first_half_end_timer(period, timer):
+        return FirstHalfPhase.FINISHED, text
     return classify_first_half_phase(text), text
 
 
