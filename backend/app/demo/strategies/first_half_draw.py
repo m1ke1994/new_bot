@@ -9,6 +9,7 @@ STRATEGY_NAME = "Ничья — 1-й тайм"
 MARKET_NAME = "1X2. 1-й тайм"
 MARKET_SELECTION = "Ничья"
 PERIOD_KEY = "FIRST_HALF"
+FIRST_HALF_END_TIMER = "03:00"
 
 
 class FirstHalfPhase(StrEnum):
@@ -28,7 +29,7 @@ def _normalise(value: str) -> str:
 
 
 def classify_first_half_phase(*signals: str) -> FirstHalfPhase:
-    """Classify explicit site state; elapsed time and score are intentionally ignored."""
+    """Classify explicit site state; score itself is intentionally ignored."""
     status = " | ".join(_normalise(signal) for signal in signals if signal)
     finished_markers = (
         "перерыв",
@@ -64,7 +65,19 @@ def classify_first_half_phase(*signals: str) -> FirstHalfPhase:
     return FirstHalfPhase.UNKNOWN
 
 
+def is_first_half_end_timer(period: str, timer: str) -> bool:
+    """Site-specific terminal flag: first half reaches exactly 03:00."""
+    return (
+        timer.strip() == FIRST_HALF_END_TIMER
+        and classify_first_half_phase(period) == FirstHalfPhase.FIRST_HALF
+    )
+
+
 def is_first_half_finished(snapshot: ScoreboardSnapshot, *signals: str) -> bool:
+    # In this FIFA 3x3 feed ``1-й тайм, 03:00`` is the end-of-half flag,
+    # not a running timer. At that moment the scoreboard score is final for H1.
+    if is_first_half_end_timer(snapshot.period, snapshot.timer):
+        return True
     return (
         classify_first_half_phase(snapshot.period, snapshot.timer, *signals)
         == FirstHalfPhase.FINISHED
