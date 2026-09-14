@@ -39,6 +39,9 @@ SCOREBOARD_TIMER_STATUS_SELECTOR = (
     ".scoreboard-layout-head__footer "
     ".scoreboard-live__status .scoreboard-timer .ui-caption"
 )
+GAME_OVER_PANEL_SELECTOR = ".game-over-panel-default-message"
+GAME_OVER_TITLE_SELECTOR = ".ui-message-block__title"
+GAME_OVER_TEXT = "Игра завершена."
 PERIOD_SIGNAL_SELECTORS = (
     ".scoreboard-live__status",
     '[role="tab"][aria-selected="true"]',
@@ -190,6 +193,27 @@ async def open_first_half(page: Page, logger: Logger | None = None) -> str:
     )
 
 
+async def game_over_flag(page: Page) -> tuple[bool, str]:
+    """Return True when the bookmaker shows its explicit terminal game-over panel."""
+    panel = page.locator(GAME_OVER_PANEL_SELECTOR).first
+    try:
+        if await panel.count() == 0 or not await panel.is_visible():
+            return False, ""
+        title = panel.locator(GAME_OVER_TITLE_SELECTOR).first
+        if await title.count():
+            text = " ".join((await title.inner_text()).split())
+        else:
+            text = " ".join((await panel.inner_text()).split())
+    except Exception:
+        return False, ""
+
+    if not text:
+        return False, ""
+    normalized = _clean(text).rstrip(".")
+    expected = _clean(GAME_OVER_TEXT).rstrip(".")
+    return normalized == expected or normalized.startswith(expected), text
+
+
 async def first_half_timer_flag(page: Page) -> tuple[FirstHalfPhase, str]:
     """Read the first-half completion flag from the exact scoreboard timer caption.
 
@@ -216,7 +240,11 @@ async def first_half_timer_flag(page: Page) -> tuple[FirstHalfPhase, str]:
 async def first_half_end_signal(
     page: Page, snapshot: ScoreboardSnapshot
 ) -> tuple[bool, str]:
-    """Use the scoreboard timer flag first, then fallback explicit site signals."""
+    """Use explicit game-over/timer flags first, then fallback site signals."""
+    game_over, game_over_text = await game_over_flag(page)
+    if game_over:
+        return True, f"game-over={game_over_text}"
+
     timer_phase, timer_status = await first_half_timer_flag(page)
     signals = [snapshot.period, snapshot.timer]
     evidence = [value for value in signals if value]
