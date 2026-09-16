@@ -203,46 +203,80 @@ async def _prepare_market_search(
     search_text: str,
     logger: Logger | None = None,
 ) -> str:
+    # The current match page requires the search icon to be activated before
+    # typing into the market input. Keep the old input-only layout as fallback.
+    button_selectors = _selector_candidates(
+        MARKET_SEARCH_BUTTON_SELECTOR,
+        "button.ui-search-default__button",
+    )
+    search_button, button_selector = await _first_visible(page, button_selectors)
+    if search_button is not None:
+        try:
+            await search_button.scroll_into_view_if_needed()
+            await search_button.click()
+        except Exception as error:
+            raise MarketDomRequired(
+                "Кнопка поиска рынков найдена, но нажать её не удалось.",
+                status="ELEMENT_NOT_READY",
+                details={
+                    "source": "DOM_PLAYWRIGHT",
+                    "selector": button_selector,
+                },
+            ) from error
+        await _log(
+            logger,
+            "MARKET_SEARCH_OPENED",
+            f"Search button clicked: {button_selector}",
+        )
+
+    # Clicking the Vue control may replace its input node, so resolve it only
+    # after the click instead of reusing a locator captured before activation.
     input_selectors = _selector_candidates(
         NEXT_GOAL_SEARCH_SELECTOR,
         'input.ui-search-default__input[placeholder="Поиск по рынкам"]',
         "input.ui-search-default__input",
         "input.game-search__input",
     )
-    search_input, selector_used = await _first_visible(page, input_selectors)
-
-    if search_input is None:
-        button_selectors = _selector_candidates(
-            MARKET_SEARCH_BUTTON_SELECTOR,
-            "button.ui-search-default__button",
-        )
-        search_button, button_selector = await _first_visible(page, button_selectors)
-        if search_button is not None:
-            await search_button.click()
-            await _log(
-                logger,
-                "MARKET_SEARCH_OPENED",
-                f"Search button clicked: {button_selector}",
-            )
-
-        for selector in input_selectors:
-            candidate = page.locator(selector).first
-            try:
-                await candidate.wait_for(state="visible", timeout=2_500)
-                search_input = candidate
-                selector_used = selector
-                break
-            except Exception:
-                continue
+    search_input = None
+    selector_used = None
+    for selector in input_selectors:
+        candidate = page.locator(selector).first
+        try:
+            await candidate.wait_for(state="visible", timeout=2_500)
+            search_input = candidate
+            selector_used = selector
+            break
+        except Exception:
+            continue
 
     if search_input is None or selector_used is None:
         raise MarketDomRequired(
             "Поле поиска рынков пока недоступно.",
             status="ELEMENT_NOT_READY",
-            details={"source": "DOM_PLAYWRIGHT"},
+            details={
+                "source": "DOM_PLAYWRIGHT",
+                "button_selector": button_selector,
+            },
         )
 
+    await search_input.scroll_into_view_if_needed()
+    await search_input.click()
+    await search_input.fill("")
     await search_input.fill(search_text)
+
+    actual_value = (await search_input.input_value()).strip()
+    if _clean_text(actual_value) != _clean_text(search_text):
+        raise MarketDomRequired(
+            "Сайт не принял строку поиска рынка.",
+            status="ELEMENT_NOT_READY",
+            details={
+                "source": "DOM_PLAYWRIGHT",
+                "selector": selector_used,
+                "expected": search_text,
+                "actual": actual_value,
+            },
+        )
+
     await page.wait_for_timeout(120)
     await _log(logger, "MARKET_SEARCH_FILLED", f"{selector_used} = {search_text}")
     return selector_used
