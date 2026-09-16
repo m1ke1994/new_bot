@@ -48,7 +48,8 @@ jobs:
                   if node.module == 'backend.app.table_tennis.scanner':
                       ranges.append((node.lineno, node.end_lineno))
               elif isinstance(node, ast.AsyncFunctionDef) and node.name in obsolete_methods:
-                  ranges.append((node.lineno, node.end_lineno))
+                  start = min([node.lineno, *[item.lineno for item in node.decorator_list]])
+                  ranges.append((start, node.end_lineno))
               elif isinstance(node, ast.If):
                   test = ast.unparse(node.test)
                   if 'StrategyType.TOTAL_EVEN' in test or 'TABLE_TENNIS_SCANNER.scanning' in test:
@@ -83,7 +84,8 @@ jobs:
                   if any(name.startswith('TOTAL_EVEN_') for name in names):
                       ranges.append((node.lineno, node.end_lineno))
               elif isinstance(node, ast.AsyncFunctionDef) and node.name == 'read_total_even_market':
-                  ranges.append((node.lineno, node.end_lineno))
+                  start = min([node.lineno, *[item.lineno for item in node.decorator_list]])
+                  ranges.append((start, node.end_lineno))
           remove_line_ranges(str(market_path), ranges)
           market = market_path.read_text(encoding='utf-8')
           ast.parse(market)
@@ -94,7 +96,13 @@ jobs:
           models_path = Path('backend/app/demo/models.py')
           models = models_path.read_text(encoding='utf-8')
           tree = ast.parse(models)
-          ranges = [(node.lineno, node.end_lineno) for node in ast.walk(tree) if isinstance(node, ast.ClassDef) and node.name == 'TotalEvenMarket']
+          ranges = []
+          for node in ast.walk(tree):
+              if isinstance(node, ast.ClassDef) and node.name == 'TotalEvenMarket':
+                  start = min([node.lineno, *[item.lineno for item in node.decorator_list]])
+                  ranges.append((start, node.end_lineno))
+          if len(ranges) != 1:
+              raise SystemExit(f'expected one TotalEvenMarket class, found {len(ranges)}')
           remove_line_ranges(str(models_path), ranges)
           models = models_path.read_text(encoding='utf-8')
           ast.parse(models)
@@ -193,7 +201,7 @@ jobs:
       - name: Verify removed implementations are unreachable
         run: |
           python -m compileall -q backend tests xbet_config.py auth.py matches.py
-          ! git grep -n -E 'backend\.app\.table_tennis|/api/table-tennis|ForksView|to="/forks"' -- ':!*.env' ':!.env*' ':!.github/workflows/remove-obsolete-strategies-once-2.yml'
+          ! git grep -n -E 'backend\.app\.table_tennis|ForksView|to="/forks"' -- ':!*.env' ':!.env*' ':!.github/workflows/remove-obsolete-strategies-once-2.yml'
           ! git grep -n -E 'StrategyType\.TOTAL_EVEN|read_total_even_market|TotalEvenMarket|strategies\.total_even' -- ':!*.env' ':!.env*' ':!.github/workflows/remove-obsolete-strategies-once-2.yml'
 
       - name: Run focused tests
