@@ -324,6 +324,27 @@ async def _prepare_market_search(
         ),
     )
 
+    # Do not click and refill the same search on every polling attempt. The
+    # click causes Vue to recreate/redraw the canvas and invalidates an OCR
+    # confirmation that may already be in progress.
+    try:
+        current_value = (await search_input.input_value()).strip()
+        canvas = page.locator(CANVAS_SELECTOR).first
+        canvas_ready = await canvas.count() and await canvas.is_visible()
+    except Exception:
+        current_value = ""
+        canvas_ready = False
+    if (
+        _clean_text(current_value) == _clean_text(search_text)
+        and canvas_ready
+    ):
+        await _log(
+            logger,
+            "MARKET_SEARCH_REUSED",
+            f"{selector_used}: search is already active; keeping current canvas",
+        )
+        return selector_used
+
     search_button, button_selector = await _paired_market_search_button(
         page,
         search_input,
@@ -782,7 +803,10 @@ async def _read_next_goal_odds_canvas(
         "DOM coefficients unavailable; starting Canvas Vision",
     )
     try:
-        analysis = await read_market_odds_from_canvas(page)
+        analysis = await read_market_odds_from_canvas(
+            page,
+            expected_goal_number=next_goal_number,
+        )
     except CanvasVisionError as error:
         raise MarketNotAvailable(
             str(error),
@@ -791,17 +815,26 @@ async def _read_next_goal_odds_canvas(
         ) from error
 
     mapping = analysis.get("next_goal_mapping") or {}
+    canvas_details = {
+        "source": "CANVAS_VISION",
+        "analysis_status": analysis.get("status"),
+        "stability": analysis.get("stability"),
+        "readings": analysis.get("readings"),
+        "ocr_backend": analysis.get("ocr_backend"),
+        "ocr_backends": analysis.get("ocr_backends"),
+        "canvas": analysis.get("canvas"),
+    }
     if analysis.get("status") != "CANVAS_ANALYZED" or not mapping:
         raise MarketNotAvailable(
             "Canvas распознан, но коэффициенты нужного рынка не сопоставлены.",
             status=str(analysis.get("status") or "ODDS_MAPPING_UNCERTAIN"),
-            details={"source": "CANVAS_VISION"},
+            details=canvas_details,
         )
     if analysis.get("stability") != "ODDS_CONFIRMED":
         raise MarketNotAvailable(
             "OCR дал нестабильные коэффициенты; ждём следующее чтение.",
             status="ODDS_UNSTABLE",
-            details={"source": "CANVAS_VISION"},
+            details=canvas_details,
         )
 
     recognized_goal = mapping.get("next_goal_number")
@@ -813,7 +846,7 @@ async def _read_next_goal_odds_canvas(
             ),
             status="STALE_MARKET",
             details={
-                "source": "CANVAS_VISION",
+                **canvas_details,
                 "recognized_goal_number": recognized_goal,
                 "expected_goal_number": next_goal_number,
             },
@@ -929,6 +962,7 @@ async def read_next_goal_odds(
                 "dom_error": str(dom_error),
                 "canvas_status": canvas_error.status,
                 "canvas_error": str(canvas_error),
+                "canvas_details": canvas_error.details,
             }
             raise MarketNotAvailable(
                 (
