@@ -697,7 +697,9 @@ def _map_next_goal_market(
         if not left or not middle:
             continue
         first, second = left[-1], middle[-1]
-        center_y = (first["y"] + second["y"]) / 2
+        first_center_y = first["y"] + first["height"] / 2
+        second_center_y = second["y"] + second["height"] / 2
+        center_y = (first_center_y + second_center_y) / 2
         side1_labels = [
             item
             for item in regions
@@ -714,6 +716,21 @@ def _map_next_goal_market(
         ]
         if not side1_labels or not side2_labels:
             continue
+        # OCR can see labels from adjacent goal rows at once. Bind each
+        # odds row to the vertically nearest team label. Do not force the
+        # expected goal here: a genuinely stale market must stay stale.
+        side1_labels.sort(
+            key=lambda item: (
+                abs(item["y"] + item["height"] / 2 - center_y),
+                -float(item.get("confidence", 0.0)),
+            )
+        )
+        side2_labels.sort(
+            key=lambda item: (
+                abs(item["y"] + item["height"] / 2 - center_y),
+                -float(item.get("confidence", 0.0)),
+            )
+        )
         goal1 = _goal_label(side1_labels[0], 1)
         goal2 = _goal_label(side2_labels[0], 2)
         if goal1 is None or goal1 != goal2:
