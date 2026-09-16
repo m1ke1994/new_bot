@@ -298,7 +298,7 @@ class CanvasVision:
 
         texts = list(texts)
         boxes = list(boxes)
-        scores = list(scores or [])
+        scores = list(scores) if scores is not None else []
         item_count = min(len(texts), len(boxes))
         if item_count == 0:
             return []
