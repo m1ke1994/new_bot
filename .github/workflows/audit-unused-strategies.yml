@@ -1,0 +1,20 @@
+name: audit-unused-strategies
+
+on:
+  push:
+    branches:
+      - feature/hybrid-odds-vision
+    paths:
+      - .github/workflows/audit-unused-strategies.yml
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Find obsolete strategy references
+        run: |
+          echo '=== TOTAL EVEN ==='
+          git grep -n -E 'TOTAL_EVEN|Тотал ч[её]т|read_total_even|total_even' || true
+          echo '=== TABLE TENNIS / FORKS ==='
+          git grep -n -E 'table_tennis|TABLE_TENNIS|ForksView|/forks|Вилки|FORKS_' || true
