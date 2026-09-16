@@ -2786,17 +2786,27 @@ class DemoEngine:
                     snapshot = verified
                     continue
 
+                reader_source = (
+                    f"Canvas Vision / {odds.ocr_backend or 'OCR'}"
+                    if odds.source == "CANVAS_VISION"
+                    else "DOM / Playwright"
+                )
+                odds_state = self._odds_state(odds, None, None)
                 await STATE.update(
                     market_reader={
-                        "source": "DOM / Playwright",
+                        "source": reader_source,
                         "status": "READY",
                         "attempt": attempt,
                         "next_goal_number": odds.next_goal_number,
-                    }
+                    },
+                    odds=odds_state,
+                    market_available=True,
+                    market_locked=False,
+                    odds_available=True,
                 )
                 await self._status(
                     DemoStatus.ODDS_READY,
-                    f"DOM-коэффициенты готовы: {odds.team1} / {odds.team2}",
+                    f"Коэффициенты готовы: {odds.team1} / {odds.team2}",
                     "ODDS_READY",
                 )
                 if (
@@ -2828,9 +2838,15 @@ class DemoEngine:
                         f"blocked_score_before={demo_blocked_window.blocked_score_before.text()}; "
                         f"market_status={error.status}",
                     )
+                error_source = str(error.details.get("source") or "DOM_PLAYWRIGHT")
+                reader_source = (
+                    "Canvas Vision / OCR"
+                    if "CANVAS" in error_source
+                    else "DOM / Playwright"
+                )
                 await STATE.update(
                     market_reader={
-                        "source": "DOM / Playwright",
+                        "source": reader_source,
                         "status": error.status,
                         "attempt": attempt,
                         "next_goal_number": next_goal_number,
@@ -3648,7 +3664,11 @@ class DemoEngine:
         await STATE.update(**changes)
 
     @staticmethod
-    def _odds_state(odds, selected: float, opponent: float) -> dict[str, Any]:
+    def _odds_state(
+        odds,
+        selected: float | None,
+        opponent: float | None,
+    ) -> dict[str, Any]:
         return {
             "selected": selected,
             "opponent": opponent,
