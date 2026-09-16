@@ -54,6 +54,10 @@ class DemoRepository:
                     id INTEGER PRIMARY KEY CHECK(id = 1), sequence_id TEXT NOT NULL, current_step INTEGER NOT NULL, status TEXT NOT NULL,
                     cumulative_pnl TEXT NOT NULL, cumulative_losses TEXT NOT NULL, current_match_id TEXT, selected_team TEXT, updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS sequence_blocked_matches (
+                    sequence_id TEXT NOT NULL, match_id TEXT NOT NULL, created_at TEXT NOT NULL,
+                    PRIMARY KEY(sequence_id, match_id)
+                );
                 CREATE TABLE IF NOT EXISTS bet_history (id TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at TEXT NOT NULL, settled_at TEXT);
                 CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL, timestamp TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS cycles (id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL, timestamp TEXT NOT NULL);
@@ -109,7 +113,14 @@ class DemoRepository:
         async with self._lock:
             with self._connection() as db:
                 row = db.execute("SELECT * FROM sequence_state WHERE id=1").fetchone()
-        return dict(row)
+                blocked_rows = db.execute(
+                    "SELECT match_id FROM sequence_blocked_matches WHERE sequence_id=? ORDER BY created_at, match_id",
+                    (row["sequence_id"],),
+                ).fetchall()
+        return {
+            **dict(row),
+            "blocked_match_ids": [item["match_id"] for item in blocked_rows],
+        }
 
     async def save_sequence(self, **changes: Any) -> dict[str, Any]:
         current = await self.get_sequence()
@@ -121,7 +132,34 @@ class DemoRepository:
         return await self.get_sequence()
 
     async def reset_sequence(self) -> dict[str, Any]:
-        return await self.save_sequence(sequence_id=uuid4().hex, current_step=1, status="WAITING_FOR_MATCH", cumulative_pnl="0.00", cumulative_losses="0.00", current_match_id=None, selected_team=None)
+        current = await self.get_sequence()
+        result = await self.save_sequence(sequence_id=uuid4().hex, current_step=1, status="WAITING_FOR_MATCH", cumulative_pnl="0.00", cumulative_losses="0.00", current_match_id=None, selected_team=None)
+        await self.clear_blocked_matches(str(current["sequence_id"]))
+        return result
+
+    async def add_blocked_match(self, sequence_id: str, match_id: str) -> set[str]:
+        """Exclude a definitively rejected match for one betting sequence."""
+        await self.initialize()
+        async with self._lock:
+            with self._connection() as db:
+                db.execute(
+                    "INSERT OR IGNORE INTO sequence_blocked_matches(sequence_id, match_id, created_at) VALUES(?,?,?)",
+                    (sequence_id, match_id, local_now()),
+                )
+                rows = db.execute(
+                    "SELECT match_id FROM sequence_blocked_matches WHERE sequence_id=?",
+                    (sequence_id,),
+                ).fetchall()
+        return {str(item["match_id"]) for item in rows}
+
+    async def clear_blocked_matches(self, sequence_id: str) -> None:
+        await self.initialize()
+        async with self._lock:
+            with self._connection() as db:
+                db.execute(
+                    "DELETE FROM sequence_blocked_matches WHERE sequence_id=?",
+                    (sequence_id,),
+                )
 
     async def save_bet(self, item: dict[str, Any]) -> dict[str, Any]:
         await self.initialize()
@@ -261,6 +299,7 @@ class DemoRepository:
                 db.execute("DELETE FROM strategy_config")
                 db.execute("DELETE FROM budget_state")
                 db.execute("DELETE FROM sequence_state")
+                db.execute("DELETE FROM sequence_blocked_matches")
                 db.execute(
                     "INSERT INTO strategy_config VALUES (1, ?, ?, ?)",
                     (json.dumps(DEFAULT_STRATEGY_CONFIG.to_dict()), now, now),
@@ -320,6 +359,12 @@ class DemoRepository:
             scoped_settled = [
                 item for item in scoped_bets if item.get("result") in {"WIN", "LOSE"}
             ]
+            scoped_real_bets = [
+                item
+                for item in scoped_bets
+                if item.get("result")
+                not in {"BLOCKED", "MISSED_SELECTED_TEAM_GOAL"}
+            ]
             scoped_wins = [item for item in scoped_settled if item["result"] == "WIN"]
             scoped_odds = [
                 float(item["odds"])
@@ -332,12 +377,12 @@ class DemoRepository:
             )
             return {
                 "matches_processed": len(scoped_cycles),
-                "bets": len(scoped_bets),
+                "bets": len(scoped_real_bets),
                 "wins": len(scoped_wins),
                 "losses": sum(item["result"] == "LOSE" for item in scoped_settled),
                 "total_amount": round(sum(float(item.get("amount") or 0) for item in scoped_settled), 2),
                 "average_odds": round(sum(scoped_odds) / len(scoped_odds), 3) if scoped_odds else None,
-                "max_step": max((int(item.get("step") or 0) for item in scoped_bets), default=0),
+                "max_step": max((int(item.get("step") or 0) for item in scoped_real_bets), default=0),
                 "average_steps_to_win": (
                     round(
                         sum(int(item.get("steps") or 0) for item in scoped_cycles if item.get("result") == "WIN")

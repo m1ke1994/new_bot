@@ -38,6 +38,7 @@ class StrategyConfig:
     stakes: tuple[Decimal, ...]
     exclude_teams_enabled: bool
     min_initial_odds_enabled: bool
+    blocked_events_switch_enabled: bool
     strategy_type: StrategyType
 
     @classmethod
@@ -52,6 +53,9 @@ class StrategyConfig:
         )
         min_initial_odds_enabled = _boolean_setting(
             payload, "min_initial_odds_enabled", default=True
+        )
+        blocked_events_switch_enabled = _boolean_setting(
+            payload, "blocked_events_switch_enabled", default=False
         )
         try:
             strategy_type = StrategyType(
@@ -68,6 +72,7 @@ class StrategyConfig:
             stakes,
             exclude_teams_enabled,
             min_initial_odds_enabled,
+            blocked_events_switch_enabled,
             strategy_type,
         )
         config.validate()
@@ -92,6 +97,7 @@ class StrategyConfig:
             "required_budget": float(sum(self.stakes, Decimal("0"))),
             "exclude_teams_enabled": self.exclude_teams_enabled,
             "min_initial_odds_enabled": self.min_initial_odds_enabled,
+            "blocked_events_switch_enabled": self.blocked_events_switch_enabled,
             "strategy_type": self.strategy_type.value,
         }
 

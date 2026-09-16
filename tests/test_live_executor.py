@@ -7,6 +7,7 @@ from backend.app.live.executor import (
     AMOUNT_SELECTOR,
     BLOCKED_COUPON_SELECTOR,
     BLOCKED_EVENT_SIGNAL,
+    BLOCKED_REMOVE_FALLBACK_SELECTOR,
     BLOCKED_REMOVE_SELECTOR,
     BLOCKED_TEXT_SELECTOR,
     CONFIRM_SELECTOR,
@@ -28,10 +29,17 @@ class FakeLocator:
         self.clicks = 0
         self.fills = []
         self.on_click = on_click
+        self.children = {}
 
     @property
     def first(self):
         return self
+
+    def nth(self, _index):
+        return self
+
+    def locator(self, selector):
+        return self.children.get(selector, FakeLocator(count=0, visible=False))
 
     async def count(self):
         return self.present
@@ -99,6 +107,11 @@ class FakePage:
             visible=False,
             on_click=remove_blocked,
         )
+        self.blocked_coupon.children = {
+            BLOCKED_TEXT_SELECTOR: self.blocked_text,
+            BLOCKED_REMOVE_SELECTOR: self.blocked_remove,
+            BLOCKED_REMOVE_FALLBACK_SELECTOR: self.blocked_remove,
+        }
 
     def locator(self, selector):
         return {
@@ -165,6 +178,20 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(second)
         self.assertEqual(page.blocked_remove.clicks, 1)
         self.assertFalse(await executor.blocked_event_exists(page))
+
+    async def test_blocked_signal_requires_exact_text_inside_visible_container(self):
+        executor, page = LiveExecutor(), FakePage()
+        page.blocked_text.present = 1
+        page.blocked_text.visible = True
+
+        self.assertFalse(await executor.blocked_event_exists(page))
+
+        page.show_blocked_event()
+        page.blocked_text.text = "Заблокированное событие временно"
+        self.assertFalse(await executor.blocked_event_exists(page))
+
+        page.blocked_text.text = "  Заблокированное   событие  "
+        self.assertTrue(await executor.blocked_event_exists(page))
 
     async def test_prepares_coupon_and_uses_existing_auto_confirm_mode(self):
         events = []

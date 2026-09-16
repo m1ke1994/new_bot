@@ -222,7 +222,15 @@ class LivePendingTests(unittest.IsolatedAsyncioTestCase):
             async def snapshot(self):
                 return next(snapshots)
 
-        async def read_odds(_page, _team1, _team2, score1, score2, _logger):
+        async def read_odds(
+            _page,
+            _team1,
+            _team2,
+            score1,
+            score2,
+            _logger,
+            **_kwargs,
+        ):
             goal = score1 + score2 + 1
             if goal < 4:
                 raise MarketNotAvailable("locked", status="MARKET_LOCKED")

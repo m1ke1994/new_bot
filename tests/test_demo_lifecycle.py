@@ -83,6 +83,7 @@ class DemoLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "exclude_teams_enabled": False,
                         "min_initial_odds_enabled": False,
+                        "blocked_events_switch_enabled": True,
                     }
                 )
                 state = await STATE.snapshot()
@@ -94,12 +95,16 @@ class DemoLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(saved["exclude_teams_enabled"])
         self.assertFalse(saved["min_initial_odds_enabled"])
+        self.assertTrue(saved["blocked_events_switch_enabled"])
         self.assertFalse(state["strategy_config"]["exclude_teams_enabled"])
         self.assertFalse(state["strategy_config"]["min_initial_odds_enabled"])
+        self.assertTrue(state["strategy_config"]["blocked_events_switch_enabled"])
         self.assertFalse(restored["exclude_teams_enabled"])
         self.assertFalse(restored["min_initial_odds_enabled"])
+        self.assertTrue(restored["blocked_events_switch_enabled"])
         self.assertFalse(restored_engine._config.exclude_teams_enabled)
         self.assertFalse(restored_engine._config.min_initial_odds_enabled)
+        self.assertTrue(restored_engine._config.blocked_events_switch_enabled)
 
     async def test_browser_manager_discards_stale_context_instead_of_reusing_it(self):
         manager = BrowserManager()

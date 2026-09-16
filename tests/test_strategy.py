@@ -34,6 +34,8 @@ class StrategyTests(unittest.TestCase):
         self.assertTrue(config.min_initial_odds_enabled)
         self.assertTrue(config.to_dict()["exclude_teams_enabled"])
         self.assertTrue(config.to_dict()["min_initial_odds_enabled"])
+        self.assertFalse(config.blocked_events_switch_enabled)
+        self.assertFalse(config.to_dict()["blocked_events_switch_enabled"])
 
     def test_disabled_match_filters_allow_previously_rejected_values(self):
         self.assertTrue(is_excluded_match("Chelsea", "Lille", enabled=True))
@@ -70,6 +72,8 @@ class StrategyTests(unittest.TestCase):
     def test_strategy_config_rejects_non_boolean_filter_values(self):
         with self.assertRaises(ValueError):
             StrategyConfig.from_payload({"exclude_teams_enabled": "false"})
+        with self.assertRaises(ValueError):
+            StrategyConfig.from_payload({"blocked_events_switch_enabled": "true"})
 
     def test_initial_odds_threshold_is_inclusive_and_decimal_safe(self):
         self.assertEqual(MIN_INITIAL_SELECTED_ODDS, Decimal("1.93"))

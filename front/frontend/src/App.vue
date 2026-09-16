@@ -112,6 +112,8 @@ const strategyConfig = ref({
 
   min_initial_odds_enabled: true,
 
+  blocked_events_switch_enabled: false,
+
 })
 
 const backendError = ref('')
@@ -1014,6 +1016,16 @@ onBeforeUnmount(() => {
 
             </label>
 
+            <label v-if="strategyConfig.strategy_type === 'NEXT_GOAL'" :class="['match-filter-option', { 'filter-disabled': !strategyConfig.blocked_events_switch_enabled }]">
+
+              <input v-model="strategyConfig.blocked_events_switch_enabled" type="checkbox" :disabled="state.running || actionPending" @change="saveMatchFilters">
+
+              <span class="filter-copy"><strong>Заблокированные события</strong><small>Контролировать пропущенный гол выбранной команды во время блокировки</small></span>
+
+              <span class="filter-state">{{ strategyConfig.blocked_events_switch_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
+
+            </label>
+
           </div>
 
         </div>
@@ -1540,7 +1552,7 @@ onBeforeUnmount(() => {
 
                     <td>{{ show(item.scorer) }}</td>
 
-                    <td><span :class="['table-result', String(item.result).toLowerCase()]">{{ item.result }}</span></td>
+                    <td><span :class="['table-result', String(item.result).toLowerCase()]">{{ item.result === 'MISSED_SELECTED_TEAM_GOAL' ? 'ПРОПУЩЕН ГОЛ' : (item.result === 'BLOCKED' ? 'Блокировка' : item.result) }}</span></td>
 
                     <td>{{ formatNumber(item.budget_before) }} ₽</td>
 

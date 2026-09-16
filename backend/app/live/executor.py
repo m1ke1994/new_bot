@@ -19,9 +19,8 @@ CONFIRM_SELECTOR = ".quick-coupon-main button.quick-coupon-put-bet-button"
 CONFIRM_TEXT = "Сделать ставку"
 BLOCKED_COUPON_SELECTOR = ".quick-coupon-events-card__lock"
 BLOCKED_TEXT_SELECTOR = ".quick-coupon-events-card-lock__text"
-BLOCKED_REMOVE_SELECTOR = (
-    'button.quick-coupon-events-card-lock__remove[aria-label="Удалить"]'
-)
+BLOCKED_REMOVE_SELECTOR = ".quick-coupon-events-card-lock__remove"
+BLOCKED_REMOVE_FALLBACK_SELECTOR = 'button[aria-label="Удалить"]'
 BLOCKED_TEXT = "Заблокированное событие"
 BLOCKED_EVENT_SIGNAL = "BLOCKED_EVENT"
 
@@ -88,21 +87,27 @@ class LiveExecutor:
         except Exception:
             return self.state(attempt_id) == LiveStatus.AWAITING_PLACEMENT_RESULT
 
-    async def blocked_event_exists(self, page: Any) -> bool:
+    async def _confirmed_blocked_container(self, page: Any) -> Any | None:
+        """Return only the visible coupon lock with its exact confirmed text."""
         try:
-            text = page.locator(BLOCKED_TEXT_SELECTOR).first
-            if await text.count() > 0 and await text.is_visible():
+            containers = page.locator(BLOCKED_COUPON_SELECTOR)
+            expected = " ".join(BLOCKED_TEXT.casefold().split())
+            for index in range(await containers.count()):
+                container = containers.nth(index)
+                if not await container.is_visible():
+                    continue
+                text = container.locator(BLOCKED_TEXT_SELECTOR).first
+                if await text.count() == 0 or not await text.is_visible():
+                    continue
                 normalized = " ".join((await text.inner_text()).casefold().split())
-                if BLOCKED_TEXT.casefold() in normalized:
-                    return True
+                if normalized == expected:
+                    return container
+            return None
         except Exception:
-            pass
+            return None
 
-        try:
-            container = page.locator(BLOCKED_COUPON_SELECTOR).first
-            return await container.count() > 0 and await container.is_visible()
-        except Exception:
-            return False
+    async def blocked_event_exists(self, page: Any) -> bool:
+        return await self._confirmed_blocked_container(page) is not None
 
     async def remove_blocked_coupon(self, page: Any, attempt_id: str) -> bool:
         """Remove one rejected coupon exactly once for a placement attempt."""
@@ -110,7 +115,16 @@ class LiveExecutor:
             if attempt_id in self._recovered_blocked_attempts:
                 return False
 
-            remove = page.locator(BLOCKED_REMOVE_SELECTOR).first
+            blocked = await self._confirmed_blocked_container(page)
+            if blocked is None:
+                raise LivePreparationError(
+                    "LIVE_BLOCKED_COUPON_NOT_CONFIRMED",
+                    "Заблокированный coupon с точным текстом не подтверждён.",
+                )
+
+            remove = blocked.locator(BLOCKED_REMOVE_SELECTOR).first
+            if await remove.count() == 0 or not await remove.is_visible():
+                remove = blocked.locator(BLOCKED_REMOVE_FALLBACK_SELECTOR).first
             if await remove.count() == 0 or not await remove.is_visible():
                 raise LivePreparationError(
                     "LIVE_BLOCKED_REMOVE_NOT_FOUND",
@@ -120,7 +134,6 @@ class LiveExecutor:
             await self._log("LIVE_BLOCKED_COUPON_REMOVING", f"attempt={attempt_id}")
             try:
                 await remove.click(timeout=5_000)
-                blocked = page.locator(BLOCKED_COUPON_SELECTOR).first
                 await blocked.wait_for(state="hidden", timeout=5_000)
                 if await self.blocked_event_exists(page):
                     raise LivePreparationError(

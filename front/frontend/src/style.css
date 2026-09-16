@@ -442,6 +442,8 @@ h2 { margin: 4px 0 0; color: #fff; font-size: 19px; line-height: 1.15; letter-sp
 }
 .result-badge.win, .table-result.win { color: var(--green); background: var(--green-soft); }
 .result-badge.lose, .table-result.lose { color: var(--red); background: rgba(255, 104, 118, .1); }
+.result-badge.blocked, .table-result.blocked { color: var(--amber); background: rgba(244, 184, 96, .1); }
+.result-badge.missed_selected_team_goal, .table-result.missed_selected_team_goal { color: var(--amber); background: rgba(244, 184, 96, .1); }
 .result-badge.ambiguous_score_change { color: var(--amber); background: rgba(244, 184, 96, .1); }
 .change-content { padding: 26px 22px; }
 .score-change { gap: 13px; }

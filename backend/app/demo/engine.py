@@ -2,6 +2,7 @@ import asyncio
 import time
 import traceback
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -46,7 +47,7 @@ from backend.app.match_filters import (
 from .budget import DemoBudget
 from .config import CONFIG
 from .history import REPOSITORY
-from .models import CurrentSeries, DemoStatus, Scorer, ScoreboardSnapshot
+from .models import CurrentSeries, DemoStatus, Score, Scorer, ScoreboardSnapshot
 from .state import STATE
 from .strategy import (
     DEFAULT_STRATEGY_CONFIG,
@@ -97,6 +98,41 @@ class ModeConflictError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class BlockedMatchSwitch:
+    """An unplaced NEXT_GOAL attempt that must continue on another match."""
+
+    match_id: str
+    step: int
+    amount: float
+
+
+@dataclass
+class DemoBlockedWindow:
+    """Read-only DEMO placement window after this match already had a ready market."""
+
+    initial_score: Score
+    blocked_score_before: Score
+    selected_side: Scorer
+    selected_team: str
+    step: int
+    stake: float
+    match_id: str
+    market_was_ready: bool = True
+    blocked_window_active: bool = False
+
+
+DEMO_BLOCKED_MARKET_STATUSES = frozenset(
+    {"MARKET_LOCKED", "MARKET_NOT_FOUND", "ODDS_NOT_FOUND"}
+)
+
+
+class MissedSelectedTeamGoal(RuntimeError):
+    def __init__(self, snapshot: ScoreboardSnapshot) -> None:
+        super().__init__("MISSED_SELECTED_TEAM_GOAL")
+        self.snapshot = snapshot
+
+
 def strategy_market_presentation(strategy_type: StrategyType) -> tuple[str, str | None]:
     if strategy_type == StrategyType.TOTAL_EVEN:
         return TOTAL_EVEN_MARKET_NAME, TOTAL_EVEN_SELECTION
@@ -107,6 +143,35 @@ def strategy_market_presentation(strategy_type: StrategyType) -> tuple[str, str 
 
 def local_now() -> str:
     return datetime.now().astimezone().isoformat()
+
+
+def next_goal_match_identity(match: dict[str, Any]) -> str:
+    return str(match.get("match_id") or match.get("href") or match.get("url") or "")
+
+
+def selected_team_scored_between(
+    attempt_score: Score,
+    current_score: Score,
+    selected_side: Scorer,
+) -> bool:
+    if selected_side == Scorer.TEAM_1:
+        return current_score.team1 > attempt_score.team1
+    if selected_side == Scorer.TEAM_2:
+        return current_score.team2 > attempt_score.team2
+    return False
+
+
+def selected_team_scored(
+    attempt_score: Score,
+    current_score: Score,
+    selected_side: Scorer,
+) -> bool:
+    """Backward-compatible name shared by the LIVE blocked flow."""
+    return selected_team_scored_between(
+        attempt_score,
+        current_score,
+        selected_side,
+    )
 
 
 class DemoEngine:
@@ -304,6 +369,7 @@ class DemoEngine:
                 "MATCH_FILTERS_CONFIG",
                 f"exclude_teams_enabled={str(self._config.exclude_teams_enabled).lower()} "
                 f"min_initial_odds_enabled={str(self._config.min_initial_odds_enabled).lower()} "
+                f"blocked_events_switch_enabled={str(self._config.blocked_events_switch_enabled).lower()} "
                 f"min_initial_odds={MIN_INITIAL_SELECTED_ODDS}",
             )
             await REPOSITORY.log(
@@ -536,6 +602,13 @@ class DemoEngine:
         await self._status(DemoStatus.OPENING_LEAGUE, "Открываем страницу лиги", "LEAGUE_OPENING")
         await league.open()
         await REPOSITORY.log("LEAGUE_OPENED", CONFIG.league_name)
+        sequence = await REPOSITORY.get_sequence()
+        blocked_match_ids = (
+            set(sequence.get("blocked_match_ids") or [])
+            if self._config.blocked_events_switch_enabled
+            else set()
+        )
+        logged_blocked_skips: set[str] = set()
         await STATE.update(
             selected_team=None,
             selected_side=None,
@@ -543,14 +616,18 @@ class DemoEngine:
             other_team=None,
             selection_reason=None,
             bet={
-                "step": 0,
+                "step": int(sequence["current_step"]) if blocked_match_ids else 0,
                 "max_steps": self._config.max_steps,
-                "amount": None,
+                "amount": (
+                    float(self._config.stakes[int(sequence["current_step"]) - 1])
+                    if blocked_match_ids
+                    else None
+                ),
                 "market": "Следующий гол",
                 "odds": None,
                 "score_before": None,
                 "next_goal_number": None,
-                "status": "WAITING",
+                "status": "WAITING_NEXT_MATCH" if blocked_match_ids else "WAITING",
             },
             budget=self._budget.snapshot(),
         )
@@ -602,6 +679,20 @@ class DemoEngine:
                     continue
                 allowed_matches.append(item)
             matches = allowed_matches
+            if blocked_match_ids:
+                unblocked_matches = []
+                for item in matches:
+                    match_id = next_goal_match_identity(item)
+                    if match_id in blocked_match_ids:
+                        if match_id not in logged_blocked_skips:
+                            await REPOSITORY.log(
+                                "NEXT_GOAL_BLOCKED_MATCH_SKIPPED",
+                                f"[NEXT_GOAL] Current sequence excludes match_id={match_id}",
+                            )
+                            logged_blocked_skips.add(match_id)
+                        continue
+                    unblocked_matches.append(item)
+                matches = unblocked_matches
             for item in matches:
                 await REPOSITORY.log(
                     "MATCH_CANDIDATE",
@@ -613,11 +704,19 @@ class DemoEngine:
             if matches:
                 selected_match = matches[0]
                 break
-            await self._status(
-                DemoStatus.NO_UPCOMING_MATCHES,
-                "Предстоящих матчей пока нет",
-                "NO_UPCOMING_MATCHES",
-            )
+            if blocked_match_ids:
+                await self._status(
+                    DemoStatus.WAITING_NEXT_MATCH,
+                    "Блокировка — ждём следующий подходящий матч",
+                    "BLOCKED_WAITING_NEXT_MATCH",
+                    sequence=sequence,
+                )
+            else:
+                await self._status(
+                    DemoStatus.NO_UPCOMING_MATCHES,
+                    "Предстоящих матчей пока нет",
+                    "NO_UPCOMING_MATCHES",
+                )
             await self._sleep_or_stop(CONFIG.league_retry_interval)
 
         if selected_match is None or self._stop_event.is_set():
@@ -646,6 +745,17 @@ class DemoEngine:
         await REPOSITORY.log(
             "MATCH_SELECTED", f"{match_name} / {selected_match.get('time', '')}"
         )
+        if blocked_match_ids:
+            step = int(sequence["current_step"])
+            amount = float(self._config.stakes[step - 1])
+            await REPOSITORY.log(
+                "NEXT_GOAL_BLOCKED_CONTINUING",
+                f"[NEXT_GOAL] Continuing step={step} stake={amount:g}",
+            )
+            await REPOSITORY.log(
+                "NEXT_GOAL_BLOCKED_NEXT_MATCH_SELECTED",
+                f"[NEXT_GOAL] Next match selected: {match_name}",
+            )
         await self._status(DemoStatus.OPENING_MATCH, "Открываем выбранный матч", "OPEN_MATCH")
         try:
             opened = await league.open_match(selected_match)
@@ -766,6 +876,20 @@ class DemoEngine:
             amount = float(self._config.stakes[step - 1])
             if self._stop_event.is_set():
                 return
+            demo_blocked_window = (
+                DemoBlockedWindow(
+                    initial_score=snapshot.score,
+                    blocked_score_before=snapshot.score,
+                    selected_side=selection.selected_side,
+                    selected_team=selection.selected_team,
+                    step=step,
+                    stake=amount,
+                    match_id=next_goal_match_identity(selected_match),
+                )
+                if self._mode == "DEMO"
+                and self._config.blocked_events_switch_enabled
+                else None
+            )
             if self._mode == "LIVE":
                 self._pending_live_bet = PendingLiveBet(
                     decision_id=f"{selected_match.get('match_id')}_{selection.selected_side.value}_step{step}",
@@ -779,12 +903,53 @@ class DemoEngine:
             if step == 1:
                 current_odds = initial_odds
             else:
-                odds_result = await self._wait_for_odds(snapshot, selected_match)
+                try:
+                    odds_result = await (
+                        self._wait_for_odds(
+                            snapshot,
+                            selected_match,
+                            demo_blocked_window=demo_blocked_window,
+                        )
+                        if demo_blocked_window is not None
+                        else self._wait_for_odds(snapshot, selected_match)
+                    )
+                except MissedSelectedTeamGoal as missed:
+                    if demo_blocked_window is None:
+                        raise
+                    await self._finish_demo_missed_selected_team_goal(
+                        window=demo_blocked_window,
+                        selected_match=selected_match,
+                        cycle_id=cycle_id,
+                        snapshot=missed.snapshot,
+                    )
+                    self._current_series = None
+                    return
                 if odds_result is None:
                     return
                 snapshot, current_odds = odds_result
             browser = MatchBrowser(await self.browser_manager.ensure_page())
-            snapshot = await self._read_fresh_score(browser, selected_match, snapshot)
+            try:
+                snapshot = await self._read_fresh_score(
+                    browser,
+                    selected_match,
+                    snapshot,
+                )
+                if demo_blocked_window is not None:
+                    await self._observe_demo_blocked_score(
+                        demo_blocked_window,
+                        snapshot,
+                    )
+            except MissedSelectedTeamGoal as missed:
+                if demo_blocked_window is None:
+                    raise
+                await self._finish_demo_missed_selected_team_goal(
+                    window=demo_blocked_window,
+                    selected_match=selected_match,
+                    cycle_id=cycle_id,
+                    snapshot=missed.snapshot,
+                )
+                self._current_series = None
+                return
             if step == 1 and not can_create_initial_bet(snapshot.score):
                 await REPOSITORY.log(
                     "SCORE_CHANGED_BEFORE_BET",
@@ -798,7 +963,73 @@ class DemoEngine:
                     "STALE_MARKET_IGNORED",
                     "Счёт изменился до создания ставки; читаем коэффициент нового гола.",
                 )
-                odds_result = await self._wait_for_odds(snapshot, selected_match)
+                try:
+                    odds_result = await (
+                        self._wait_for_odds(
+                            snapshot,
+                            selected_match,
+                            demo_blocked_window=demo_blocked_window,
+                        )
+                        if demo_blocked_window is not None
+                        else self._wait_for_odds(snapshot, selected_match)
+                    )
+                except MissedSelectedTeamGoal as missed:
+                    if demo_blocked_window is None:
+                        raise
+                    await self._finish_demo_missed_selected_team_goal(
+                        window=demo_blocked_window,
+                        selected_match=selected_match,
+                        cycle_id=cycle_id,
+                        snapshot=missed.snapshot,
+                    )
+                    self._current_series = None
+                    return
+                if odds_result is None:
+                    return
+                snapshot, current_odds = odds_result
+            while demo_blocked_window is not None:
+                try:
+                    pre_active = await self._read_fresh_score(
+                        browser,
+                        selected_match,
+                        snapshot,
+                    )
+                    await self._observe_demo_blocked_score(
+                        demo_blocked_window,
+                        pre_active,
+                    )
+                except MissedSelectedTeamGoal as missed:
+                    await self._finish_demo_missed_selected_team_goal(
+                        window=demo_blocked_window,
+                        selected_match=selected_match,
+                        cycle_id=cycle_id,
+                        snapshot=missed.snapshot,
+                    )
+                    self._current_series = None
+                    return
+                snapshot = pre_active
+                expected_goal = snapshot.score.team1 + snapshot.score.team2 + 1
+                if current_odds.next_goal_number == expected_goal:
+                    break
+                await REPOSITORY.log(
+                    "DEMO_PRE_ACTIVE_SCORE_RECHECK",
+                    f"[NEXT_GOAL][DEMO] score changed before ACTIVE; reading fresh market №{expected_goal}",
+                )
+                try:
+                    odds_result = await self._wait_for_odds(
+                        snapshot,
+                        selected_match,
+                        demo_blocked_window=demo_blocked_window,
+                    )
+                except MissedSelectedTeamGoal as missed:
+                    await self._finish_demo_missed_selected_team_goal(
+                        window=demo_blocked_window,
+                        selected_match=selected_match,
+                        cycle_id=cycle_id,
+                        snapshot=missed.snapshot,
+                    )
+                    self._current_series = None
+                    return
                 if odds_result is None:
                     return
                 snapshot, current_odds = odds_result
@@ -857,6 +1088,9 @@ class DemoEngine:
                     record=active_record,
                 )
                 if placement is None:
+                    return
+                if isinstance(placement, BlockedMatchSwitch):
+                    self._current_series = None
                     return
                 active_record, snapshot, current_odds, selected_odd, opponent_odd = placement
                 score_before = snapshot.score
@@ -2322,10 +2556,122 @@ class DemoEngine:
                 await self._sleep_or_stop(CONFIG.score_poll_interval)
         return None
 
+    async def _observe_demo_blocked_score(
+        self,
+        window: DemoBlockedWindow,
+        current: ScoreboardSnapshot,
+    ) -> None:
+        """Track score deltas while no DEMO bet exists; never infer goal order."""
+        before = window.blocked_score_before
+        after = current.score
+        if after == before:
+            return
+        await REPOSITORY.log(
+            "DEMO_BLOCKED_SCORE_CHANGED",
+            f"[NEXT_GOAL][DEMO][BLOCKED] score changed {before.text()} -> {after.text()}",
+        )
+        if selected_team_scored_between(before, after, window.selected_side):
+            await REPOSITORY.log(
+                "DEMO_MISSED_SELECTED_TEAM_GOAL",
+                "[NEXT_GOAL][DEMO][BLOCKED] SELECTED TEAM SCORED WITHOUT ACTIVE BET",
+            )
+            raise MissedSelectedTeamGoal(current)
+        opponent_increased = (
+            after.team2 > before.team2
+            if window.selected_side == Scorer.TEAM_1
+            else after.team1 > before.team1
+        )
+        window.blocked_score_before = after
+        await REPOSITORY.log(
+            (
+                "DEMO_BLOCKED_OPPONENT_SCORED"
+                if opponent_increased
+                else "DEMO_BLOCKED_BASELINE_CORRECTED"
+            ),
+            f"[NEXT_GOAL][DEMO][BLOCKED] selected team did not score; baseline updated to {after.text()}",
+        )
+
+    async def _finish_demo_missed_selected_team_goal(
+        self,
+        *,
+        window: DemoBlockedWindow,
+        selected_match: dict[str, Any],
+        cycle_id: str,
+        snapshot: ScoreboardSnapshot,
+    ) -> BlockedMatchSwitch:
+        attempt_record = {
+            "id": f"{cycle_id}:demo-blocked:{window.step}:{uuid4().hex[:8]}",
+            "attempt_id": f"{cycle_id}:demo-blocked:{window.step}",
+            "mode": "DEMO",
+            "strategy_type": StrategyType.NEXT_GOAL.value,
+            "strategy_name": StrategyType.NEXT_GOAL.display_name,
+            "cycle_id": cycle_id,
+            "match_id": window.match_id,
+            "match": f"{snapshot.team1} — {snapshot.team2}",
+            "selected_team": window.selected_team,
+            "selected_side": window.selected_side.value,
+            "step": window.step,
+            "amount": window.stake,
+            "odds": None,
+            "score_before": window.blocked_score_before.text(),
+            "attempt_score_before": window.blocked_score_before.text(),
+            "blocked_score_initial": window.initial_score.text(),
+            "market": f"Следующий гол №{snapshot.score.team1 + snapshot.score.team2 + 1}",
+            "next_goal_number": snapshot.score.team1 + snapshot.score.team2 + 1,
+            "result": "PENDING",
+            "status": "DEMO_BLOCKED_WINDOW",
+            "settled": False,
+            "created_at": local_now(),
+            "resolved_at": None,
+            "budget_before": float(self._budget.current_budget),
+            "budget_change": None,
+            "budget_after": float(self._budget.current_budget),
+        }
+        return await self._finish_missed_selected_team_goal(
+            attempt_record=attempt_record,
+            selected_match=selected_match,
+            cycle_id=cycle_id,
+            step=window.step,
+            amount=window.stake,
+            score_after_removal=snapshot,
+            placement_signal="DEMO_MARKET_BLOCKED",
+            explanation=(
+                "DEMO ставка не создана: выбранная команда забила, пока outcome "
+                "следующего гола был недоступен"
+            ),
+        )
+
+    async def _guard_blocked_recovery_score(
+        self,
+        *,
+        attempt_score: Score | None,
+        current: ScoreboardSnapshot,
+        selected_side: Scorer | None,
+    ) -> None:
+        if (
+            attempt_score is None
+            or selected_side is None
+            or not selected_team_scored(attempt_score, current.score, selected_side)
+        ):
+            return
+        await REPOSITORY.log(
+            "NEXT_GOAL_BLOCKED_SCORE_CHANGED",
+            f"[NEXT_GOAL][BLOCKED] score changed {attempt_score.text()} -> {current.score.text()}",
+        )
+        await REPOSITORY.log(
+            "NEXT_GOAL_MISSED_SELECTED_TEAM_GOAL",
+            "[NEXT_GOAL][BLOCKED] SELECTED TEAM SCORED WITHOUT ACTIVE BET; MISSED_SELECTED_TEAM_GOAL",
+        )
+        raise MissedSelectedTeamGoal(current)
+
     async def _wait_for_odds(
         self,
         snapshot: ScoreboardSnapshot,
         selected_match: dict[str, Any],
+        *,
+        blocked_attempt_score: Score | None = None,
+        blocked_selected_side: Scorer | None = None,
+        demo_blocked_window: DemoBlockedWindow | None = None,
     ):
         """Wait for current DOM odds without losing the active match or score."""
         attempt = 0
@@ -2341,6 +2687,16 @@ class DemoEngine:
                         "Порядок или названия команд в scoreboard изменились.",
                     )
                 snapshot = fresh
+                await self._guard_blocked_recovery_score(
+                    attempt_score=blocked_attempt_score,
+                    current=snapshot,
+                    selected_side=blocked_selected_side,
+                )
+                if demo_blocked_window is not None:
+                    await self._observe_demo_blocked_score(
+                        demo_blocked_window,
+                        snapshot,
+                    )
                 if self._mode == "LIVE" and self._pending_live_bet is not None:
                     self._pending_live_bet = self._pending_live_bet.with_score(snapshot.score)
                 await self._publish_snapshot(snapshot, selected_match, state="LIVE")
@@ -2398,6 +2754,7 @@ class DemoEngine:
                         snapshot.score.team1,
                         snapshot.score.team2,
                         REPOSITORY.log,
+                        read_only=self._mode == "DEMO",
                     )
 
                 verified = await browser.snapshot()
@@ -2405,6 +2762,16 @@ class DemoEngine:
                     raise RecoverableDemoError(
                         "SCOREBOARD_TEAMS_CHANGED",
                         "Порядок или названия команд в scoreboard изменились.",
+                    )
+                await self._guard_blocked_recovery_score(
+                    attempt_score=blocked_attempt_score,
+                    current=verified,
+                    selected_side=blocked_selected_side,
+                )
+                if demo_blocked_window is not None:
+                    await self._observe_demo_blocked_score(
+                        demo_blocked_window,
+                        verified,
                     )
                 await self._publish_snapshot(
                     verified,
@@ -2432,8 +2799,35 @@ class DemoEngine:
                     f"DOM-коэффициенты готовы: {odds.team1} / {odds.team2}",
                     "ODDS_READY",
                 )
+                if (
+                    demo_blocked_window is not None
+                    and demo_blocked_window.blocked_window_active
+                ):
+                    demo_blocked_window.blocked_window_active = False
+                    await REPOSITORY.log(
+                        "DEMO_BLOCKED_MARKET_RECOVERED",
+                        f"[NEXT_GOAL][DEMO][BLOCKED] fresh market ready at "
+                        f"{verified.score.text()}; step={demo_blocked_window.step} "
+                        f"stake={demo_blocked_window.stake:g}",
+                    )
                 return snapshot, odds
             except MarketReadError as error:
+                if (
+                    demo_blocked_window is not None
+                    and demo_blocked_window.market_was_ready
+                    and error.status in DEMO_BLOCKED_MARKET_STATUSES
+                    and not demo_blocked_window.blocked_window_active
+                ):
+                    demo_blocked_window.blocked_window_active = True
+                    await REPOSITORY.log(
+                        "DEMO_BLOCKED_WINDOW_STARTED",
+                        f"[NEXT_GOAL][DEMO][BLOCKED] outcome temporarily unavailable; "
+                        f"match_id={demo_blocked_window.match_id}; "
+                        f"selected_team={demo_blocked_window.selected_team}; "
+                        f"step={demo_blocked_window.step} stake={demo_blocked_window.stake:g}; "
+                        f"blocked_score_before={demo_blocked_window.blocked_score_before.text()}; "
+                        f"market_status={error.status}",
+                    )
                 await STATE.update(
                     market_reader={
                         "source": "DOM / Playwright",
@@ -2446,6 +2840,93 @@ class DemoEngine:
                     await REPOSITORY.log(error.status, str(error))
                 await self._sleep_or_stop(CONFIG.ocr_retry_delay)
         return None
+
+    def _blocked_score_monitoring_enabled(
+        self,
+        *,
+        observation: PlacementObservation | None,
+        selected_match: dict[str, Any],
+    ) -> bool:
+        """Enable score-aware recovery only for a definitive unaccepted coupon."""
+        return bool(
+            self._config.strategy_type == StrategyType.NEXT_GOAL
+            and self._config.blocked_events_switch_enabled
+            and observation is not None
+            and not observation.placed
+            and observation.signal == BLOCKED_EVENT_SIGNAL
+            and next_goal_match_identity(selected_match)
+        )
+
+    async def _finish_missed_selected_team_goal(
+        self,
+        *,
+        attempt_record: dict[str, Any],
+        selected_match: dict[str, Any],
+        cycle_id: str,
+        step: int,
+        amount: float,
+        score_after_removal: ScoreboardSnapshot,
+        placement_signal: str = BLOCKED_EVENT_SIGNAL,
+        explanation: str = "Ставка не принята: выбранная команда забила во время блокировки",
+    ) -> BlockedMatchSwitch:
+        """Record a selected-team goal missed before activation and switch matches."""
+        match_id = next_goal_match_identity(selected_match)
+        blocked_record = await REPOSITORY.save_bet(
+            {
+                **attempt_record,
+                "cycle_id": cycle_id,
+                "match_id": match_id,
+                "result": "MISSED_SELECTED_TEAM_GOAL",
+                "status": "MISSED_SELECTED_TEAM_GOAL",
+                "settled": True,
+                "score_after": score_after_removal.score.text(),
+                "resolved_at": local_now(),
+                "placement_signal": placement_signal,
+                "placement_result": "BLOCKED",
+                "budget_change": 0,
+                "pnl": 0,
+                "explanation": explanation,
+            }
+        )
+        await REPOSITORY.add_blocked_match(cycle_id, match_id)
+        await REPOSITORY.log(
+            "NEXT_GOAL_BLOCKED_MATCH_BLACKLISTED",
+            f"[NEXT_GOAL][BLOCKED] match added to blocked_match_ids: {match_id}",
+        )
+        sequence = await REPOSITORY.save_sequence(
+            current_step=step,
+            status="WAITING_NEXT_MATCH",
+            current_match_id=None,
+            selected_team=None,
+        )
+        self._pending_live_bet = None
+        self._active_live_bet = None
+        await REPOSITORY.log(
+            "NEXT_GOAL_BLOCKED_EVENT_DETECTED",
+            "[NEXT_GOAL][BLOCKED] MISSED_SELECTED_TEAM_GOAL",
+        )
+        await REPOSITORY.log(
+            "NEXT_GOAL_BLOCKED_STEP_PRESERVED",
+            f"[NEXT_GOAL][BLOCKED] preserving step={step} stake={amount:g}",
+        )
+        await REPOSITORY.log(
+            "NEXT_GOAL_BLOCKED_MATCH_SKIPPED",
+            f"[NEXT_GOAL][BLOCKED] switching match; match_id={match_id}",
+        )
+        await REPOSITORY.log(
+            "NEXT_GOAL_BLOCKED_RETURNING_TO_LEAGUE",
+            "[NEXT_GOAL] Returning to league; searching next match",
+        )
+        await STATE.update(
+            status=DemoStatus.WAITING_NEXT_MATCH.value,
+            event="MISSED_SELECTED_TEAM_GOAL",
+            message=f"Пропущен гол выбранной команды — продолжаем шаг {step} в другом матче",
+            bet={**blocked_record, "max_steps": self._config.max_steps},
+            sequence=sequence,
+            budget=self._budget.snapshot(),
+            stats=await REPOSITORY.stats(),
+        )
+        return BlockedMatchSwitch(match_id=match_id, step=step, amount=amount)
 
     async def _prepare_live_until_placed(
         self,
@@ -2463,12 +2944,37 @@ class DemoEngine:
     ):
         """Prepare one strategy decision until the user places it or stops LIVE."""
         retrying_blocked_attempt = False
+        blocked_recovery_score: Score | None = None
+        blocked_recovery_record: dict[str, Any] | None = None
         while not self._stop_event.is_set():
             assert self._pending_live_bet is not None
             self._pending_live_bet = self._pending_live_bet.with_score(snapshot.score)
             target_goal = self._pending_live_bet.target_goal_number
             if current_odds.next_goal_number != target_goal:
-                odds_result = await self._wait_for_odds(snapshot, selected_match)
+                try:
+                    odds_result = await self._wait_for_odds(
+                        snapshot,
+                        selected_match,
+                        blocked_attempt_score=blocked_recovery_score,
+                        blocked_selected_side=(
+                            selection.selected_side if blocked_recovery_score else None
+                        ),
+                    )
+                except MissedSelectedTeamGoal as missed:
+                    if blocked_recovery_record is None:
+                        raise
+                    await REPOSITORY.log(
+                        "NEXT_GOAL_BLOCKED_SAME_MATCH_RETRY_DISABLED",
+                        "[NEXT_GOAL][BLOCKED] SAME-MATCH RETRY DISABLED",
+                    )
+                    return await self._finish_missed_selected_team_goal(
+                        attempt_record=blocked_recovery_record,
+                        selected_match=selected_match,
+                        cycle_id=cycle_id,
+                        step=step,
+                        amount=amount,
+                        score_after_removal=missed.snapshot,
+                    )
                 if odds_result is None:
                     return None
                 snapshot, current_odds = odds_result
@@ -2480,6 +2986,29 @@ class DemoEngine:
                     selected_match,
                     snapshot,
                 )
+                try:
+                    await self._guard_blocked_recovery_score(
+                        attempt_score=blocked_recovery_score,
+                        current=verified,
+                        selected_side=(
+                            selection.selected_side if blocked_recovery_score else None
+                        ),
+                    )
+                except MissedSelectedTeamGoal as missed:
+                    if blocked_recovery_record is None:
+                        raise
+                    await REPOSITORY.log(
+                        "NEXT_GOAL_BLOCKED_SAME_MATCH_RETRY_DISABLED",
+                        "[NEXT_GOAL][BLOCKED] SAME-MATCH RETRY DISABLED",
+                    )
+                    return await self._finish_missed_selected_team_goal(
+                        attempt_record=blocked_recovery_record,
+                        selected_match=selected_match,
+                        cycle_id=cycle_id,
+                        step=step,
+                        amount=amount,
+                        score_after_removal=missed.snapshot,
+                    )
                 if verified.score != snapshot.score:
                     await REPOSITORY.log(
                         "LIVE_SCORE_CHANGED_BEFORE_RETRY",
@@ -2490,12 +3019,35 @@ class DemoEngine:
                     self._pending_live_bet = self._pending_live_bet.with_score(
                         snapshot.score
                     )
-                    odds_result = await self._wait_for_odds(snapshot, selected_match)
+                    try:
+                        odds_result = await self._wait_for_odds(
+                            snapshot,
+                            selected_match,
+                            blocked_attempt_score=blocked_recovery_score,
+                            blocked_selected_side=selection.selected_side,
+                        )
+                    except MissedSelectedTeamGoal as missed:
+                        if blocked_recovery_record is None:
+                            raise
+                        await REPOSITORY.log(
+                            "NEXT_GOAL_BLOCKED_SAME_MATCH_RETRY_DISABLED",
+                            "[NEXT_GOAL][BLOCKED] SAME-MATCH RETRY DISABLED",
+                        )
+                        return await self._finish_missed_selected_team_goal(
+                            attempt_record=blocked_recovery_record,
+                            selected_match=selected_match,
+                            cycle_id=cycle_id,
+                            step=step,
+                            amount=amount,
+                            score_after_removal=missed.snapshot,
+                        )
                     if odds_result is None:
                         return None
                     snapshot, current_odds = odds_result
                     continue
                 retrying_blocked_attempt = False
+                blocked_recovery_score = None
+                blocked_recovery_record = None
                 await REPOSITORY.log(
                     "LIVE_BLOCKED_RETRY_MARKET_READY",
                     f"step={step} stake={amount} next_goal={target_goal}",
@@ -2526,6 +3078,7 @@ class DemoEngine:
                 "amount": amount,
                 "odds": selected_odd,
                 "score_before": placement_snapshot.score.text(),
+                "attempt_score_before": placement_snapshot.score.text(),
                 "market": current_odds.market,
                 "next_goal_number": target_goal,
                 "result": "PENDING",
@@ -2603,6 +3156,39 @@ class DemoEngine:
                     return None
                 if not observation.placed:
                     if observation.signal == BLOCKED_EVENT_SIGNAL:
+                        monitor_blocked_score = self._blocked_score_monitoring_enabled(
+                            observation=observation,
+                            selected_match=selected_match,
+                        )
+                        if (
+                            monitor_blocked_score
+                            and self.live_executor.state(attempt_id) == LiveStatus.ACTIVE
+                        ):
+                            attempt_record.update(
+                                result="SUBMISSION_UNKNOWN",
+                                status="UNSAFE_ACCEPTED_BLOCKED_RACE",
+                                settled=False,
+                                resolved_at=local_now(),
+                            )
+                            await REPOSITORY.save_bet(attempt_record)
+                            await REPOSITORY.log(
+                                "NEXT_GOAL_BLOCKED_ACCEPTANCE_UNSAFE",
+                                "[NEXT_GOAL][BLOCKED] acceptance state is unsafe; match switch disabled",
+                            )
+                            self._stop_event.set()
+                            return None
+                        if monitor_blocked_score:
+                            blocked_recovery_score = placement_snapshot.score
+                            blocked_recovery_record = attempt_record
+                            await REPOSITORY.log(
+                                "NEXT_GOAL_BLOCKED_CONFIRMED",
+                                "[NEXT_GOAL][BLOCKED] detected",
+                            )
+                            await REPOSITORY.log(
+                                "NEXT_GOAL_BLOCKED_CONTEXT",
+                                f"[NEXT_GOAL][BLOCKED] match={match_name}; selected_team={selection.selected_team}; "
+                                f"step={step} stake={amount:g}; score_before={placement_snapshot.score.text()}",
+                            )
                         score_before_removal = await self._read_fresh_score(
                             browser,
                             selected_match,
@@ -2631,13 +3217,47 @@ class DemoEngine:
                             page,
                             attempt_id,
                         )
-                        await REPOSITORY.discard_unaccepted_bet(attempt_id)
-
                         score_after_removal = await self._read_fresh_score(
                             browser,
                             selected_match,
                             score_before_removal,
                         )
+                        if monitor_blocked_score:
+                            await REPOSITORY.log(
+                                "NEXT_GOAL_BLOCKED_COUPON_REMOVED",
+                                "[NEXT_GOAL][BLOCKED] coupon removed",
+                            )
+                            try:
+                                await self._guard_blocked_recovery_score(
+                                    attempt_score=placement_snapshot.score,
+                                    current=score_after_removal,
+                                    selected_side=selection.selected_side,
+                                )
+                            except MissedSelectedTeamGoal as missed:
+                                await REPOSITORY.log(
+                                    "NEXT_GOAL_BLOCKED_SAME_MATCH_RETRY_DISABLED",
+                                    "[NEXT_GOAL][BLOCKED] SAME-MATCH RETRY DISABLED",
+                                )
+                                return await self._finish_missed_selected_team_goal(
+                                    attempt_record=attempt_record,
+                                    selected_match=selected_match,
+                                    cycle_id=cycle_id,
+                                    step=step,
+                                    amount=amount,
+                                    score_after_removal=missed.snapshot,
+                                )
+                            if score_after_removal.score != placement_snapshot.score:
+                                await REPOSITORY.log(
+                                    "NEXT_GOAL_BLOCKED_OPPONENT_SCORED",
+                                    "[NEXT_GOAL][BLOCKED] opponent scored; selected team did not score",
+                                )
+                            await REPOSITORY.log(
+                                "NEXT_GOAL_BLOCKED_BASELINE_UPDATED",
+                                f"[NEXT_GOAL][BLOCKED] baseline updated to {score_after_removal.score.text()}; "
+                                f"continuing same match step={step} stake={amount:g}",
+                            )
+                        else:
+                            await REPOSITORY.discard_unaccepted_bet(attempt_id)
                         if score_after_removal.score != score_before_removal.score:
                             await REPOSITORY.log(
                                 "LIVE_SCORE_CHANGED_DURING_BLOCKED_RECOVERY",
@@ -2660,13 +3280,44 @@ class DemoEngine:
                             step,
                             snapshot,
                         )
-                        odds_result = await self._wait_for_odds(
-                            snapshot,
-                            selected_match,
-                        )
+                        try:
+                            odds_result = await self._wait_for_odds(
+                                snapshot,
+                                selected_match,
+                                blocked_attempt_score=(
+                                    blocked_recovery_score
+                                    if monitor_blocked_score
+                                    else None
+                                ),
+                                blocked_selected_side=(
+                                    selection.selected_side
+                                    if monitor_blocked_score
+                                    else None
+                                ),
+                            )
+                        except MissedSelectedTeamGoal as missed:
+                            await REPOSITORY.log(
+                                "NEXT_GOAL_BLOCKED_SAME_MATCH_RETRY_DISABLED",
+                                "[NEXT_GOAL][BLOCKED] SAME-MATCH RETRY DISABLED",
+                            )
+                            return await self._finish_missed_selected_team_goal(
+                                attempt_record=attempt_record,
+                                selected_match=selected_match,
+                                cycle_id=cycle_id,
+                                step=step,
+                                amount=amount,
+                                score_after_removal=missed.snapshot,
+                            )
                         if odds_result is None:
                             return None
                         snapshot, current_odds = odds_result
+                        if monitor_blocked_score:
+                            await REPOSITORY.discard_unaccepted_bet(attempt_id)
+                            await REPOSITORY.log(
+                                "NEXT_GOAL_BLOCKED_CONTINUING_SAME_MATCH",
+                                f"[NEXT_GOAL][BLOCKED] continuing same match; fresh market loaded; "
+                                f"step={step} stake={amount:g}",
+                            )
                         retrying_blocked_attempt = True
                         await REPOSITORY.log(
                             "LIVE_BLOCKED_RETRYING",
@@ -2722,14 +3373,11 @@ class DemoEngine:
                 snapshot, current_odds = odds_result
                 continue
 
-            # Only goals observed after the bookmaker has explicitly confirmed
-            # placement may settle a LIVE bet.  A score change while the manual
-            # click was being processed must never be attributed to the bet.
-            placement_snapshot = await self._read_fresh_score(
-                browser,
-                selected_match,
-                latest or placement_snapshot,
-            )
+            # ACCEPTED is the ordering boundary.  Keep the last score observed
+            # before confirmation as the bet baseline: a goal that appears just
+            # after acceptance must be settled normally instead of being hidden
+            # by a post-confirmation baseline refresh.
+            placement_snapshot = latest or placement_snapshot
             attempt_record.update(
                 result="ACTIVE",
                 status=LiveStatus.ACTIVE.value,

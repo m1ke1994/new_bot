@@ -31,5 +31,11 @@ class FrontendControlTests(unittest.TestCase):
         self.assertNotIn("<h2>Лиги</h2>", source)
         self.assertNotIn(">LEAGUES<", source)
 
+    def test_next_goal_blocked_events_checkbox_and_history_label_exist(self):
+        self.assertIn("blocked_events_switch_enabled", self.source)
+        self.assertIn("Заблокированные события", self.source)
+        self.assertIn("Контролировать пропущенный гол выбранной команды", self.source)
+        self.assertIn("item.result === 'MISSED_SELECTED_TEAM_GOAL'", self.source)
+
 if __name__ == "__main__":
     unittest.main()

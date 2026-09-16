@@ -335,18 +335,21 @@ async def read_next_goal_odds(
     score1: int,
     score2: int,
     logger: Logger | None = None,
+    *,
+    read_only: bool = False,
 ) -> NextGoalOdds:
     next_goal_number = score1 + score2 + 1
-    search_input = page.locator(NEXT_GOAL_SEARCH_SELECTOR).first
-    try:
-        await search_input.wait_for(state="visible", timeout=5_000)
-        await search_input.fill("следующий гол")
-    except Exception as error:
-        raise MarketDomRequired(
-            "Поле поиска рынков пока недоступно.",
-            status="ELEMENT_NOT_READY",
-            details={"source": "DOM_PLAYWRIGHT"},
-        ) from error
+    if not read_only:
+        search_input = page.locator(NEXT_GOAL_SEARCH_SELECTOR).first
+        try:
+            await search_input.wait_for(state="visible", timeout=5_000)
+            await search_input.fill("следующий гол")
+        except Exception as error:
+            raise MarketDomRequired(
+                "Поле поиска рынков пока недоступно.",
+                status="ELEMENT_NOT_READY",
+                details={"source": "DOM_PLAYWRIGHT"},
+            ) from error
 
     groups = page.locator(MARKET_GROUP_SELECTOR)
     try:
