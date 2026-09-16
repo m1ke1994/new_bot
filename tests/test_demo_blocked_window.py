@@ -18,6 +18,7 @@ from backend.app.demo.engine import (
 from backend.app.demo.history import DemoRepository
 from backend.app.demo.models import NextGoalOdds, Score, ScoreboardSnapshot, Scorer
 from backend.app.demo.strategy import StrategyConfig
+from backend.app.demo.state import DemoStateStore
 
 
 def snapshot(score1: int, score2: int) -> ScoreboardSnapshot:
@@ -114,8 +115,10 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
         reader = AsyncMock(side_effect=odds_side_effect)
         with tempfile.TemporaryDirectory() as directory:
             repository = DemoRepository(Path(directory))
+            state_store = DemoStateStore()
             with (
                 patch("backend.app.demo.engine.REPOSITORY", repository),
+                patch("backend.app.demo.engine.STATE", state_store),
                 patch("backend.app.demo.engine.MatchBrowser", QueueMatchBrowser),
                 patch("backend.app.demo.engine.read_next_goal_odds", reader),
             ):
@@ -130,11 +133,12 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
                     demo_blocked_window=window,
                 )
                 logs = await repository.logs()
-        return engine, window, reader, result, logs
+                state = await state_store.snapshot()
+        return engine, window, reader, result, logs, state
 
     async def test_opponent_only_jump_updates_baseline_then_creates_fresh_market(self):
         fresh_odds = NextGoalOdds(1.9, 2.1, next_goal_number=5)
-        engine, window, reader, result, logs = await self.run_market_wait(
+        engine, window, reader, result, logs, _ = await self.run_market_wait(
             [snapshot(2, 0), snapshot(4, 0), snapshot(4, 0)],
             [MarketNotAvailable("locked", status="MARKET_LOCKED"), fresh_odds],
         )
@@ -151,7 +155,7 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unchanged_score_unlocks_same_step_and_stake(self):
         fresh_odds = NextGoalOdds(1.9, 2.1, next_goal_number=3)
-        _, window, _, result, _ = await self.run_market_wait(
+        _, window, _, result, _, _ = await self.run_market_wait(
             [snapshot(2, 0), snapshot(2, 0), snapshot(2, 0)],
             [MarketNotAvailable("locked", status="ODDS_NOT_FOUND"), fresh_odds],
         )
@@ -160,6 +164,28 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(window.step, 3)
         self.assertEqual(window.stake, 102)
         self.assertEqual(window.blocked_score_before, Score(2, 0))
+
+    async def test_canvas_odds_are_published_to_frontend_state(self):
+        canvas_odds = NextGoalOdds(
+            2.0,
+            1.74,
+            market="Следующий гол №1",
+            next_goal_number=1,
+            source="CANVAS_VISION",
+            ocr_backend="RapidOCR",
+            confidence=0.99,
+        )
+        _, _, _, result, _, state = await self.run_market_wait(
+            [snapshot(0, 0), snapshot(0, 0)],
+            [canvas_odds],
+        )
+
+        self.assertIs(result[1], canvas_odds)
+        self.assertEqual(state["odds"]["team1"], 2.0)
+        self.assertEqual(state["odds"]["team2"], 1.74)
+        self.assertEqual(state["odds"]["source"], "CANVAS_VISION")
+        self.assertEqual(state["market_reader"]["source"], "Canvas Vision / RapidOCR")
+        self.assertEqual(state["market_reader"]["status"], "READY")
 
     async def test_initial_market_loading_is_not_a_demo_blocked_window(self):
         QueueMatchBrowser.snapshots = [snapshot(0, 0), snapshot(0, 0), snapshot(0, 0)]
