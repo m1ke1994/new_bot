@@ -59,7 +59,6 @@ jobs:
                       del lines[start - 1]
               p.write_text(''.join(lines), encoding='utf-8')
 
-          # --- DemoEngine: remove total-even execution and table-tennis runtime coupling.
           engine_path = Path('backend/app/demo/engine.py')
           engine = engine_path.read_text(encoding='utf-8')
           engine = replace_once(
@@ -117,6 +116,17 @@ jobs:
               '',
               'engine total-even dispatch',
           )
+          engine = replace_once(
+              engine,
+              '        if self._config.strategy_type == StrategyType.TOTAL_EVEN:\n'
+              '            changes.update(\n'
+              '                score=snapshot.score.text(),\n'
+              '                total_goals=total_goals(snapshot.score),\n'
+              '                total_parity=total_parity(snapshot.score),\n'
+              '            )\n',
+              '',
+              'engine total-even snapshot projection',
+          )
           engine_path.write_text(engine, encoding='utf-8')
           remove_ast_nodes(
               'backend/app/demo/engine.py',
@@ -127,7 +137,6 @@ jobs:
           if 'TOTAL_EVEN' in engine or 'table_tennis' in engine:
               raise SystemExit('engine cleanup incomplete')
 
-          # --- Market reader/model: remove the unused total-even market implementation.
           market_path = Path('backend/app/browser/market.py')
           market = market_path.read_text(encoding='utf-8')
           market = replace_once(
@@ -149,7 +158,6 @@ jobs:
 
           remove_ast_nodes('backend/app/demo/models.py', {'TotalEvenMarket'}, (ast.ClassDef,))
 
-          # --- Frontend: remove total-even selector and tennis forks page/link.
           app_path = Path('front/frontend/src/App.vue')
           app = app_path.read_text(encoding='utf-8')
           app = replace_once(
@@ -205,7 +213,6 @@ jobs:
               raise SystemExit('frontend obsolete strategy cleanup incomplete')
           app_path.write_text(app, encoding='utf-8')
 
-          # --- Keep useful API/strategy tests, but align them with the reduced product.
           api_test = Path('tests/test_api_routes.py')
           api_source = api_test.read_text(encoding='utf-8')
           api_source = re.sub(
