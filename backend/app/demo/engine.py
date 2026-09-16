@@ -2844,15 +2844,38 @@ class DemoEngine:
                     if "CANVAS" in error_source
                     else "DOM / Playwright"
                 )
-                await STATE.update(
-                    market_reader={
+                state_changes: dict[str, Any] = {
+                    "market_reader": {
                         "source": reader_source,
                         "status": error.status,
                         "attempt": attempt,
                         "next_goal_number": next_goal_number,
                     },
-                    event=error.status,
-                    error=str(error),
+                    "event": error.status,
+                    "error": str(error),
+                }
+                canvas_details = error.details.get("canvas_details") or error.details
+                recognized_team1 = canvas_details.get("recognized_team1")
+                recognized_team2 = canvas_details.get("recognized_team2")
+                if recognized_team1 is not None and recognized_team2 is not None:
+                    state_changes["odds"] = {
+                        "selected": None,
+                        "opponent": None,
+                        "team1": recognized_team1,
+                        "team2": recognized_team2,
+                        "market": (
+                            f"Следующий гол №"
+                            f"{canvas_details.get('recognized_goal_number')}"
+                        ),
+                        "source": "CANVAS_VISION",
+                        "backend": canvas_details.get("ocr_backend"),
+                        "confidence": None,
+                        "status": error.status,
+                    }
+                    state_changes["market_available"] = False
+                    state_changes["odds_available"] = False
+                await STATE.update(
+                    **state_changes,
                 )
                 if (
                     attempt == 1
