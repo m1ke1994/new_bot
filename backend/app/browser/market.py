@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -7,30 +8,43 @@ from typing import Any
 from playwright.async_api import Page, Response
 
 from backend.app.demo.models import FirstHalfDrawMarket, NextGoalOdds, TotalEvenMarket
+from xbet_config import SELECTORS, TEXTS
 
 from .canvas_vision import (
     CANVAS_SELECTOR,
     CanvasVisionError,
     analyze_market_canvas,
+    read_market_odds_from_canvas,
 )
 
 
 Logger = Callable[[str, str], Awaitable[Any]]
-GOALS_TEXT = "Голы"
-GOALS_FILTER_SELECTOR = ".game-toolbar-filter-switch"
-NEXT_GOAL_SEARCH_SELECTOR = "input.game-search__input"
-MARKET_GROUP_SELECTOR = ".game-markets-group"
-MARKET_GROUP_TITLE_SELECTOR = ".game-markets-group-header-title"
-MARKET_BUTTON_SELECTOR = "button.game-markets-group__market"
-MARKET_NAME_SELECTOR = ".ui-market__name"
-MARKET_VALUE_SELECTOR = ".ui-market__value"
-NEXT_GOAL_TEXT = "Следующий гол"
-TOTAL_EVEN_TEXT = "Тотал чёт"
-TOTAL_EVEN_SEARCH_TEXT = "тотал чет"
-TOTAL_EVEN_SELECTION_TEXT = "Да"
-FIRST_HALF_1X2_TEXT = "1X2. 1-й тайм"
-FIRST_HALF_DRAW_SELECTION_TEXT = "Ничья"
-MARKET_KEYWORDS = (
+
+GOALS_TEXT = TEXTS.goals or "Голы"
+GOALS_FILTER_SELECTOR = SELECTORS.goals_filter or ".game-toolbar-filter-switch"
+NEXT_GOAL_SEARCH_SELECTOR = SELECTORS.market_search or "input.game-search__input"
+MARKET_SEARCH_BUTTON_SELECTOR = (
+    os.getenv("SELECTOR_MARKET_SEARCH_BUTTON", "").strip()
+    or "button.ui-search-default__button"
+)
+MARKET_GROUP_SELECTOR = SELECTORS.market_group or ".game-markets-group"
+MARKET_GROUP_TITLE_SELECTOR = (
+    SELECTORS.market_group_title or ".game-markets-group-header-title"
+)
+MARKET_BUTTON_SELECTOR = SELECTORS.market_button or "button.game-markets-group__market"
+MARKET_NAME_SELECTOR = SELECTORS.market_name or ".ui-market__name"
+MARKET_VALUE_SELECTOR = SELECTORS.market_value or ".ui-market__value"
+MARKET_LOCKED_CLASS = SELECTORS.market_locked_class or "ui-market--locked"
+
+NEXT_GOAL_TEXT = TEXTS.next_goal or "Следующий гол"
+NEXT_GOAL_SEARCH_TEXT = TEXTS.next_goal_search or "следующий гол"
+TOTAL_EVEN_TEXT = TEXTS.total_even or "Тотал чёт"
+TOTAL_EVEN_SEARCH_TEXT = TEXTS.total_even_search or "тотал чет"
+TOTAL_EVEN_SELECTION_TEXT = TEXTS.affirmative_selection or "Да"
+FIRST_HALF_1X2_TEXT = TEXTS.first_half_market or "1X2. 1-й тайм"
+FIRST_HALF_DRAW_SELECTION_TEXT = TEXTS.draw_selection or "Ничья"
+
+MARKET_KEYWORDS = tuple(TEXTS.market_response_keywords) or (
     "market",
     "odds",
     "coefficient",
@@ -47,6 +61,15 @@ SENSITIVE_KEYS = (
     "authorization",
     "cookie",
     "secret",
+)
+
+CANVAS_FALLBACK_STATUSES = frozenset(
+    {
+        "ELEMENT_NOT_READY",
+        "MARKET_NOT_FOUND",
+        "ODDS_NOT_FOUND",
+        "MARKET_READ_ERROR",
+    }
 )
 
 
@@ -69,6 +92,43 @@ class MarketNotAvailable(MarketReadError):
 
 class MarketDomRequired(MarketReadError):
     pass
+
+
+class CanvasCoefficientLocator:
+    """Playwright-compatible click adapter for one OCR-detected canvas outcome."""
+
+    def __init__(
+        self,
+        page: Page,
+        region: dict[str, Any],
+        canvas_shape: dict[str, Any],
+    ) -> None:
+        self.page = page
+        self.region = dict(region)
+        self.canvas_width = max(1.0, float(canvas_shape.get("width") or 1.0))
+        self.canvas_height = max(1.0, float(canvas_shape.get("height") or 1.0))
+
+    def _position(self, box: dict[str, float]) -> dict[str, float]:
+        center_x = float(self.region["x"]) + float(self.region["width"]) / 2.0
+        center_y = float(self.region["y"]) + float(self.region["height"]) / 2.0
+        x = center_x * float(box["width"]) / self.canvas_width
+        y = center_y * float(box["height"]) / self.canvas_height
+        x = min(max(x, 1.0), max(1.0, float(box["width"]) - 1.0))
+        y = min(max(y, 1.0), max(1.0, float(box["height"]) - 1.0))
+        return {"x": x, "y": y}
+
+    async def click(self, **kwargs: Any) -> None:
+        canvas = self.page.locator(CANVAS_SELECTOR).first
+        await canvas.wait_for(state="visible", timeout=int(kwargs.pop("timeout", 10_000)))
+        box = await canvas.bounding_box()
+        if box is None:
+            raise MarketNotAvailable(
+                "Canvas исчез перед кликом по коэффициенту.",
+                status="CANVAS_NOT_READY",
+                details={"source": "CANVAS_VISION"},
+            )
+        await canvas.scroll_into_view_if_needed()
+        await canvas.click(position=self._position(box), **kwargs)
 
 
 async def _log(logger: Logger | None, event: str, message: str) -> None:
@@ -116,6 +176,109 @@ def _redact(value: Any, depth: int = 0) -> Any:
     if isinstance(value, list):
         return [_redact(item, depth + 1) for item in value[:250]]
     return value
+
+
+def _selector_candidates(*values: str) -> tuple[str, ...]:
+    result: list[str] = []
+    for value in values:
+        value = (value or "").strip()
+        if value and value not in result:
+            result.append(value)
+    return tuple(result)
+
+
+async def _first_visible(page: Page, selectors: tuple[str, ...]) -> tuple[Any | None, str | None]:
+    for selector in selectors:
+        locator = page.locator(selector).first
+        try:
+            if await locator.count() and await locator.is_visible():
+                return locator, selector
+        except Exception:
+            continue
+    return None, None
+
+
+async def _prepare_market_search(
+    page: Page,
+    search_text: str,
+    logger: Logger | None = None,
+) -> str:
+    input_selectors = _selector_candidates(
+        NEXT_GOAL_SEARCH_SELECTOR,
+        'input.ui-search-default__input[placeholder="Поиск по рынкам"]',
+        "input.ui-search-default__input",
+        "input.game-search__input",
+    )
+    search_input, selector_used = await _first_visible(page, input_selectors)
+
+    if search_input is None:
+        button_selectors = _selector_candidates(
+            MARKET_SEARCH_BUTTON_SELECTOR,
+            "button.ui-search-default__button",
+        )
+        search_button, button_selector = await _first_visible(page, button_selectors)
+        if search_button is not None:
+            await search_button.click()
+            await _log(
+                logger,
+                "MARKET_SEARCH_OPENED",
+                f"Search button clicked: {button_selector}",
+            )
+
+        for selector in input_selectors:
+            candidate = page.locator(selector).first
+            try:
+                await candidate.wait_for(state="visible", timeout=2_500)
+                search_input = candidate
+                selector_used = selector
+                break
+            except Exception:
+                continue
+
+    if search_input is None or selector_used is None:
+        raise MarketDomRequired(
+            "Поле поиска рынков пока недоступно.",
+            status="ELEMENT_NOT_READY",
+            details={"source": "DOM_PLAYWRIGHT"},
+        )
+
+    await search_input.fill(search_text)
+    await page.wait_for_timeout(120)
+    await _log(logger, "MARKET_SEARCH_FILLED", f"{selector_used} = {search_text}")
+    return selector_used
+
+
+async def _market_label(button: Any) -> str:
+    candidates: list[Any] = []
+    try:
+        candidates.append(button.locator(MARKET_NAME_SELECTOR).first)
+    except Exception:
+        pass
+    candidates.append(button)
+
+    for locator in candidates:
+        try:
+            if await locator.count() == 0:
+                continue
+        except Exception:
+            continue
+
+        for attribute in ("aria-label", "title", "data-original-title"):
+            try:
+                value = await locator.get_attribute(attribute)
+            except Exception:
+                value = None
+            if value and value.strip():
+                return value.strip()
+
+        try:
+            value = (await locator.inner_text()).strip()
+        except Exception:
+            value = ""
+        if value:
+            return value
+
+    return ""
 
 
 class ResponseMarketProbe:
@@ -205,7 +368,10 @@ async def open_additional_markets(
     if await page.locator(GOALS_FILTER_SELECTOR).filter(has_text=GOALS_TEXT).count():
         return None
     await _log(logger, "OPENING_ADDITIONAL_MARKETS", "Opening additional markets")
-    for selector in ("button.dashboard-game__more", "button.dashboard-game-more"):
+    for selector in SELECTORS.additional_markets or (
+        "button.dashboard-game__more",
+        "button.dashboard-game-more",
+    ):
         button = page.locator(selector).first
         if await button.count() == 0:
             continue
@@ -257,15 +423,16 @@ async def open_goals_filter(page: Page, logger: Logger | None = None) -> dict[st
         try:
             await goals_text.wait_for(state="visible", timeout=10_000)
             goals_filter = goals_text.locator(
-                "xpath=ancestor::div[contains(@class,'game-toolbar-filter-switch')][1]"
+                SELECTORS.goals_filter_ancestor_xpath
+                or "xpath=ancestor::div[contains(@class,'game-toolbar-filter-switch')][1]"
             )
-            selector_used = 'get_by_text("Голы", exact=True)'
+            selector_used = f'get_by_text("{GOALS_TEXT}", exact=True)'
         except Exception:
             goals_filter = page.locator(GOALS_FILTER_SELECTOR).filter(
                 has_text=GOALS_TEXT
             ).first
             await goals_filter.wait_for(state="visible", timeout=10_000)
-            selector_used = f'{GOALS_FILTER_SELECTOR}:has-text("Голы")'
+            selector_used = f'{GOALS_FILTER_SELECTOR}:has-text("{GOALS_TEXT}")'
 
         await goals_filter.scroll_into_view_if_needed()
         await goals_filter.click()
@@ -302,7 +469,27 @@ async def market_canvas_debug(
     page: Page,
     logger: Logger | None = None,
 ) -> dict[str, Any]:
-    preparation = await open_goals_filter(page, logger)
+    try:
+        search_selector = await _prepare_market_search(
+            page, NEXT_GOAL_SEARCH_TEXT, logger
+        )
+        canvas = page.locator(CANVAS_SELECTOR).first
+        await canvas.wait_for(state="visible", timeout=5_000)
+        box = await canvas.bounding_box()
+        preparation = {
+            "selector": search_selector,
+            "additional_selector": None,
+            "canvas": (
+                {"width": round(box["width"]), "height": round(box["height"])}
+                if box
+                else None
+            ),
+            "network_candidates": [],
+            "js_state_candidates": [],
+        }
+    except Exception:
+        preparation = await open_goals_filter(page, logger)
+
     await _log(logger, "CANVAS_CAPTURE", "Capturing canvas")
     await _log(logger, "OCR_RUNNING", "Running OCR")
     try:
@@ -328,32 +515,16 @@ async def market_canvas_debug(
     return analysis
 
 
-async def read_next_goal_odds(
+async def _read_next_goal_odds_dom(
     page: Page,
     team1: str,
     team2: str,
-    score1: int,
-    score2: int,
-    logger: Logger | None = None,
-    *,
-    read_only: bool = False,
+    next_goal_number: int,
+    logger: Logger | None,
 ) -> NextGoalOdds:
-    next_goal_number = score1 + score2 + 1
-    if not read_only:
-        search_input = page.locator(NEXT_GOAL_SEARCH_SELECTOR).first
-        try:
-            await search_input.wait_for(state="visible", timeout=5_000)
-            await search_input.fill("следующий гол")
-        except Exception as error:
-            raise MarketDomRequired(
-                "Поле поиска рынков пока недоступно.",
-                status="ELEMENT_NOT_READY",
-                details={"source": "DOM_PLAYWRIGHT"},
-            ) from error
-
     groups = page.locator(MARKET_GROUP_SELECTOR)
     try:
-        await groups.first.wait_for(state="attached", timeout=5_000)
+        await groups.first.wait_for(state="attached", timeout=2_500)
     except Exception as error:
         raise MarketNotAvailable(
             "Группа рынка «Следующий гол» пока не появилась.",
@@ -367,9 +538,17 @@ async def read_next_goal_odds(
         title = group.locator(MARKET_GROUP_TITLE_SELECTOR).first
         if await title.count() == 0:
             continue
-        if _clean_text(await title.inner_text()) == _clean_text(NEXT_GOAL_TEXT):
+        try:
+            title_text = await title.inner_text()
+        except Exception:
+            continue
+        normalized_title = _clean_text(title_text)
+        if normalized_title == _clean_text(NEXT_GOAL_TEXT) or _clean_text(
+            NEXT_GOAL_TEXT
+        ) in normalized_title:
             target_group = group
             break
+
     if target_group is None:
         raise MarketNotAvailable(
             "Точная группа рынка «Следующий гол» не найдена.",
@@ -381,12 +560,10 @@ async def read_next_goal_odds(
     target_buttons: dict[int, Any] = {}
     locked_sides: set[int] = set()
     buttons = target_group.locator(MARKET_BUTTON_SELECTOR)
+
     for index in range(await buttons.count()):
         button = buttons.nth(index)
-        name_locator = button.locator(MARKET_NAME_SELECTOR).first
-        if await name_locator.count() == 0:
-            continue
-        parsed = parse_next_goal_market_name(await name_locator.inner_text())
+        parsed = parse_next_goal_market_name(await _market_label(button))
         if parsed is None:
             continue
         side, goal_number = parsed
@@ -394,9 +571,10 @@ async def read_next_goal_odds(
             continue
 
         classes = (await button.get_attribute("class") or "").lower()
-        if await button.is_disabled() or "ui-market--locked" in classes:
+        if await button.is_disabled() or MARKET_LOCKED_CLASS.lower() in classes:
             locked_sides.add(side)
             continue
+
         value_locator = button.locator(MARKET_VALUE_SELECTOR).first
         if await value_locator.count() == 0:
             continue
@@ -440,19 +618,195 @@ async def read_next_goal_odds(
     )
 
 
+async def _read_next_goal_odds_canvas(
+    page: Page,
+    team1: str,
+    team2: str,
+    next_goal_number: int,
+    logger: Logger | None,
+) -> NextGoalOdds:
+    canvas = page.locator(CANVAS_SELECTOR).first
+    try:
+        await canvas.wait_for(state="visible", timeout=3_500)
+    except Exception as error:
+        raise MarketNotAvailable(
+            "DOM коэффициентов отсутствует и canvas рынка не найден.",
+            status="ODDS_NOT_FOUND",
+            details={"source": "CANVAS_VISION"},
+        ) from error
+
+    await _log(
+        logger,
+        "ODDS_CANVAS_FALLBACK",
+        "DOM coefficients unavailable; starting Canvas Vision",
+    )
+    try:
+        analysis = await read_market_odds_from_canvas(page)
+    except CanvasVisionError as error:
+        raise MarketNotAvailable(
+            str(error),
+            status=error.status,
+            details={"source": "CANVAS_VISION"},
+        ) from error
+
+    mapping = analysis.get("next_goal_mapping") or {}
+    if analysis.get("status") != "CANVAS_ANALYZED" or not mapping:
+        raise MarketNotAvailable(
+            "Canvas распознан, но коэффициенты нужного рынка не сопоставлены.",
+            status=str(analysis.get("status") or "ODDS_MAPPING_UNCERTAIN"),
+            details={"source": "CANVAS_VISION"},
+        )
+    if analysis.get("stability") != "ODDS_CONFIRMED":
+        raise MarketNotAvailable(
+            "OCR дал нестабильные коэффициенты; ждём следующее чтение.",
+            status="ODDS_UNSTABLE",
+            details={"source": "CANVAS_VISION"},
+        )
+
+    recognized_goal = mapping.get("next_goal_number")
+    if recognized_goal is not None and int(recognized_goal) != int(next_goal_number):
+        raise MarketNotAvailable(
+            (
+                f"Canvas показывает гол №{recognized_goal}, "
+                f"а по счёту нужен гол №{next_goal_number}."
+            ),
+            status="STALE_MARKET",
+            details={
+                "source": "CANVAS_VISION",
+                "recognized_goal_number": recognized_goal,
+                "expected_goal_number": next_goal_number,
+            },
+        )
+
+    team1_region = mapping.get("team1") or {}
+    team2_region = mapping.get("team2") or {}
+    try:
+        team1_odd = float(team1_region["value"])
+        team2_odd = float(team2_region["value"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise MarketNotAvailable(
+            "OCR не вернул два валидных коэффициента.",
+            status="ODDS_MAPPING_UNCERTAIN",
+            details={"source": "CANVAS_VISION"},
+        ) from error
+
+    canvas_shape = analysis.get("canvas") or {}
+    team1_locator = CanvasCoefficientLocator(page, team1_region, canvas_shape)
+    team2_locator = CanvasCoefficientLocator(page, team2_region, canvas_shape)
+    confidence = float(mapping.get("confidence") or 0.0)
+    market = f"Следующий гол №{next_goal_number}"
+
+    await _log(logger, "NEXT_GOAL_MARKET_FOUND", market)
+    await _log(logger, "TEAM1_ODDS", f"Команда 1 / {team1} = {team1_odd}")
+    await _log(logger, "TEAM2_ODDS", f"Команда 2 / {team2} = {team2_odd}")
+    await _log(
+        logger,
+        "ODDS_SOURCE",
+        f"CANVAS_VISION / {analysis.get('ocr_backend') or 'OCR'} / confidence={confidence:.3f}",
+    )
+    await _log(logger, "ODDS_READY", f"{team1_odd} / {team2_odd}")
+
+    return NextGoalOdds(
+        team1=team1_odd,
+        team2=team2_odd,
+        market=market,
+        next_goal_number=next_goal_number,
+        source="CANVAS_VISION",
+        ocr_backend=analysis.get("ocr_backend"),
+        confidence=confidence,
+        team1_locator=team1_locator,
+        team2_locator=team2_locator,
+    )
+
+
+async def read_next_goal_odds(
+    page: Page,
+    team1: str,
+    team2: str,
+    score1: int,
+    score2: int,
+    logger: Logger | None = None,
+    *,
+    read_only: bool = False,
+) -> NextGoalOdds:
+    """Read next-goal odds with DOM-first and Canvas-Vision fallback."""
+    next_goal_number = score1 + score2 + 1
+    search_error: MarketReadError | None = None
+
+    if not read_only:
+        try:
+            await _prepare_market_search(page, NEXT_GOAL_SEARCH_TEXT, logger)
+        except MarketReadError as error:
+            search_error = error
+            await _log(
+                logger,
+                "MARKET_SEARCH_DOM_UNAVAILABLE",
+                f"{error.status}: {error}",
+            )
+
+    try:
+        return await _read_next_goal_odds_dom(
+            page,
+            team1,
+            team2,
+            next_goal_number,
+            logger,
+        )
+    except MarketReadError as dom_error:
+        if dom_error.status == "MARKET_LOCKED":
+            raise
+
+        fallback_status = (
+            search_error.status if search_error is not None else dom_error.status
+        )
+        if (
+            dom_error.status not in CANVAS_FALLBACK_STATUSES
+            and fallback_status not in CANVAS_FALLBACK_STATUSES
+        ):
+            raise
+
+        await _log(
+            logger,
+            "ODDS_DOM_FALLBACK",
+            f"{dom_error.status}: {dom_error}; trying canvas",
+        )
+        try:
+            return await _read_next_goal_odds_canvas(
+                page,
+                team1,
+                team2,
+                next_goal_number,
+                logger,
+            )
+        except MarketReadError as canvas_error:
+            details = {
+                "source": "HYBRID_DOM_CANVAS",
+                "dom_status": dom_error.status,
+                "dom_error": str(dom_error),
+                "canvas_status": canvas_error.status,
+                "canvas_error": str(canvas_error),
+            }
+            raise MarketNotAvailable(
+                (
+                    "Не удалось прочитать коэффициенты ни из DOM, ни через "
+                    f"Canvas Vision: {canvas_error}"
+                ),
+                status=canvas_error.status,
+                details=details,
+            ) from canvas_error
+
+
 async def read_total_even_market(
     page: Page,
     logger: Logger | None = None,
 ) -> TotalEvenMarket:
     """Read «Тотал чёт — Да» from its exact DOM group without global text lookup."""
-    search_input = page.locator(NEXT_GOAL_SEARCH_SELECTOR).first
     try:
-        await search_input.wait_for(state="visible", timeout=5_000)
-        await search_input.fill(TOTAL_EVEN_SEARCH_TEXT)
-    except Exception as error:
+        await _prepare_market_search(page, TOTAL_EVEN_SEARCH_TEXT, logger)
+    except MarketReadError as error:
         raise MarketDomRequired(
             "Поле поиска рынков пока недоступно.",
-            status="ELEMENT_NOT_READY",
+            status=error.status,
             details={"source": "DOM_PLAYWRIGHT"},
         ) from error
 
@@ -486,10 +840,9 @@ async def read_total_even_market(
     yes_button = None
     for index in range(await buttons.count()):
         button = buttons.nth(index)
-        name = button.locator(MARKET_NAME_SELECTOR).first
-        if await name.count() == 0:
-            continue
-        if _clean_text(await name.inner_text()) == _clean_text(TOTAL_EVEN_SELECTION_TEXT):
+        if _clean_text(await _market_label(button)) == _clean_text(
+            TOTAL_EVEN_SELECTION_TEXT
+        ):
             yes_button = button
             break
     if yes_button is None:
@@ -500,7 +853,7 @@ async def read_total_even_market(
         )
 
     classes = (await yes_button.get_attribute("class") or "").lower()
-    if await yes_button.is_disabled() or "ui-market--locked" in classes:
+    if await yes_button.is_disabled() or MARKET_LOCKED_CLASS.lower() in classes:
         raise MarketNotAvailable(
             "Рынок «Тотал чёт — Да» временно заблокирован.",
             status="MARKET_LOCKED",
@@ -564,10 +917,7 @@ async def read_first_half_draw_market(
     draw_button = None
     for index in range(await buttons.count()):
         button = buttons.nth(index)
-        name = button.locator(MARKET_NAME_SELECTOR).first
-        if await name.count() == 0:
-            continue
-        if _clean_text(await name.inner_text()) == _clean_text(
+        if _clean_text(await _market_label(button)) == _clean_text(
             FIRST_HALF_DRAW_SELECTION_TEXT
         ):
             draw_button = button
@@ -580,7 +930,7 @@ async def read_first_half_draw_market(
         )
 
     classes = (await draw_button.get_attribute("class") or "").lower()
-    if await draw_button.is_disabled() or "ui-market--locked" in classes:
+    if await draw_button.is_disabled() or MARKET_LOCKED_CLASS.lower() in classes:
         raise MarketNotAvailable(
             "Рынок «Ничья в 1-м тайме» временно заблокирован.",
             status="MARKET_LOCKED",
