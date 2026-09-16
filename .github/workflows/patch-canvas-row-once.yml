@@ -1,0 +1,109 @@
+name: patch-canvas-row-once
+
+on:
+  push:
+    branches:
+      - feature/hybrid-odds-vision
+    paths:
+      - .github/workflows/patch-canvas-row-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/hybrid-odds-vision
+          fetch-depth: 0
+
+      - name: Apply guarded patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('backend/app/browser/canvas_vision.py')
+          source = path.read_text(encoding='utf-8')
+          old = '''        first, second = left[-1], middle[-1]
+          center_y = (first["y"] + second["y"]) / 2
+          side1_labels = [
+              item
+              for item in regions
+              if item["x"] < first["x"]
+              and abs(item["y"] + item["height"] / 2 - center_y) <= 18
+              and _goal_label(item, 1) is not None
+          ]
+          side2_labels = [
+              item
+              for item in regions
+              if width * 0.30 < item["x"] < second["x"]
+              and abs(item["y"] + item["height"] / 2 - center_y) <= 18
+              and _goal_label(item, 2) is not None
+          ]
+          if not side1_labels or not side2_labels:
+              continue
+          goal1 = _goal_label(side1_labels[0], 1)
+          goal2 = _goal_label(side2_labels[0], 2)
+          '''
+          new = '''        first, second = left[-1], middle[-1]
+          first_center_y = first["y"] + first["height"] / 2
+          second_center_y = second["y"] + second["height"] / 2
+          center_y = (first_center_y + second_center_y) / 2
+          side1_labels = [
+              item
+              for item in regions
+              if item["x"] < first["x"]
+              and abs(item["y"] + item["height"] / 2 - center_y) <= 18
+              and _goal_label(item, 1) is not None
+          ]
+          side2_labels = [
+              item
+              for item in regions
+              if width * 0.30 < item["x"] < second["x"]
+              and abs(item["y"] + item["height"] / 2 - center_y) <= 18
+              and _goal_label(item, 2) is not None
+          ]
+          if not side1_labels or not side2_labels:
+              continue
+
+          # OCR can see labels from two adjacent goal rows at once. Always bind
+          # the odds row to the vertically nearest team label. Do not force the
+          # expected goal number here: a genuinely stale visible market must stay
+          # stale and be rejected by the caller instead of being relabelled.
+          side1_labels.sort(
+              key=lambda item: (
+                  abs(item["y"] + item["height"] / 2 - center_y),
+                  -float(item.get("confidence", 0.0)),
+              )
+          )
+          side2_labels.sort(
+              key=lambda item: (
+                  abs(item["y"] + item["height"] / 2 - center_y),
+                  -float(item.get("confidence", 0.0)),
+              )
+          )
+          goal1 = _goal_label(side1_labels[0], 1)
+          goal2 = _goal_label(side2_labels[0], 2)
+          '''
+          count = source.count(old)
+          if count != 1:
+              raise SystemExit(f'guard failed: expected exactly one old block, found {count}')
+          path.write_text(source.replace(old, new, 1), encoding='utf-8')
+          PY
+
+      - name: Verify regression test
+        run: |
+          cp .env.example .env
+          python -m pip install --quiet -r requirements.txt
+          python -m unittest tests.test_canvas_goal_row_mapping -v
+
+      - name: Remove one-time workflow and commit
+        run: |
+          rm .github/workflows/patch-canvas-row-once.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/app/browser/canvas_vision.py .github/workflows/patch-canvas-row-once.yml
+          git commit -m "Harden canvas next-goal row mapping"
+          git push origin HEAD:feature/hybrid-odds-vision
