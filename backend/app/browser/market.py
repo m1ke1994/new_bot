@@ -767,16 +767,19 @@ async def read_next_goal_odds(
     next_goal_number = score1 + score2 + 1
     search_error: MarketReadError | None = None
 
-    if not read_only:
-        try:
-            await _prepare_market_search(page, NEXT_GOAL_SEARCH_TEXT, logger)
-        except MarketReadError as error:
-            search_error = error
-            await _log(
-                logger,
-                "MARKET_SEARCH_DOM_UNAVAILABLE",
-                f"{error.status}: {error}",
-            )
+    # Opening/filtering the market search is a read-only UI action and is
+    # required in both DEMO and LIVE. Previously DEMO skipped this block, so
+    # neither DOM nor Canvas Vision ever received the filtered next-goal market.
+    _ = read_only  # Kept for API compatibility with existing callers.
+    try:
+        await _prepare_market_search(page, NEXT_GOAL_SEARCH_TEXT, logger)
+    except MarketReadError as error:
+        search_error = error
+        await _log(
+            logger,
+            "MARKET_SEARCH_DOM_UNAVAILABLE",
+            f"{error.status}: {error}",
+        )
 
     try:
         return await _read_next_goal_odds_dom(
