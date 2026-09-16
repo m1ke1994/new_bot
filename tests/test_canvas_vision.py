@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import cv2
 import numpy as np
@@ -12,6 +13,7 @@ from backend.app.browser.canvas_vision import (
     _map_next_goal_market,
     _numeric_candidates,
     parse_odds,
+    read_market_odds_from_canvas,
 )
 
 
@@ -145,6 +147,23 @@ class CanvasVisionTests(unittest.TestCase):
         self.assertEqual(engine.calls[0]["use_det"], False)
         self.assertEqual(engine.calls[1]["use_det"], True)
 
+    def test_cached_recognition_accepts_integer_odd(self):
+        engine = _FakeRapidEngine(
+            full_output=SimpleNamespace(txts=(), scores=(), boxes=()),
+            cached_output=TextRecOutput("2", 0.99),
+        )
+        vision = CanvasVision()
+        vision._initialized = True
+        vision.rapidocr = engine
+
+        cached = vision._recognize_cached_box(
+            np.zeros((100, 240, 3), dtype=np.uint8),
+            {"x": 10, "y": 20, "width": 80, "height": 30},
+        )
+
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached["value"], 2.0)
+
     @unittest.skipIf(RapidOCR is None, "RapidOCR package is not installed")
     def test_installed_rapidocr_detects_positioned_odds(self):
         image = np.full((220, 640, 3), 255, dtype=np.uint8)
@@ -202,6 +221,44 @@ class CanvasVisionTests(unittest.TestCase):
         self.assertEqual(mapping["mapping_method"], "STRUCTURAL_OUTCOME_LABELS")
         self.assertGreater(mapping["team1"]["value"], 1.0)
         self.assertGreater(mapping["team2"]["value"], 1.0)
+
+
+class CanvasStabilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_extended_mapping_gets_immediate_cached_confirmation(self):
+        def analysis(status, mapping=None):
+            return {
+                "ok": status == "CANVAS_ANALYZED",
+                "status": status,
+                "next_goal_mapping": mapping,
+            }
+
+        mapping = {
+            "next_goal_number": 1,
+            "team1": {"value": 2.0},
+            "team2": {"value": 1.74},
+        }
+        page = SimpleNamespace(wait_for_timeout=AsyncMock())
+        with (
+            patch(
+                "backend.app.browser.canvas_vision.analyze_market_canvas",
+                new_callable=AsyncMock,
+                side_effect=[
+                    analysis("ODDS_MAPPING_UNCERTAIN"),
+                    analysis("CANVAS_ANALYZED", mapping),
+                    analysis("CANVAS_ANALYZED", mapping),
+                ],
+            ) as analyze,
+            patch("backend.app.browser.canvas_vision._write_analysis"),
+        ):
+            result = await read_market_odds_from_canvas(page)
+
+        self.assertEqual(result["stability"], "ODDS_CONFIRMED")
+        self.assertEqual(result["next_goal_mapping"], mapping)
+        self.assertEqual(analyze.await_count, 3)
+        self.assertEqual(
+            [call.kwargs["extended"] for call in analyze.await_args_list],
+            [False, True, False],
+        )
 
 
 if __name__ == "__main__":
