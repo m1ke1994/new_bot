@@ -1242,6 +1242,34 @@ onBeforeUnmount(() => {
 
             </div>
 
+            <div v-else-if="state.odds?.team1 != null || state.odds?.team2 != null" class="selection-content">
+
+              <div class="selected-team">Коэффициенты рынка</div>
+
+              <div class="odds-compare">
+
+                <div>
+
+                  <span>{{ show(match.team1, 'TEAM 1') }}</span>
+
+                  <strong>{{ show(state.odds?.team1) }}</strong>
+
+                </div>
+
+                <div>
+
+                  <span>{{ show(match.team2, 'TEAM 2') }}</span>
+
+                  <strong>{{ show(state.odds?.team2) }}</strong>
+
+                </div>
+
+              </div>
+
+              <div class="selection-proof">Коэффициенты распознаны; бот проверяет выбор команды</div>
+
+            </div>
+
             <div v-else class="panel-empty">Ожидаем коэффициенты рынка</div>
 
             <div class="ocr-meta">
@@ -1282,7 +1310,7 @@ onBeforeUnmount(() => {
 
                 <span>ЧТЕНИЕ</span>
 
-                <strong>Playwright DOM · попытка {{ marketReader.attempt || 0 }}</strong>
+                <strong>{{ show(marketReader.source, 'DOM / Playwright') }} · попытка {{ marketReader.attempt || 0 }}</strong>
 
                 <small>Рынки читаются напрямую через Playwright DOM.</small>
 
