@@ -65,6 +65,7 @@ class CanvasVisionTests(unittest.TestCase):
             [{"x": 0, "y": 65, "width": 900, "height": 20}],
             900,
             260,
+            expected_goal_number=1,
         )
 
         self.assertIsNotNone(mapping)
@@ -250,7 +251,10 @@ class CanvasStabilityTests(unittest.IsolatedAsyncioTestCase):
             ) as analyze,
             patch("backend.app.browser.canvas_vision._write_analysis"),
         ):
-            result = await read_market_odds_from_canvas(page)
+            result = await read_market_odds_from_canvas(
+                page,
+                expected_goal_number=1,
+            )
 
         self.assertEqual(result["stability"], "ODDS_CONFIRMED")
         self.assertEqual(result["next_goal_mapping"], mapping)
@@ -258,6 +262,10 @@ class CanvasStabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [call.kwargs["extended"] for call in analyze.await_args_list],
             [False, True, False],
+        )
+        self.assertEqual(
+            [call.kwargs["expected_goal_number"] for call in analyze.await_args_list],
+            [1, 1, 1],
         )
 
 
