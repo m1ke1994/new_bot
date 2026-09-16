@@ -62,6 +62,28 @@ class CanvasGoalRowMappingTests(unittest.TestCase):
         self.assertEqual(mapping["team1"]["value"], 2.14)
         self.assertEqual(mapping["team2"]["value"], 1.71)
 
+    def test_wrong_visible_goal_is_not_relabelled_as_expected_goal(self):
+        team1_odd = odd(2.05, 220, 100)
+        team2_odd = odd(1.78, 520, 100)
+        regions = [
+            label("Команда 1 - 3-й гол", 80, 105),
+            label("Команда 2 - 3-й гол", 380, 105),
+            team1_odd,
+            team2_odd,
+        ]
+        headers = [{"x": 0, "y": 60, "width": 800, "height": 20}]
+
+        mapping = _map_next_goal_market(
+            regions,
+            [team1_odd, team2_odd],
+            headers,
+            800,
+            300,
+            expected_goal_number=4,
+        )
+
+        self.assertIsNone(mapping)
+
 
 if __name__ == "__main__":
     unittest.main()
