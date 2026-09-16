@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 from backend.app.browser.market import (
     NEXT_GOAL_SEARCH_TEXT,
     CanvasCoefficientLocator,
+    _locate_market_search_input,
     _prepare_market_search,
     parse_next_goal_market_name,
     read_next_goal_odds,
@@ -39,10 +40,11 @@ class HybridMarketVisionTests(unittest.TestCase):
         self.assertGreater(position["y"], 0)
 
 
-class _FakeSearchLocator:
-    def __init__(self, kind, events):
+class _FakeSearchElement:
+    def __init__(self, kind, events, *, visible=True):
         self.kind = kind
         self.events = events
+        self.visible = visible
         self.first = self
         self.value = ""
 
@@ -50,10 +52,7 @@ class _FakeSearchLocator:
         return 1
 
     async def is_visible(self):
-        return True
-
-    async def wait_for(self, **_kwargs):
-        self.events.append(f"{self.kind}:visible")
+        return self.visible
 
     async def scroll_into_view_if_needed(self):
         self.events.append(f"{self.kind}:scroll")
@@ -69,39 +68,84 @@ class _FakeSearchLocator:
         return self.value
 
 
-class _FakeSearchPage:
+class _FakeSearchCollection:
+    def __init__(self, items):
+        self.items = items
+        self.first = items[0] if items else _FakeSearchElement("empty", [], visible=False)
+
+    async def count(self):
+        return len(self.items)
+
+    def nth(self, index):
+        return self.items[index]
+
+
+class _TwoSearchInputsPage:
     def __init__(self):
         self.events = []
-        self.button = _FakeSearchLocator("button", self.events)
-        self.market_input = _FakeSearchLocator("input", self.events)
+        self.upper_input = _FakeSearchElement("upper-input", self.events)
+        self.market_input = _FakeSearchElement("market-input", self.events)
 
     def locator(self, selector):
-        if selector.startswith("button"):
-            return self.button
-        return self.market_input
+        if selector.startswith(".game-panel__markets") or selector.startswith(
+            ".market-grid-game-panel__markets"
+        ):
+            return _FakeSearchCollection([])
+        if selector.startswith("input"):
+            return _FakeSearchCollection([self.upper_input, self.market_input])
+        return _FakeSearchCollection([])
 
     async def wait_for_timeout(self, timeout):
         self.events.append(f"page:wait:{timeout}")
 
 
 class MarketSearchFlowTests(unittest.IsolatedAsyncioTestCase):
-    async def test_clicks_search_button_before_filling_market_input(self):
-        page = _FakeSearchPage()
+    async def test_fallback_selects_second_visible_input_from_top(self):
+        page = _TwoSearchInputsPage()
 
-        selector = await _prepare_market_search(page, "следующий гол")
+        search_input, selector, visible_position = (
+            await _locate_market_search_input(page)
+        )
 
-        self.assertEqual(
-            selector,
-            'input.ui-search-default__input[placeholder="Поиск по рынкам"]',
+        self.assertIs(search_input, page.market_input)
+        self.assertEqual(selector, "input.ui-search-default__input")
+        self.assertEqual(visible_position, 1)
+
+    async def test_clicks_paired_lower_button_before_filling_market_input(self):
+        page = _TwoSearchInputsPage()
+        button = _FakeSearchElement("market-button", page.events)
+
+        with (
+            patch(
+                "backend.app.browser.market._locate_market_search_input",
+                new_callable=AsyncMock,
+                return_value=(
+                    page.market_input,
+                    "input.ui-search-default__input",
+                    1,
+                ),
+            ),
+            patch(
+                "backend.app.browser.market._paired_market_search_button",
+                new_callable=AsyncMock,
+                return_value=(
+                    button,
+                    "paired:button.ui-search-default__button",
+                ),
+            ),
+        ):
+            selector = await _prepare_market_search(page, "следующий гол")
+
+        self.assertEqual(selector, "input.ui-search-default__input")
+        self.assertLess(
+            page.events.index("market-button:click"),
+            page.events.index("market-input:click"),
         )
         self.assertLess(
-            page.events.index("button:click"),
-            page.events.index("input:click"),
+            page.events.index("market-input:click"),
+            page.events.index("market-input:fill:следующий гол"),
         )
-        self.assertLess(
-            page.events.index("input:click"),
-            page.events.index("input:fill:следующий гол"),
-        )
+        self.assertEqual(page.upper_input.value, "")
         self.assertEqual(page.market_input.value, "следующий гол")
 
 
