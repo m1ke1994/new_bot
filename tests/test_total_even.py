@@ -54,8 +54,20 @@ class FakeNode:
     async def count(self):
         return 1
 
+    async def is_visible(self):
+        return True
+
+    async def scroll_into_view_if_needed(self):
+        return None
+
+    async def click(self):
+        return None
+
     async def fill(self, value):
         self.filled = value
+
+    async def input_value(self):
+        return self.filled or ""
 
     def locator(self, selector):
         return FakeLocatorList(self.children.get(selector, []))
@@ -101,6 +113,9 @@ class FakePage:
         if selector == MARKET_GROUP_SELECTOR:
             return FakeLocatorList(self.groups)
         raise AssertionError(f"Unexpected selector: {selector}")
+
+    async def wait_for_timeout(self, _milliseconds):
+        return None
 
 
 class FakeManager:
