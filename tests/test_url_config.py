@@ -12,7 +12,6 @@ def environment(**changes: str) -> dict[str, str]:
     values = {
         "XBET_URL": "https://test-bookmaker.example/ru",
         "XBET_FIFA_3X3_CONFERENCE_LEAGUE_PATH": "/live/fifa/test-league",
-        "XBET_TABLE_TENNIS_PATH": "/live/table-tennis",
         "BACKEND_HOST": "127.0.0.1",
         "BACKEND_PORT": "8000",
         "BACKEND_CORS_ORIGINS": "http://127.0.0.1:5173,http://localhost:5173",
@@ -45,10 +44,6 @@ class UrlConfigTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             config.next_goal_league_url,
             "https://new-mirror.example/ru/live/fifa/test-league",
-        )
-        self.assertEqual(
-            config.table_tennis_url,
-            "https://new-mirror.example/ru/live/table-tennis",
         )
 
     def test_existing_consumers_share_the_central_config(self):
