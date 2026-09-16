@@ -3,7 +3,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
-from backend.app.browser.market import MarketNotAvailable, read_next_goal_odds
+from backend.app.browser.market import (
+    NEXT_GOAL_SEARCH_TEXT,
+    MarketNotAvailable,
+    read_next_goal_odds,
+)
 from backend.app.demo.engine import (
     BlockedMatchSwitch,
     DemoBlockedWindow,
@@ -442,16 +446,27 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sequence["blocked_match_ids"], [])
         engine.live_executor.prepare.assert_not_awaited()
 
-    async def test_read_only_market_reader_never_touches_search_input(self):
-        with self.assertRaises(MarketNotAvailable):
-            await read_next_goal_odds(
-                ReadOnlyPage(),
-                "TEAM 1",
-                "TEAM 2",
-                2,
-                0,
-                read_only=True,
-            )
+    async def test_read_only_market_reader_prepares_filter_without_betting(self):
+        page = ReadOnlyPage()
+        with patch(
+            "backend.app.browser.market._prepare_market_search",
+            new_callable=AsyncMock,
+        ) as prepare_search:
+            with self.assertRaises(MarketNotAvailable):
+                await read_next_goal_odds(
+                    page,
+                    "TEAM 1",
+                    "TEAM 2",
+                    2,
+                    0,
+                    read_only=True,
+                )
+
+        prepare_search.assert_awaited_once_with(
+            page,
+            NEXT_GOAL_SEARCH_TEXT,
+            None,
+        )
 
 
 if __name__ == "__main__":
