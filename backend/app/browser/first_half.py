@@ -195,13 +195,16 @@ async def open_first_half(page: Page, logger: Logger | None = None) -> str:
 
 async def game_over_flag(page: Page) -> tuple[bool, str]:
     """Return True when the bookmaker shows its explicit terminal game-over panel."""
-    panel = page.locator(GAME_OVER_PANEL_SELECTOR).first
     try:
-        if await panel.count() == 0 or not await panel.is_visible():
+        panels = page.locator(GAME_OVER_PANEL_SELECTOR)
+        if await panels.count() == 0:
             return False, ""
-        title = panel.locator(GAME_OVER_TITLE_SELECTOR).first
-        if await title.count():
-            text = " ".join((await title.inner_text()).split())
+        panel = panels.first
+        if not await panel.is_visible():
+            return False, ""
+        titles = panel.locator(GAME_OVER_TITLE_SELECTOR)
+        if await titles.count():
+            text = " ".join((await titles.first.inner_text()).split())
         else:
             text = " ".join((await panel.inner_text()).split())
     except Exception:
@@ -221,9 +224,12 @@ async def first_half_timer_flag(page: Page) -> tuple[FirstHalfPhase, str]:
     FINISHED. At that exact flag the scoreboard score is the final H1 score and
     must be settled immediately. Values before 03:00 remain FIRST_HALF.
     """
-    locator = page.locator(SCOREBOARD_TIMER_STATUS_SELECTOR).first
     try:
-        if await locator.count() == 0 or not await locator.is_visible():
+        locators = page.locator(SCOREBOARD_TIMER_STATUS_SELECTOR)
+        if await locators.count() == 0:
+            return FirstHalfPhase.UNKNOWN, ""
+        locator = locators.first
+        if not await locator.is_visible():
             return FirstHalfPhase.UNKNOWN, ""
         text = " ".join((await locator.inner_text()).split())
     except Exception:
