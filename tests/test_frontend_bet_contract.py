@@ -33,6 +33,20 @@ class FrontendBetContractTests(unittest.TestCase):
             self.app_source,
         )
 
+    def test_frontend_exposes_actual_hybrid_reader_metadata(self):
+        self.assertIn(
+            "state.value.odds?.source || marketReader.value.source || null",
+            self.app_source,
+        )
+        self.assertIn("state.value.odds?.backend", self.app_source)
+        self.assertIn("state.value.odds?.confidence", self.app_source)
+        self.assertIn("source.includes('CANVAS')", self.app_source)
+        self.assertIn("машинным зрением по Canvas", self.app_source)
+        self.assertNotIn(
+            "Рынки читаются напрямую через Playwright DOM.",
+            self.app_source,
+        )
+
     def test_engine_publishes_current_bet_odds_and_goal_number(self):
         self.assertIn('"odds": selected_odd', self.engine_source)
         self.assertIn('"score_before": score_before.text()', self.engine_source)
