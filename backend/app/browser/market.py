@@ -208,9 +208,9 @@ MARKET_SEARCH_FALLBACK_VISIBLE_INDEX = 1  # second visible search input, top to 
 
 
 async def _visible_items(page: Page, selector: str) -> list[Any]:
-    locator = page.locator(selector)
     result: list[Any] = []
     try:
+        locator = page.locator(selector)
         count = await locator.count()
     except Exception:
         return result
@@ -264,7 +264,7 @@ async def _locate_market_search_input(
             if first_fallback is not None:
                 return first_fallback
             return None, None, 0
-        await page.wait_for_timeout(100)
+        await asyncio.sleep(0.1)
 
 
 async def _paired_market_search_button(
