@@ -9,6 +9,8 @@ from backend.app.browser.canvas_vision import (
     CANVAS_SELECTOR,
     RapidOCR,
     CanvasVision,
+    _map_next_goal_market,
+    _numeric_candidates,
     parse_odds,
 )
 
@@ -35,6 +37,38 @@ class _FakeRapidEngine:
 
 
 class CanvasVisionTests(unittest.TestCase):
+
+    def test_structural_mapping_accepts_integer_team_odd(self):
+        def region(text, x, y, width, *, confidence=0.99):
+            return {
+                "text": text,
+                "confidence": confidence,
+                "x": x,
+                "y": y,
+                "width": width,
+                "height": 18,
+                "engine": "RapidOCR",
+                "variant": "original",
+            }
+
+        regions = [
+            region("Команда 1 - 1-й гол", 20, 100, 170),
+            region("2", 250, 100, 20),
+            region("Команда 2 - 1-й гол", 340, 100, 170),
+            region("1.74", 570, 100, 55),
+        ]
+        mapping = _map_next_goal_market(
+            regions,
+            _numeric_candidates(regions),
+            [{"x": 0, "y": 65, "width": 900, "height": 20}],
+            900,
+            260,
+        )
+
+        self.assertIsNotNone(mapping)
+        self.assertEqual(mapping["next_goal_number"], 1)
+        self.assertEqual(mapping["team1"]["value"], 2.0)
+        self.assertEqual(mapping["team2"]["value"], 1.74)
 
     def test_canvas_selector_targets_market_grid_canvas(self):
         self.assertEqual(CANVAS_SELECTOR, "canvas.market-grid-canvas__canvas")
