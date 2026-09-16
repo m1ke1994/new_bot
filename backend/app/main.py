@@ -4,18 +4,8 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-import backend.app.demo.engine as demo_engine_module
-from backend.app.browser.canvas_market_adapter import (
-    read_next_goal_odds as canvas_aware_read_next_goal_odds,
-)
 from backend.app.browser.manager import BROWSER_MANAGER
-
-# Keep the strategy/engine unchanged while replacing only the external-market
-# reader. Engine methods resolve this module global at runtime, so both DEMO
-# and LIVE receive the same NextGoalOdds contract regardless of DOM vs canvas.
-demo_engine_module.read_next_goal_odds = canvas_aware_read_next_goal_odds
-ENGINE = demo_engine_module.ENGINE
-
+from backend.app.demo.engine import ENGINE
 from backend.app.routes.browser import router as browser_router
 from backend.app.routes.demo import router as demo_router
 from backend.app.routes.live import router as live_router
