@@ -1,9 +1,12 @@
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from backend.app.browser.market import (
+    NEXT_GOAL_SEARCH_TEXT,
     CanvasCoefficientLocator,
     _prepare_market_search,
     parse_next_goal_market_name,
+    read_next_goal_odds,
 )
 
 
@@ -100,6 +103,46 @@ class MarketSearchFlowTests(unittest.IsolatedAsyncioTestCase):
             page.events.index("input:fill:следующий гол"),
         )
         self.assertEqual(page.market_input.value, "следующий гол")
+
+
+class NextGoalDemoSearchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_read_only_demo_still_opens_and_fills_market_search(self):
+        page = object()
+        expected_odds = object()
+
+        with (
+            patch(
+                "backend.app.browser.market._prepare_market_search",
+                new_callable=AsyncMock,
+            ) as prepare_search,
+            patch(
+                "backend.app.browser.market._read_next_goal_odds_dom",
+                new_callable=AsyncMock,
+                return_value=expected_odds,
+            ) as read_dom,
+        ):
+            result = await read_next_goal_odds(
+                page,
+                "Команда 1",
+                "Команда 2",
+                0,
+                0,
+                read_only=True,
+            )
+
+        self.assertIs(result, expected_odds)
+        prepare_search.assert_awaited_once_with(
+            page,
+            NEXT_GOAL_SEARCH_TEXT,
+            None,
+        )
+        read_dom.assert_awaited_once_with(
+            page,
+            "Команда 1",
+            "Команда 2",
+            1,
+            None,
+        )
 
 
 if __name__ == "__main__":
