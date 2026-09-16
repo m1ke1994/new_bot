@@ -6,3 +6,4 @@ numpy>=2,<3
 opencv-python>=4.10,<6
 pytesseract>=0.3.13,<1
 rapidocr==3.9.2
+onnxruntime>=1.20,<2
