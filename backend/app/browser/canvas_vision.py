@@ -440,7 +440,12 @@ class CanvasVision:
         return _deduplicate_regions(expanded)
 
     def analyze_image(
-        self, image, *, save: bool = True, extended: bool = False
+        self,
+        image,
+        *,
+        save: bool = True,
+        extended: bool = False,
+        expected_goal_number: int | None = None,
     ) -> dict[str, Any]:
         height, width = image.shape[:2]
         if width < 20 or height < 20 or float(np.var(image)) < 1.0:
@@ -448,6 +453,17 @@ class CanvasVision:
 
         started = time.perf_counter()
         mapping = self._read_cached_mapping(image)
+        if (
+            mapping
+            and expected_goal_number is not None
+            and int(mapping.get("next_goal_number") or 0) != expected_goal_number
+        ):
+            # A single process visits many matches with identically sized
+            # canvases. Never reuse coordinates/goal metadata from a previous
+            # score when another next-goal number is required.
+            mapping = None
+            self._cached_mapping = None
+            self._cached_market_bbox = None
         if mapping:
             regions = [mapping["team1"], mapping["team2"]]
             numbers = regions
@@ -457,7 +473,14 @@ class CanvasVision:
             numbers = _numeric_candidates(regions)
             headers = _find_header_bands(image)
             next_goal_regions = _find_next_goal_lines(regions)
-            mapping = _map_next_goal_market(regions, numbers, headers, width, height)
+            mapping = _map_next_goal_market(
+                regions,
+                numbers,
+                headers,
+                width,
+                height,
+                expected_goal_number=expected_goal_number,
+            )
         latency = round(time.perf_counter() - started, 3)
         status = "CANVAS_ANALYZED"
         if not regions:
@@ -626,6 +649,8 @@ def _map_next_goal_market(
     headers: list[dict[str, int]],
     width: int,
     height: int,
+    *,
+    expected_goal_number: int | None = None,
 ) -> dict[str, Any] | None:
     rows: list[list[dict[str, Any]]] = []
     for item in (candidate for candidate in numbers if candidate["usable"]):
@@ -678,6 +703,8 @@ def _map_next_goal_market(
         goal1 = _goal_label(side1_labels[0], 1)
         goal2 = _goal_label(side2_labels[0], 2)
         if goal1 is None or goal1 != goal2:
+            continue
+        if expected_goal_number is not None and goal1 != expected_goal_number:
             continue
 
         preceding = [band for band in headers if band["y"] + band["height"] <= center_y]
@@ -773,14 +800,27 @@ async def capture_market_canvas(page) -> dict[str, Any]:
     }
 
 
-async def analyze_market_canvas(page, *, extended: bool = False) -> dict[str, Any]:
+async def analyze_market_canvas(
+    page,
+    *,
+    extended: bool = False,
+    expected_goal_number: int | None = None,
+) -> dict[str, Any]:
     captured = await capture_market_canvas(page)
     return await asyncio.to_thread(
-        VISION.analyze_image, captured["image"], save=True, extended=extended
+        VISION.analyze_image,
+        captured["image"],
+        save=True,
+        extended=extended,
+        expected_goal_number=expected_goal_number,
     )
 
 
-async def read_market_odds_from_canvas(page) -> dict[str, Any]:
+async def read_market_odds_from_canvas(
+    page,
+    *,
+    expected_goal_number: int | None = None,
+) -> dict[str, Any]:
     readings = []
     signatures = []
     # Two equal readings are required. If the fast first pass cannot map the
@@ -788,7 +828,11 @@ async def read_market_odds_from_canvas(page) -> dict[str, Any]:
     # confirmation instead of returning ODDS_UNSTABLE forever.
     for index in range(3):
         extended = bool(readings) and not any(item["ok"] for item in readings)
-        item = await analyze_market_canvas(page, extended=extended)
+        item = await analyze_market_canvas(
+            page,
+            extended=extended,
+            expected_goal_number=expected_goal_number,
+        )
         readings.append(item)
         mapping = item.get("next_goal_mapping") or {}
         signature = (
