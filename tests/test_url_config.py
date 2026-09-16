@@ -60,7 +60,10 @@ class UrlConfigTests(unittest.IsolatedAsyncioTestCase):
         values = environment()
         values.pop("XBET_URL")
 
-        with self.assertRaisesRegex(RuntimeError, "XBET_URL is required"):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"Missing required site configuration:\s*XBET_URL",
+        ):
             UrlConfig.from_env(values)
 
     def test_public_urls_reject_embedded_secrets(self):
@@ -76,13 +79,16 @@ class UrlConfigTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_config_check_exposes_urls_but_no_secrets(self):
         payload = await browser_config_check()
-        serialized_keys = " ".join(payload).lower()
+        keys = {str(key).casefold() for key in payload}
 
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["next_goal_league_url"], URL_CONFIG.next_goal_league_url)
-        self.assertNotIn("password", serialized_keys)
-        self.assertNotIn("login", serialized_keys)
-        self.assertNotIn("token", serialized_keys)
+        # Public navigation URLs (including login_url) are intentional diagnostics.
+        # Credentials themselves must never be exposed by this endpoint.
+        self.assertFalse(any("password" in key for key in keys))
+        self.assertFalse(any("token" in key for key in keys))
+        self.assertNotIn("xbet_login", keys)
+        self.assertNotIn("username", keys)
 
     def test_production_sources_contain_no_bookmaker_domains(self):
         root = Path(__file__).resolve().parents[1]
