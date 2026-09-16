@@ -1,0 +1,418 @@
+name: remove-obsolete-strategies-once
+
+on:
+  push:
+    branches:
+      - feature/hybrid-odds-vision
+    paths:
+      - .github/workflows/remove-obsolete-strategies-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/hybrid-odds-vision
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Remove obsolete implementations
+        run: |
+          python - <<'PY'
+          import ast
+          import re
+          from pathlib import Path
+
+          def replace_once(source: str, old: str, new: str, label: str) -> str:
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected 1 occurrence, found {count}')
+              return source.replace(old, new, 1)
+
+          def remove_ast_nodes(path: str, names: set[str], kinds: tuple[type, ...]) -> None:
+              p = Path(path)
+              source = p.read_text(encoding='utf-8')
+              tree = ast.parse(source)
+              spans = []
+              found = set()
+              for node in ast.walk(tree):
+                  if isinstance(node, kinds) and getattr(node, 'name', None) in names:
+                      decorators = [d.lineno for d in getattr(node, 'decorator_list', [])]
+                      start = min([node.lineno, *decorators])
+                      spans.append((start, node.end_lineno, node.name))
+                      found.add(node.name)
+              missing = names - found
+              if missing:
+                  raise SystemExit(f'{path}: AST nodes not found: {sorted(missing)}')
+              lines = source.splitlines(keepends=True)
+              for start, end, _name in sorted(spans, reverse=True):
+                  del lines[start - 1:end]
+                  while start - 1 < len(lines) and lines[start - 1].strip() == '':
+                      del lines[start - 1]
+              p.write_text(''.join(lines), encoding='utf-8')
+
+          # --- Engine: keep NEXT_GOAL and FIRST_HALF_DRAW only. ---
+          engine_path = Path('backend/app/demo/engine.py')
+          engine = engine_path.read_text(encoding='utf-8')
+          engine = replace_once(
+              engine,
+              '    read_next_goal_odds,\n    read_total_even_market,\n',
+              '    read_next_goal_odds,\n',
+              'engine market import',
+          )
+          engine, count = re.subn(
+              r'from \.strategies\.total_even import \(\n.*?\n\)\n',
+              '',
+              engine,
+              count=1,
+              flags=re.DOTALL,
+          )
+          if count != 1:
+              raise SystemExit(f'engine total_even import: expected 1, found {count}')
+          engine = replace_once(
+              engine,
+              'def strategy_market_presentation(strategy_type: StrategyType) -> tuple[str, str | None]:\n'
+              '    if strategy_type == StrategyType.TOTAL_EVEN:\n'
+              '        return TOTAL_EVEN_MARKET_NAME, TOTAL_EVEN_SELECTION\n'
+              '    if strategy_type == StrategyType.FIRST_HALF_DRAW:\n',
+              'def strategy_market_presentation(strategy_type: StrategyType) -> tuple[str, str | None]:\n'
+              '    if strategy_type == StrategyType.FIRST_HALF_DRAW:\n',
+              'engine market presentation',
+          )
+          engine = replace_once(
+              engine,
+              '        # The read-only table-tennis scanner shares this exact Playwright page.\n'
+              '        # Never let two independent workflows navigate it concurrently.\n'
+              '        from backend.app.table_tennis.scanner import TABLE_TENNIS_SCANNER\n\n'
+              '        if TABLE_TENNIS_SCANNER.scanning:\n'
+              '            raise ModeConflictError(\n'
+              '                "Сначала остановите DEMO «Вилки» и общий Playwright browser."\n'
+              '            )\n',
+              '',
+              'engine tennis start guard',
+          )
+          engine = replace_once(
+              engine,
+              '            if (\n'
+              '                requested_mode == "LIVE"\n'
+              '                and self._config.strategy_type == StrategyType.TOTAL_EVEN\n'
+              '            ):\n'
+              '                raise ModeConflictError(\n'
+              '                    "Стратегия «Тотал чёт» пока доступна только в DEMO."\n'
+              '                )\n',
+              '',
+              'engine total-even LIVE guard',
+          )
+          engine = replace_once(
+              engine,
+              '        if self._config.strategy_type == StrategyType.TOTAL_EVEN:\n'
+              '            await self._process_total_even_match(page)\n'
+              '            return\n',
+              '',
+              'engine total-even dispatch',
+          )
+          engine = replace_once(
+              engine,
+              '        if self._config.strategy_type == StrategyType.TOTAL_EVEN:\n'
+              '            changes.update(\n'
+              '                score=snapshot.score.text(),\n'
+              '                total_goals=total_goals(snapshot.score),\n'
+              '                total_parity=total_parity(snapshot.score),\n'
+              '            )\n'
+              '        elif self._config.strategy_type == StrategyType.FIRST_HALF_DRAW:\n'
+              '            changes.update(score=snapshot.score.text())\n',
+              '        if self._config.strategy_type == StrategyType.FIRST_HALF_DRAW:\n'
+              '            changes.update(score=snapshot.score.text())\n',
+              'engine snapshot strategy projection',
+          )
+          engine_path.write_text(engine, encoding='utf-8')
+          # Parse before structural deletion so a broken text edit can never be committed.
+          ast.parse(engine_path.read_text(encoding='utf-8'))
+          remove_ast_nodes(
+              'backend/app/demo/engine.py',
+              {'_process_total_even_match', '_wait_for_total_even_market', '_wait_for_total_even_finish'},
+              (ast.AsyncFunctionDef,),
+          )
+          engine = engine_path.read_text(encoding='utf-8')
+          ast.parse(engine)
+          if 'TOTAL_EVEN' in engine or 'table_tennis' in engine or 'Тотал чёт' in engine:
+              raise SystemExit('engine cleanup incomplete')
+
+          # --- Market/model layer. ---
+          market_path = Path('backend/app/browser/market.py')
+          market = market_path.read_text(encoding='utf-8')
+          market = replace_once(
+              market,
+              'from backend.app.demo.models import FirstHalfDrawMarket, NextGoalOdds, TotalEvenMarket\n',
+              'from backend.app.demo.models import FirstHalfDrawMarket, NextGoalOdds\n',
+              'market model import',
+          )
+          for old in (
+              'TOTAL_EVEN_TEXT = TEXTS.total_even or "Тотал чёт"\n',
+              'TOTAL_EVEN_SEARCH_TEXT = TEXTS.total_even_search or "тотал чет"\n',
+              'TOTAL_EVEN_SELECTION_TEXT = TEXTS.affirmative_selection or "Да"\n',
+          ):
+              market = replace_once(market, old, '', f'market constant {old.split(" = ")[0]}')
+          market_path.write_text(market, encoding='utf-8')
+          remove_ast_nodes('backend/app/browser/market.py', {'read_total_even_market'}, (ast.AsyncFunctionDef,))
+          ast.parse(market_path.read_text(encoding='utf-8'))
+          remove_ast_nodes('backend/app/demo/models.py', {'TotalEvenMarket'}, (ast.ClassDef,))
+
+          # --- State/history. ---
+          state_path = Path('backend/app/demo/state.py')
+          state = state_path.read_text(encoding='utf-8')
+          for old in (
+              '    "TOTAL_EVEN": ("Тотал чёт", "Тотал чёт", "Да"),\n',
+              '        "total_goals": None,\n',
+              '        "total_parity": None,\n',
+          ):
+              state = replace_once(state, old, '', f'state cleanup {old.strip()}')
+          state_path.write_text(state, encoding='utf-8')
+
+          history_path = Path('backend/app/demo/history.py')
+          history = history_path.read_text(encoding='utf-8')
+          history = replace_once(
+              history,
+              '            "TOTAL_EVEN": summarize("TOTAL_EVEN"),\n',
+              '',
+              'history total-even stats',
+          )
+          history_path.write_text(history, encoding='utf-8')
+
+          # --- Central configuration: remove settings that existed only for removed features. ---
+          cfg_path = Path('xbet_config.py')
+          cfg = cfg_path.read_text(encoding='utf-8')
+          cfg = replace_once(cfg, '    table_tennis_target: str\n', '', 'url config table target field')
+          cfg = replace_once(
+              cfg,
+              '        table_name = (\n'
+              '            "SITE_TABLE_TENNIS_URL"\n'
+              '            if source.get("SITE_TABLE_TENNIS_URL")\n'
+              '            else "XBET_TABLE_TENNIS_PATH"\n'
+              '        )\n',
+              '',
+              'url config table env name',
+          )
+          cfg = replace_once(
+              cfg,
+              '        table_tennis_target = _value(source, table_name)\n'
+              '        if not table_tennis_target:\n'
+              '            table_tennis_target = _value(source, "TABLE_TENNIS_URL")\n'
+              '        if not table_tennis_target:\n'
+              '            raise RuntimeError(f"Missing required site configuration:\\n{table_name}")\n'
+              '        table_tennis_target = _validated_target(table_tennis_target, table_name)\n',
+              '',
+              'url config table target parse',
+          )
+          cfg = replace_once(cfg, '            table_tennis_target=table_tennis_target,\n', '', 'url config ctor table target')
+          for old in (
+              '            "table_tennis_path": self.table_tennis_path,\n',
+              '            "table_tennis_url": self.table_tennis_url,\n',
+          ):
+              cfg = replace_once(cfg, old, '', 'url public table diagnostics')
+          for old in (
+              '    total_even: str\n',
+              '    total_even_search: str\n',
+              '    affirmative_selection: str\n',
+              '            total_even=required("TEXT_TOTAL_EVEN"),\n',
+              '            total_even_search=required("TEXT_TOTAL_EVEN_SEARCH"),\n',
+              '            affirmative_selection=required("TEXT_AFFIRMATIVE_SELECTION"),\n',
+              '    table_tennis_odds_poll_interval: float\n',
+              '    table_tennis_min_arb_percent: float\n',
+          ):
+              cfg = replace_once(cfg, old, '', f'config obsolete field {old.strip()}')
+          cfg = replace_once(
+              cfg,
+              '            table_tennis_odds_poll_interval=max(\n'
+              '                0.5, float(_value(source, "TABLE_TENNIS_ODDS_POLL_INTERVAL") or "1.5")\n'
+              '            ),\n'
+              '            table_tennis_min_arb_percent=max(\n'
+              '                0.0, float(_value(source, "TABLE_TENNIS_MIN_ARB_PERCENT") or "0.5")\n'
+              '            ),\n',
+              '',
+              'runtime table tennis config',
+          )
+          cfg_path.write_text(cfg, encoding='utf-8')
+          remove_ast_nodes(
+              'xbet_config.py',
+              {
+                  'table_tennis_url', 'table_tennis_path', 'table_tennis_root_path',
+                  'get_table_tennis_url', 'get_table_tennis_odds_poll_interval',
+                  'get_table_tennis_min_arb_percent',
+              },
+              (ast.FunctionDef,),
+          )
+          ast.parse(cfg_path.read_text(encoding='utf-8'))
+
+          # --- Frontend. ---
+          app_path = Path('front/frontend/src/App.vue')
+          app = app_path.read_text(encoding='utf-8')
+          app = replace_once(app, "  ['Тотал чёт', state.value.stats?.by_strategy?.TOTAL_EVEN || emptyStats],\n", '', 'frontend total-even stats')
+          app = replace_once(
+              app,
+              "  TOTAL_EVEN: {\n    name: 'Тотал чёт',\n    description: 'Ставка на «Тотал чёт — Да». Результат зависит от чётности общего количества голов.',\n  },\n",
+              '',
+              'frontend total-even presentation',
+          )
+          app = replace_once(app, "\n  if (strategyType === 'TOTAL_EVEN') selectedMode.value = 'DEMO'\n", '', 'frontend total-even mode coercion')
+          app, count = re.subn(
+              r"\n  if \(mode === 'LIVE' && strategyConfig\.value\.strategy_type === 'TOTAL_EVEN'\) \{\n.*?\n  \}\n",
+              '\n', app, count=1, flags=re.DOTALL,
+          )
+          if count != 1:
+              raise SystemExit(f'frontend total-even LIVE guard: expected 1, found {count}')
+          app = replace_once(
+              app,
+              ':disabled="!canStart || strategyConfig.strategy_type === \'TOTAL_EVEN\'"',
+              ':disabled="!canStart"',
+              'frontend LIVE button guard',
+          )
+          app, count = re.subn(
+              r'\n\s*<label :class="\[\'strategy-option\', \{ selected: strategyConfig\.strategy_type === \'TOTAL_EVEN\' \}\]">.*?</label>\n',
+              '\n', app, count=1, flags=re.DOTALL,
+          )
+          if count != 1:
+              raise SystemExit(f'frontend total-even option: expected 1, found {count}')
+          app, count = re.subn(
+              r'\n\s*<RouterLink class="strategy-option forks-strategy-option" to="/forks">.*?</RouterLink>\n',
+              '\n', app, count=1, flags=re.DOTALL,
+          )
+          if count != 1:
+              raise SystemExit(f'frontend forks link: expected 1, found {count}')
+          app = replace_once(
+              app,
+              'v-if="!isFirstHalfDraw && state.strategy_type !== \'TOTAL_EVEN\'"',
+              'v-if="!isFirstHalfDraw"',
+              'frontend next-goal conditional',
+          )
+          if 'TOTAL_EVEN' in app or 'to="/forks"' in app or 'Тотал чёт' in app or 'Настольный теннис' in app:
+              raise SystemExit('frontend obsolete strategy cleanup incomplete')
+          app_path.write_text(app, encoding='utf-8')
+
+          # --- Generic tests that referenced removed features. ---
+          api_test = Path('tests/test_api_routes.py')
+          api_source = api_test.read_text(encoding='utf-8')
+          api_source = re.sub(r'^\s*self\.assertIn\(\("/api/table-tennis/.*$', '', api_source, flags=re.MULTILINE)
+          api_test.write_text(api_source, encoding='utf-8')
+
+          strategy_test = Path('tests/test_strategy.py')
+          strategy_source = strategy_test.read_text(encoding='utf-8')
+          old_test = '''    def test_strategy_type_defaults_to_next_goal_and_accepts_total_even(self):\n        self.assertEqual(StrategyConfig.from_payload({}).strategy_type, StrategyType.NEXT_GOAL)\n        self.assertEqual(\n            StrategyConfig.from_payload({"strategy_type": "TOTAL_EVEN"}).strategy_type,\n            StrategyType.TOTAL_EVEN,\n        )\n\n'''
+          new_test = '''    def test_strategy_type_defaults_to_next_goal_and_rejects_removed_total_even(self):\n        self.assertEqual(StrategyConfig.from_payload({}).strategy_type, StrategyType.NEXT_GOAL)\n        with self.assertRaises(ValueError):\n            StrategyConfig.from_payload({"strategy_type": "TOTAL_EVEN"})\n\n'''
+          strategy_source = replace_once(strategy_source, old_test, new_test, 'strategy type test')
+          strategy_test.write_text(strategy_source, encoding='utf-8')
+
+          selectors_test = Path('tests/test_selectors.py')
+          selectors = selectors_test.read_text(encoding='utf-8')
+          for old in (
+              '    TOTAL_EVEN_SEARCH_TEXT,\n',
+              '    TOTAL_EVEN_SELECTION_TEXT,\n',
+              '    TOTAL_EVEN_TEXT,\n',
+          ):
+              selectors = replace_once(selectors, old, '', 'selector test obsolete import')
+          selectors_test.write_text(selectors, encoding='utf-8')
+          remove_ast_nodes('tests/test_selectors.py', {'test_total_even_dom_labels_are_explicit'}, (ast.FunctionDef,))
+
+          controls_path = Path('tests/test_frontend_controls.py')
+          controls = controls_path.read_text(encoding='utf-8')
+          controls = controls.replace('FORKS_VIEW = APP_VUE.parent / "views" / "ForksView.vue"\n', '')
+          controls = controls.replace('ROUTER = APP_VUE.parent / "router" / "index.js"\n', '')
+          controls_path.write_text(controls, encoding='utf-8')
+          remove_ast_nodes(
+              'tests/test_frontend_controls.py',
+              {'test_forks_tactic_links_to_separate_route', 'test_forks_view_uses_monitoring_api_and_required_layout'},
+              (ast.FunctionDef,),
+          )
+
+          url_test = Path('tests/test_url_config.py')
+          url_source = url_test.read_text(encoding='utf-8')
+          url_source = replace_once(url_source, '        "XBET_TABLE_TENNIS_PATH": "/live/table-tennis",\n', '', 'url test table path')
+          url_source = replace_once(
+              url_source,
+              '        self.assertEqual(\n            config.table_tennis_url,\n            "https://new-mirror.example/ru/live/table-tennis",\n        )\n',
+              '',
+              'url test table url assertion',
+          )
+          url_source = replace_once(
+              url_source,
+              '        forks_source = (\n            root / "front/frontend/src/views/ForksView.vue"\n        ).read_text(encoding="utf-8")\n\n',
+              '',
+              'url test forks source',
+          )
+          url_source = replace_once(url_source, '        self.assertIn("fetch(apiUrl(path)", forks_source)\n', '', 'url test forks fetch')
+          url_source = replace_once(
+              url_source,
+              '        self.assertNotIn("127.0.0.1", config_source + app_source + forks_source)\n',
+              '        self.assertNotIn("127.0.0.1", config_source + app_source)\n',
+              'url test source concat',
+          )
+          url_test.write_text(url_source, encoding='utf-8')
+
+          # README and example env should describe only supported features.
+          readme_path = Path('README.md')
+          readme = readme_path.read_text(encoding='utf-8')
+          readme, count = re.subn(r'\n## Вилки настольного тенниса \(DEMO\)\n.*?(?=\n## Canvas OCR\n)', '\n', readme, count=1, flags=re.DOTALL)
+          if count != 1:
+              raise SystemExit(f'README tennis section: expected 1, found {count}')
+          readme_path.write_text(readme, encoding='utf-8')
+
+          env_path = Path('.env.example')
+          env_lines = env_path.read_text(encoding='utf-8').splitlines()
+          removed_prefixes = (
+              'SITE_TABLE_TENNIS_URL=', 'XBET_TABLE_TENNIS_PATH=', 'TABLE_TENNIS_URL=',
+              'TABLE_TENNIS_ODDS_POLL_INTERVAL=', 'TABLE_TENNIS_MIN_ARB_PERCENT=',
+              'TEXT_TOTAL_EVEN=', 'TEXT_TOTAL_EVEN_SEARCH=', 'TEXT_AFFIRMATIVE_SELECTION=',
+              'SELECTOR_LEAGUE_LINK_TEMPLATE=',
+          )
+          env_lines = [line for line in env_lines if not line.startswith(removed_prefixes)]
+          env_path.write_text('\n'.join(env_lines).rstrip() + '\n', encoding='utf-8')
+          PY
+
+          rm -rf backend/app/table_tennis
+          rm -f backend/app/routes/table_tennis.py
+          rm -f backend/app/demo/strategies/total_even.py
+          rm -f front/frontend/src/views/ForksView.vue
+          rm -f tests/test_total_even.py
+          rm -f tests/test_table_tennis_*.py
+
+      - name: Guard removed modules and references
+        run: |
+          ! test -e backend/app/table_tennis
+          ! test -e backend/app/routes/table_tennis.py
+          ! test -e backend/app/demo/strategies/total_even.py
+          ! test -e front/frontend/src/views/ForksView.vue
+          ! grep -R "TOTAL_EVEN\|table_tennis\|/forks\|table-tennis\|Тотал чёт\|Настольный теннис" backend/app front/frontend/src xbet_config.py tests README.md .env.example --include='*.py' --include='*.vue' --include='*.js' --include='*.md' --include='*.example'
+          python -m compileall -q backend xbet_config.py
+
+      - name: Install backend dependencies
+        run: |
+          pip install -r requirements.txt
+          cp .env.example .env
+
+      - name: Run backend tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build frontend
+        working-directory: front/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Commit verified cleanup
+        run: |
+          rm .github/workflows/remove-obsolete-strategies-once.yml
+          rm -f .github/workflows/audit-unused-strategies.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Remove total-even and tennis forks strategies"
+          git push origin HEAD:feature/hybrid-odds-vision
