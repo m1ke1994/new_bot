@@ -2850,10 +2850,19 @@ class DemoEngine:
                         "status": error.status,
                         "attempt": attempt,
                         "next_goal_number": next_goal_number,
-                    }
+                    },
+                    event=error.status,
+                    error=str(error),
                 )
-                if attempt == 1 or attempt % 10 == 0:
-                    await REPOSITORY.log(error.status, str(error))
+                if (
+                    attempt == 1
+                    or attempt % 10 == 0
+                    or "CANVAS" in error_source
+                ):
+                    await REPOSITORY.log(
+                        error.status,
+                        f"{error} | details={error.details}",
+                    )
                 await self._sleep_or_stop(CONFIG.ocr_retry_delay)
         return None
 
