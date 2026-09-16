@@ -481,6 +481,20 @@ class CanvasVision:
                 height,
                 expected_goal_number=expected_goal_number,
             )
+            if mapping is None and expected_goal_number is not None:
+                # Keep the actually visible market for diagnostics/UI even
+                # when the scoreboard expects another goal number. The market
+                # layer will mark it STALE and refuse to place a bet.
+                mapping = _map_next_goal_market(
+                    regions,
+                    numbers,
+                    headers,
+                    width,
+                    height,
+                )
+                if mapping is not None:
+                    mapping["expected_goal_number"] = expected_goal_number
+                    mapping["goal_number_matches"] = False
         latency = round(time.perf_counter() - started, 3)
         status = "CANVAS_ANALYZED"
         if not regions:
