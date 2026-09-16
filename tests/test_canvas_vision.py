@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import cv2
 import numpy as np
@@ -39,6 +39,49 @@ class _FakeRapidEngine:
 
 
 class CanvasVisionTests(unittest.TestCase):
+
+    def test_visible_market_is_kept_when_goal_number_differs(self):
+        def region(text, x, y, width):
+            return {
+                "text": text,
+                "confidence": 0.99,
+                "x": x,
+                "y": y,
+                "width": width,
+                "height": 18,
+                "engine": "RapidOCR",
+                "variant": "original",
+            }
+
+        regions = [
+            region("Команда 1 - 5-й гол", 20, 100, 170),
+            region("1.8", 250, 100, 35),
+            region("Команда 2 - 5-й гол", 340, 100, 170),
+            region("1.97", 570, 100, 55),
+        ]
+        image = np.zeros((260, 900, 3), dtype=np.uint8)
+        image[:130] = 255
+        vision = CanvasVision()
+        vision._read_cached_mapping = Mock(return_value=None)
+        vision._detect = Mock(return_value=regions)
+
+        with patch(
+            "backend.app.browser.canvas_vision._find_header_bands",
+            return_value=[{"x": 0, "y": 65, "width": 900, "height": 20}],
+        ):
+            analysis = vision.analyze_image(
+                image,
+                save=False,
+                expected_goal_number=1,
+            )
+
+        mapping = analysis["next_goal_mapping"]
+        self.assertEqual(analysis["status"], "CANVAS_ANALYZED")
+        self.assertEqual(mapping["next_goal_number"], 5)
+        self.assertEqual(mapping["team1"]["value"], 1.8)
+        self.assertEqual(mapping["team2"]["value"], 1.97)
+        self.assertFalse(mapping["goal_number_matches"])
+        self.assertEqual(mapping["expected_goal_number"], 1)
 
     def test_structural_mapping_accepts_integer_team_odd(self):
         def region(text, x, y, width, *, confidence=0.99):
