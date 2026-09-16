@@ -198,25 +198,144 @@ async def _first_visible(page: Page, selectors: tuple[str, ...]) -> tuple[Any | 
     return None, None
 
 
+MARKET_SEARCH_SCOPED_INPUT_SELECTORS = (
+    '.game-panel__markets input.ui-search-default__input[placeholder="Поиск по рынкам"]',
+    ".game-panel__markets input.ui-search-default__input",
+    '.market-grid-game-panel__markets input.ui-search-default__input[placeholder="Поиск по рынкам"]',
+    ".market-grid-game-panel__markets input.ui-search-default__input",
+)
+MARKET_SEARCH_FALLBACK_VISIBLE_INDEX = 1  # second visible search input, top to bottom
+
+
+async def _visible_items(page: Page, selector: str) -> list[Any]:
+    locator = page.locator(selector)
+    result: list[Any] = []
+    try:
+        count = await locator.count()
+    except Exception:
+        return result
+    for index in range(count):
+        item = locator.nth(index)
+        try:
+            if await item.is_visible():
+                result.append(item)
+        except Exception:
+            continue
+    return result
+
+
+async def _locate_market_search_input(
+    page: Page,
+    *,
+    timeout_ms: int = 2_500,
+) -> tuple[Any | None, str | None, int]:
+    """Return the markets-panel input, never the upper event search by accident."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_ms / 1000
+    generic_selectors = _selector_candidates(
+        NEXT_GOAL_SEARCH_SELECTOR,
+        'input.ui-search-default__input[placeholder="Поиск по рынкам"]',
+        "input.ui-search-default__input",
+        "input.game-search__input",
+    )
+
+    while True:
+        # Prefer semantic scoping confirmed by the current match-page layout.
+        for selector in MARKET_SEARCH_SCOPED_INPUT_SELECTORS:
+            visible = await _visible_items(page, selector)
+            if visible:
+                return visible[0], selector, 0
+
+        # Fallback for A/B layouts: the market filter is the second visible
+        # ui-search input from top to bottom (the first belongs to the event bar).
+        first_fallback: tuple[Any, str, int] | None = None
+        for selector in generic_selectors:
+            visible = await _visible_items(page, selector)
+            if len(visible) > MARKET_SEARCH_FALLBACK_VISIBLE_INDEX:
+                return (
+                    visible[MARKET_SEARCH_FALLBACK_VISIBLE_INDEX],
+                    selector,
+                    MARKET_SEARCH_FALLBACK_VISIBLE_INDEX,
+                )
+            if visible and first_fallback is None:
+                first_fallback = (visible[0], selector, 0)
+
+        if loop.time() >= deadline:
+            if first_fallback is not None:
+                return first_fallback
+            return None, None, 0
+        await page.wait_for_timeout(100)
+
+
+async def _paired_market_search_button(
+    page: Page,
+    search_input: Any,
+    visible_position: int,
+) -> tuple[Any | None, str | None]:
+    # The button and input are rendered by the same ui-search-default component.
+    # Resolve the button through that common ancestor so the upper search button
+    # can never be clicked when the lower markets input was selected.
+    try:
+        container = search_input.locator(
+            "xpath=ancestor::*[.//button[contains(@class,"
+            "'ui-search-default__button')]][1]"
+        )
+        if await container.count():
+            button = container.locator("button.ui-search-default__button").first
+            if await button.count() and await button.is_visible():
+                return button, "paired:button.ui-search-default__button"
+    except Exception:
+        pass
+
+    # Defensive fallback for a future wrapper change: use the button with the
+    # same visible top-to-bottom position as the selected input.
+    for selector in _selector_candidates(
+        MARKET_SEARCH_BUTTON_SELECTOR,
+        "button.ui-search-default__button",
+    ):
+        visible = await _visible_items(page, selector)
+        if visible:
+            index = min(visible_position, len(visible) - 1)
+            return visible[index], f"{selector}:visible:nth({index})"
+    return None, None
+
+
 async def _prepare_market_search(
     page: Page,
     search_text: str,
     logger: Logger | None = None,
 ) -> str:
-    # The current match page requires the search icon to be activated before
-    # typing into the market input. Keep the old input-only layout as fallback.
-    button_selectors = _selector_candidates(
-        MARKET_SEARCH_BUTTON_SELECTOR,
-        "button.ui-search-default__button",
+    search_input, selector_used, visible_position = (
+        await _locate_market_search_input(page)
     )
-    search_button, button_selector = await _first_visible(page, button_selectors)
+    if search_input is None or selector_used is None:
+        raise MarketDomRequired(
+            "Нижнее поле поиска рынков пока недоступно.",
+            status="ELEMENT_NOT_READY",
+            details={"source": "DOM_PLAYWRIGHT"},
+        )
+
+    await _log(
+        logger,
+        "MARKET_SEARCH_TARGET",
+        (
+            f"{selector_used}; visible_position={visible_position + 1}; "
+            "scope=markets"
+        ),
+    )
+
+    search_button, button_selector = await _paired_market_search_button(
+        page,
+        search_input,
+        visible_position,
+    )
     if search_button is not None:
         try:
             await search_button.scroll_into_view_if_needed()
             await search_button.click()
         except Exception as error:
             raise MarketDomRequired(
-                "Кнопка поиска рынков найдена, но нажать её не удалось.",
+                "Кнопка нижнего поиска рынков найдена, но нажать её не удалось.",
                 status="ELEMENT_NOT_READY",
                 details={
                     "source": "DOM_PLAYWRIGHT",
@@ -226,38 +345,18 @@ async def _prepare_market_search(
         await _log(
             logger,
             "MARKET_SEARCH_OPENED",
-            f"Search button clicked: {button_selector}",
+            f"Market search button clicked: {button_selector}",
         )
 
-    # Clicking the Vue control may replace its input node, so resolve it only
-    # after the click instead of reusing a locator captured before activation.
-    input_selectors = _selector_candidates(
-        NEXT_GOAL_SEARCH_SELECTOR,
-        'input.ui-search-default__input[placeholder="Поиск по рынкам"]',
-        "input.ui-search-default__input",
-        "input.game-search__input",
+    # Vue may replace the node after the button click. Resolve the same lower
+    # markets input again before filling it.
+    refreshed_input, refreshed_selector, refreshed_position = (
+        await _locate_market_search_input(page)
     )
-    search_input = None
-    selector_used = None
-    for selector in input_selectors:
-        candidate = page.locator(selector).first
-        try:
-            await candidate.wait_for(state="visible", timeout=2_500)
-            search_input = candidate
-            selector_used = selector
-            break
-        except Exception:
-            continue
-
-    if search_input is None or selector_used is None:
-        raise MarketDomRequired(
-            "Поле поиска рынков пока недоступно.",
-            status="ELEMENT_NOT_READY",
-            details={
-                "source": "DOM_PLAYWRIGHT",
-                "button_selector": button_selector,
-            },
-        )
+    if refreshed_input is not None and refreshed_selector is not None:
+        search_input = refreshed_input
+        selector_used = refreshed_selector
+        visible_position = refreshed_position
 
     await search_input.scroll_into_view_if_needed()
     await search_input.click()
@@ -272,13 +371,21 @@ async def _prepare_market_search(
             details={
                 "source": "DOM_PLAYWRIGHT",
                 "selector": selector_used,
+                "visible_position": visible_position + 1,
                 "expected": search_text,
                 "actual": actual_value,
             },
         )
 
-    await page.wait_for_timeout(120)
-    await _log(logger, "MARKET_SEARCH_FILLED", f"{selector_used} = {search_text}")
+    await page.wait_for_timeout(250)
+    await _log(
+        logger,
+        "MARKET_SEARCH_FILLED",
+        (
+            f"{selector_used}:visible:nth({visible_position}) = {search_text}; "
+            "waiting for DOM/canvas render"
+        ),
+    )
     return selector_used
 
 
