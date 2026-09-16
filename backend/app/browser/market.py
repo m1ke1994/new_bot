@@ -824,6 +824,19 @@ async def _read_next_goal_odds_canvas(
         "ocr_backends": analysis.get("ocr_backends"),
         "canvas": analysis.get("canvas"),
     }
+    if mapping:
+        await _log(
+            logger,
+            "CANVAS_ANALYSIS_RESULT",
+            (
+                f"status={analysis.get('status')}; "
+                f"stability={analysis.get('stability')}; "
+                f"goal={mapping.get('next_goal_number')}; "
+                f"team1={(mapping.get('team1') or {}).get('value')}; "
+                f"team2={(mapping.get('team2') or {}).get('value')}; "
+                f"expected_goal={next_goal_number}"
+            ),
+        )
     if analysis.get("status") != "CANVAS_ANALYZED" or not mapping:
         raise MarketNotAvailable(
             "Canvas распознан, но коэффициенты нужного рынка не сопоставлены.",
@@ -849,6 +862,8 @@ async def _read_next_goal_odds_canvas(
                 **canvas_details,
                 "recognized_goal_number": recognized_goal,
                 "expected_goal_number": next_goal_number,
+                "recognized_team1": (mapping.get("team1") or {}).get("value"),
+                "recognized_team2": (mapping.get("team2") or {}).get("value"),
             },
         )
 
