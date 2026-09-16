@@ -2219,7 +2219,7 @@ class DemoEngine:
         blocked_selected_side: Scorer | None = None,
         demo_blocked_window: DemoBlockedWindow | None = None,
     ):
-        """Wait for current DOM odds without losing the active match or score."""
+        """Wait for current next-goal odds via DOM with Canvas Vision fallback."""
         attempt = 0
         while not self._stop_event.is_set():
             attempt += 1
@@ -2259,12 +2259,12 @@ class DemoEngine:
                 )
             await self._status(
                 DemoStatus.WAITING_FOR_MARKET,
-                f"Ждём DOM-рынок следующего гола №{next_goal_number}",
+                f"Ждём рынок следующего гола №{next_goal_number} (DOM / Canvas Vision)",
                 "WAITING_FOR_MARKET",
             )
             await STATE.update(
                 market_reader={
-                    "source": "DOM / Playwright",
+                    "source": "HYBRID / DOM + Canvas Vision",
                     "status": "READING",
                     "attempt": attempt,
                     "next_goal_number": next_goal_number,
@@ -2275,7 +2275,7 @@ class DemoEngine:
                     "team1": None,
                     "team2": None,
                     "market": f"Следующий гол №{next_goal_number}",
-                    "source": "DOM_PLAYWRIGHT",
+                    "source": None,
                     "backend": None,
                     "confidence": None,
                     "status": "WAITING_FOR_MARKET",

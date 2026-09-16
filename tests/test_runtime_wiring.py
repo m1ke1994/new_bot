@@ -9,6 +9,13 @@ class RuntimeWiringTests(unittest.TestCase):
         self.assertNotIn("canvas_aware_read_next_goal_odds", source)
         self.assertIn("from backend.app.demo.engine import ENGINE", source)
 
+    def test_next_goal_wait_state_is_hybrid_not_dom_only(self):
+        state_source = Path("backend/app/demo/state.py").read_text(encoding="utf-8")
+        engine_source = Path("backend/app/demo/engine.py").read_text(encoding="utf-8")
+        self.assertIn("HYBRID / DOM + Canvas Vision", state_source)
+        self.assertIn("Ждём рынок следующего гола", engine_source)
+        self.assertNotIn("Ждём DOM-рынок следующего гола", engine_source)
+
     def test_engine_uses_hybrid_market_reader(self):
         source = Path("backend/app/demo/engine.py").read_text(encoding="utf-8")
         self.assertIn("from backend.app.browser.market import (", source)
