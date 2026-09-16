@@ -110,6 +110,18 @@ def parse_odds(text: str) -> list[float]:
     return values
 
 
+def _parse_structural_odds(text: str) -> list[float]:
+    """Parse OCR odds, including a standalone integer such as ``2``."""
+    values = parse_odds(text)
+    if values:
+        return values
+    integer = re.fullmatch(r"\s*(\d{1,2})\s*", str(text))
+    if integer is None:
+        return []
+    value = float(integer.group(1))
+    return [value] if MIN_ODDS <= value <= MAX_ODDS else []
+
+
 def _tesseract_path() -> str | None:
     candidates = [
         RUNTIME_CONFIG.tesseract_cmd,
@@ -164,7 +176,7 @@ class CanvasVision:
         scores = getattr(result, "scores", None)
         if not texts:
             return None
-        values = parse_odds(texts[0])
+        values = _parse_structural_odds(texts[0])
         confidence = float(scores[0]) if scores else 0.0
         if len(values) != 1 or confidence < OCR_MIN_CONFIDENCE:
             return None
@@ -527,18 +539,10 @@ def _deduplicate_regions(regions: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _numeric_candidates(regions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     candidates = []
     for region in regions:
-        values = parse_odds(region["text"])
         # 1xBet may render a valid coefficient without a decimal separator
-        # (for example exactly ``2``). Keep the public parser strict, but allow
-        # a standalone integer OCR box as a structural market-row candidate.
-        # Outcome-label digits are filtered later by row geometry and the
-        # matching "Команда 1/2 - N-й гол" labels.
-        if not values:
-            integer = re.fullmatch(r"\s*(\d{1,2})\s*", str(region["text"]))
-            if integer is not None:
-                value = float(integer.group(1))
-                if MIN_ODDS <= value <= MAX_ODDS:
-                    values = [value]
+        # (for example exactly ``2``). Outcome-label digits are filtered later
+        # by row geometry and matching team/goal labels.
+        values = _parse_structural_odds(region["text"])
         for value in values:
             candidates.append(
                 {
@@ -778,16 +782,16 @@ async def analyze_market_canvas(page, *, extended: bool = False) -> dict[str, An
 
 async def read_market_odds_from_canvas(page) -> dict[str, Any]:
     readings = []
-    for index in range(2):
-        extended = index > 0 and not readings[0]["ok"]
-        readings.append(await analyze_market_canvas(page, extended=extended))
-        if index < 1:
-            await page.wait_for_timeout(150)
-
     signatures = []
-    for item in readings:
+    # Two equal readings are required. If the fast first pass cannot map the
+    # market but the extended second pass can, perform one immediate cached
+    # confirmation instead of returning ODDS_UNSTABLE forever.
+    for index in range(3):
+        extended = bool(readings) and not any(item["ok"] for item in readings)
+        item = await analyze_market_canvas(page, extended=extended)
+        readings.append(item)
         mapping = item.get("next_goal_mapping") or {}
-        signatures.append(
+        signature = (
             (
                 round(float(mapping["team1"]["value"]), 3),
                 round(float(mapping["team2"]["value"]), 3),
@@ -796,6 +800,15 @@ async def read_market_odds_from_canvas(page) -> dict[str, Any]:
             if mapping
             else None
         )
+        signatures.append(signature)
+        confirmed = Counter(
+            value for value in signatures if value is not None
+        ).most_common(1)
+        if confirmed and confirmed[0][1] >= 2:
+            break
+        if index < 2:
+            await page.wait_for_timeout(150)
+
     confirmed = Counter(value for value in signatures if value is not None).most_common(1)
     stable = confirmed[0][0] if confirmed and confirmed[0][1] >= 2 else None
     selected = next(
