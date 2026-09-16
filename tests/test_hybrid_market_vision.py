@@ -2,6 +2,7 @@ import unittest
 
 from backend.app.browser.market import (
     CanvasCoefficientLocator,
+    _prepare_market_search,
     parse_next_goal_market_name,
 )
 
@@ -33,6 +34,72 @@ class HybridMarketVisionTests(unittest.TestCase):
         self.assertLess(position["y"], 250)
         self.assertGreater(position["x"], 0)
         self.assertGreater(position["y"], 0)
+
+
+class _FakeSearchLocator:
+    def __init__(self, kind, events):
+        self.kind = kind
+        self.events = events
+        self.first = self
+        self.value = ""
+
+    async def count(self):
+        return 1
+
+    async def is_visible(self):
+        return True
+
+    async def wait_for(self, **_kwargs):
+        self.events.append(f"{self.kind}:visible")
+
+    async def scroll_into_view_if_needed(self):
+        self.events.append(f"{self.kind}:scroll")
+
+    async def click(self):
+        self.events.append(f"{self.kind}:click")
+
+    async def fill(self, value):
+        self.value = value
+        self.events.append(f"{self.kind}:fill:{value}")
+
+    async def input_value(self):
+        return self.value
+
+
+class _FakeSearchPage:
+    def __init__(self):
+        self.events = []
+        self.button = _FakeSearchLocator("button", self.events)
+        self.market_input = _FakeSearchLocator("input", self.events)
+
+    def locator(self, selector):
+        if selector.startswith("button"):
+            return self.button
+        return self.market_input
+
+    async def wait_for_timeout(self, timeout):
+        self.events.append(f"page:wait:{timeout}")
+
+
+class MarketSearchFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_clicks_search_button_before_filling_market_input(self):
+        page = _FakeSearchPage()
+
+        selector = await _prepare_market_search(page, "следующий гол")
+
+        self.assertEqual(
+            selector,
+            'input.ui-search-default__input[placeholder="Поиск по рынкам"]',
+        )
+        self.assertLess(
+            page.events.index("button:click"),
+            page.events.index("input:click"),
+        )
+        self.assertLess(
+            page.events.index("input:click"),
+            page.events.index("input:fill:следующий гол"),
+        )
+        self.assertEqual(page.market_input.value, "следующий гол")
 
 
 if __name__ == "__main__":
