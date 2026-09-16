@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover
     RapidOCR = None
 
 
-CANVAS_SELECTOR = SELECTORS.canvas
+CANVAS_SELECTOR = SELECTORS.canvas or "canvas.market-grid-canvas__canvas"
 MIN_ODDS = 1.01
 MAX_ODDS = 100.0
 OCR_MIN_CONFIDENCE = (
@@ -147,21 +147,30 @@ class CanvasVision:
         top = max(0, item["y"] - margin_y)
         right = min(width, item["x"] + item["width"] + margin_x)
         bottom = min(height, item["y"] + item["height"] + margin_y)
-        result = self.rapidocr(
-            image[top:bottom, left:right],
-            use_det=False,
-            use_cls=False,
-            use_rec=True,
-        )
-        if not result.txts:
+        try:
+            result = self.rapidocr(
+                image[top:bottom, left:right],
+                use_det=False,
+                use_cls=False,
+                use_rec=True,
+            )
+        except Exception as error:
+            self.rapidocr_error = (
+                f"CACHED_REC_FAILED: {type(error).__name__}: {error}"
+            )
             return None
-        values = parse_odds(result.txts[0])
-        confidence = float(result.scores[0]) if result.scores else 0.0
+
+        texts = getattr(result, "txts", None)
+        scores = getattr(result, "scores", None)
+        if not texts:
+            return None
+        values = parse_odds(texts[0])
+        confidence = float(scores[0]) if scores else 0.0
         if len(values) != 1 or confidence < OCR_MIN_CONFIDENCE:
             return None
         return {
             **item,
-            "text": result.txts[0],
+            "text": texts[0],
             "value": values[0],
             "confidence": round(confidence, 4),
             "engine": "RapidOCR",
@@ -254,21 +263,61 @@ class CanvasVision:
     ) -> list[dict[str, Any]]:
         if self.rapidocr is None:
             return []
-        result = self.rapidocr(image)
-        if result is None or result.txts is None:
+
+        try:
+            # RapidOCR 3.x mutates these flags on every call. Cached ROI
+            # recognition uses use_det=False, so a later call without explicit
+            # flags returns TextRecOutput (no boxes). Always restore the full
+            # detection + recognition pipeline for canvas layout analysis.
+            result = self.rapidocr(
+                image,
+                use_det=True,
+                use_cls=True,
+                use_rec=True,
+            )
+        except Exception as error:
+            self.rapidocr_error = (
+                f"FULL_OCR_FAILED: {type(error).__name__}: {error}"
+            )
             return []
+
+        if result is None:
+            self.rapidocr_error = "FULL_OCR_EMPTY: RapidOCR returned None"
+            return []
+
+        texts = getattr(result, "txts", None)
+        scores = getattr(result, "scores", None)
+        boxes = getattr(result, "boxes", None)
+        if texts is None or boxes is None:
+            self.rapidocr_error = (
+                "FULL_OCR_OUTPUT_INVALID: "
+                f"{type(result).__name__} has no boxes/txts; "
+                "expected RapidOCROutput"
+            )
+            return []
+
+        texts = list(texts)
+        boxes = list(boxes)
+        scores = list(scores or [])
+        item_count = min(len(texts), len(boxes))
+        if item_count == 0:
+            return []
+        if len(scores) < item_count:
+            scores.extend([0.0] * (item_count - len(scores)))
+
+        self.rapidocr_error = None
         return [
             self._box_dict(
-                text,
-                score,
-                box,
+                texts[index],
+                scores[index],
+                boxes[index],
                 "RapidOCR",
                 scale=scale,
                 offset_y=offset_y,
                 variant=variant,
             )
-            for text, score, box in zip(result.txts, result.scores, result.boxes, strict=True)
-            if str(text).strip()
+            for index in range(item_count)
+            if str(texts[index]).strip()
         ]
 
     def _tesseract_regions(
