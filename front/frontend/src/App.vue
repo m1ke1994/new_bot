@@ -78,7 +78,7 @@ const state = ref({
 
   ocr: { status: 'NOT_USED_FOR_NEXT_GOAL', attempt: 0, max_attempts: 0, candidates: [] },
 
-  market_reader: { source: 'DOM / Playwright', status: 'WAITING', attempt: 0 },
+  market_reader: { source: null, status: 'WAITING', attempt: 0 },
 
   bet: { step: 0, max_steps: 7 },
 
@@ -563,6 +563,24 @@ const lastChange = computed(() => state.value.last_change || {})
 const scanner = computed(() => state.value.scanner || {})
 
 const marketReader = computed(() => state.value.market_reader || {})
+
+const marketSource = computed(() => state.value.odds?.source || marketReader.value.source || null)
+
+const marketBackend = computed(() => state.value.odds?.backend || state.value.odds?.ocr_backend || null)
+
+const marketConfidence = computed(() => {
+  const value = Number(state.value.odds?.confidence)
+  if (!Number.isFinite(value)) return null
+  const normalized = value <= 1 ? value * 100 : value
+  return `${Math.round(normalized)}%`
+})
+
+const marketReadDescription = computed(() => {
+  const source = String(marketSource.value || '').toUpperCase()
+  if (source.includes('CANVAS')) return 'Коэффициенты распознаются машинным зрением по Canvas; DOM используется для навигации и как резервный источник.'
+  if (source.includes('DOM')) return 'Коэффициенты прочитаны из DOM.'
+  return 'Ожидаем источник коэффициентов.'
+})
 
 const budget = computed(() => state.value.budget || {})
 
@@ -1286,7 +1304,7 @@ onBeforeUnmount(() => {
 
                 <span>ИСТОЧНИК</span>
 
-                <strong>{{ show(marketReader.source, 'DOM / Playwright') }}</strong>
+                <strong>{{ show(marketSource, 'Ожидаем данные') }}</strong>
 
               </div>
 
@@ -1295,6 +1313,14 @@ onBeforeUnmount(() => {
                 <span>СТАТУС РЫНКА</span>
 
                 <strong>{{ show(marketReader.status, state.odds?.status) }}</strong>
+
+              </div>
+
+              <div v-if="marketBackend || marketConfidence">
+
+                <span>МАШИННОЕ ЗРЕНИЕ</span>
+
+                <strong>{{ show(marketBackend, 'OCR') }} · {{ show(marketConfidence) }}</strong>
 
               </div>
 
@@ -1310,9 +1336,9 @@ onBeforeUnmount(() => {
 
                 <span>ЧТЕНИЕ</span>
 
-                <strong>{{ show(marketReader.source, 'DOM / Playwright') }} · попытка {{ marketReader.attempt || 0 }}</strong>
+                <strong>{{ show(marketSource, 'WAITING') }} · попытка {{ marketReader.attempt || 0 }}</strong>
 
-                <small>Рынки читаются напрямую через Playwright DOM.</small>
+                <small>{{ marketReadDescription }}</small>
 
               </div>
 
