@@ -527,7 +527,19 @@ def _deduplicate_regions(regions: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _numeric_candidates(regions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     candidates = []
     for region in regions:
-        for value in parse_odds(region["text"]):
+        values = parse_odds(region["text"])
+        # 1xBet may render a valid coefficient without a decimal separator
+        # (for example exactly ``2``). Keep the public parser strict, but allow
+        # a standalone integer OCR box as a structural market-row candidate.
+        # Outcome-label digits are filtered later by row geometry and the
+        # matching "Команда 1/2 - N-й гол" labels.
+        if not values:
+            integer = re.fullmatch(r"\s*(\d{1,2})\s*", str(region["text"]))
+            if integer is not None:
+                value = float(integer.group(1))
+                if MIN_ODDS <= value <= MAX_ODDS:
+                    values = [value]
+        for value in values:
             candidates.append(
                 {
                     **region,
