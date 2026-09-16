@@ -85,6 +85,7 @@ class _TwoSearchInputsPage:
         self.events = []
         self.upper_input = _FakeSearchElement("upper-input", self.events)
         self.market_input = _FakeSearchElement("market-input", self.events)
+        self.canvas = _FakeSearchElement("canvas", self.events)
 
     def locator(self, selector):
         if selector.startswith(".game-panel__markets") or selector.startswith(
@@ -93,6 +94,8 @@ class _TwoSearchInputsPage:
             return _FakeSearchCollection([])
         if selector.startswith("input"):
             return _FakeSearchCollection([self.upper_input, self.market_input])
+        if selector == "canvas.market-grid-canvas__canvas":
+            return _FakeSearchCollection([self.canvas])
         return _FakeSearchCollection([])
 
     async def wait_for_timeout(self, timeout):
@@ -147,6 +150,27 @@ class MarketSearchFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(page.upper_input.value, "")
         self.assertEqual(page.market_input.value, "следующий гол")
+
+    async def test_existing_search_keeps_rendered_canvas_stable(self):
+        page = _TwoSearchInputsPage()
+        page.market_input.value = "следующий гол"
+        logger = AsyncMock()
+
+        selector = await _prepare_market_search(
+            page,
+            "следующий гол",
+            logger,
+        )
+
+        self.assertEqual(selector, "input.ui-search-default__input")
+        self.assertNotIn("market-input:click", page.events)
+        self.assertFalse(
+            any(event.startswith("market-input:fill") for event in page.events)
+        )
+        self.assertIn(
+            "MARKET_SEARCH_REUSED",
+            [call.args[0] for call in logger.await_args_list],
+        )
 
 
 class NextGoalDemoSearchTests(unittest.IsolatedAsyncioTestCase):
