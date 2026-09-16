@@ -11,6 +11,7 @@ from backend.app.routes.demo import router as demo_router
 from backend.app.routes.live import router as live_router
 from backend.app.routes.table_tennis import router as table_tennis_router
 from backend.app.table_tennis.forks_scanner import TABLE_TENNIS_SCANNER
+from xbet_config import URL_CONFIG
 
 
 @asynccontextmanager
@@ -32,7 +33,7 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_origins=list(URL_CONFIG.backend_cors_origins),
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
@@ -49,4 +50,9 @@ async def health():
 
 
 if __name__ == "__main__":
-    uvicorn.run("backend.app.main:app", host="127.0.0.1", port=8000, reload=False)
+    uvicorn.run(
+        "backend.app.main:app",
+        host=URL_CONFIG.backend_host,
+        port=URL_CONFIG.backend_port,
+        reload=False,
+    )

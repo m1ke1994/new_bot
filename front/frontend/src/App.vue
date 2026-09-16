@@ -2,6 +2,8 @@
 
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
+import { apiUrl } from './config'
+
 const emptyStats = {
 
   matches_processed: 0,
@@ -136,7 +138,7 @@ let refreshInFlight = false
 
 async function api(path, options = {}) {
 
-  const response = await fetch(path, {
+  const response = await fetch(apiUrl(path), {
 
     cache: 'no-store',
 

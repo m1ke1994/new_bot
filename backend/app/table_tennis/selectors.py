@@ -1,10 +1,12 @@
 """Stable table-tennis DOM selectors. Vue data-v-* attributes are forbidden."""
 
+from xbet_config import URL_CONFIG
+
 LEAGUE_ITEM_SELECTOR = ".dashboard-champ-item"
 LEAGUE_GROUP_SELECTOR = ".dashboard-champ-group-item"
 LEAGUE_LINK_SELECTOR = (
-    '.dashboard-champ-item a.dashboard-champ-item-template__link[href*="/ru/live/table-tennis/"], '
-    '.dashboard-champ-group-item a.dashboard-champ-item-template__link[href*="/ru/live/table-tennis/"]'
+    f'.dashboard-champ-item a.dashboard-champ-item-template__link[href*="{URL_CONFIG.table_tennis_root_path}/"], '
+    f'.dashboard-champ-group-item a.dashboard-champ-item-template__link[href*="{URL_CONFIG.table_tennis_root_path}/"]'
 )
 LEAGUE_TITLE_SELECTOR = ".dashboard-champ-item-template-title__title"
 LEAGUE_GAMES_COUNT_SELECTOR = ".dashboard-champ-games-count"

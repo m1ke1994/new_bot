@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { apiUrl } from '../config'
 
 const state = ref({ status: 'IDLE', scanning: false, browser: { status: 'CLOSED' } })
 const matches = ref([])
@@ -13,7 +14,7 @@ const liveMatchesOpen = ref(true)
 let poll = null
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(apiUrl(path), {
     cache: 'no-store',
     headers: { 'Content-Type': 'application/json' },
     ...options,

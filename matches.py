@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from playwright.async_api import Locator, Page
 
 from auth import authorize
-from xbet_config import get_xbet_url, XBET_LEAGUE_PATH
+from xbet_config import URL_CONFIG
 
 
 # ============================================================
@@ -19,7 +19,7 @@ from xbet_config import get_xbet_url, XBET_LEAGUE_PATH
 
 load_dotenv()
 
-MATCHES_URL = get_xbet_url(XBET_LEAGUE_PATH)
+MATCHES_URL = URL_CONFIG.next_goal_league_url
 
 LEAGUE_NAME = os.getenv(
     "XBET_LEAGUE_NAME",

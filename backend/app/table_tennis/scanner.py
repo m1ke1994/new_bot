@@ -11,7 +11,11 @@ from playwright.async_api import Locator, Page, TimeoutError as PlaywrightTimeou
 
 from auth import authorize
 from backend.app.browser.manager import BROWSER_MANAGER, BrowserManager
-from xbet_config import get_table_tennis_odds_poll_interval, get_table_tennis_url
+from xbet_config import (
+    URL_CONFIG,
+    get_table_tennis_odds_poll_interval,
+    get_table_tennis_url,
+)
 
 from .models import TableTennisLeague, TableTennisMatch, TableTennisObservation
 from .monitoring import (
@@ -45,9 +49,12 @@ from .selectors import (
 from .state import TABLE_TENNIS_STATE, TableTennisStateStore, utc_now
 
 
-LEAGUE_PATH_RE = re.compile(r"^/ru/live/table-tennis/(\d+)(?:-[^/?#]+)?/?$")
+TABLE_TENNIS_PATH_PATTERN = re.escape(URL_CONFIG.table_tennis_root_path)
+LEAGUE_PATH_RE = re.compile(
+    rf"^{TABLE_TENNIS_PATH_PATTERN}/(\d+)(?:-[^/?#]+)?/?$"
+)
 EVENT_PATH_RE = re.compile(
-    r"^/ru/live/table-tennis/\d+(?:-[^/?#]+)?/(\d+)(?:-[^/?#]+)?/?$"
+    rf"^{TABLE_TENNIS_PATH_PATTERN}/\d+(?:-[^/?#]+)?/(\d+)(?:-[^/?#]+)?/?$"
 )
 
 
@@ -460,7 +467,9 @@ class TableTennisScanner:
 
         table_tennis_url = get_table_tennis_url()
         if not table_tennis_url:
-            raise TableTennisScanError("TABLE_TENNIS_URL отсутствует в .env")
+            raise TableTennisScanError(
+                "XBET_URL или XBET_TABLE_TENNIS_PATH отсутствует в .env"
+            )
         return page, table_tennis_url
 
     async def _scan_catalog(

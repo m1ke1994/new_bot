@@ -51,15 +51,16 @@ FastAPI. `POST /api/demo/stop` останавливает только worker; �
 Управление браузером:
 
 ```http
-GET  http://127.0.0.1:8000/api/browser/state
-POST http://127.0.0.1:8000/api/browser/start
-POST http://127.0.0.1:8000/api/browser/stop
+GET  /api/browser/state
+GET  /api/browser/config-check
+POST /api/browser/start
+POST /api/browser/stop
 ```
 
 Диагностика текущего canvas:
 
 ```http
-POST http://127.0.0.1:8000/api/browser/market-canvas-debug
+POST /api/browser/market-canvas-debug
 ```
 
 Снимки сохраняются в `backend/diagnostics/canvas/`. Используется только

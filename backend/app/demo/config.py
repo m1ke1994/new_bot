@@ -4,7 +4,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from xbet_config import get_xbet_url, XBET_LEAGUE_PATH
+from xbet_config import URL_CONFIG
 
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -14,7 +14,7 @@ load_dotenv(ROOT_DIR / ".env")
 @dataclass(frozen=True)
 class DemoConfig:
     mode: str = os.getenv("BET_MODE", "DEMO").strip().upper()
-    league_url: str = get_xbet_url(XBET_LEAGUE_PATH)
+    league_url: str = URL_CONFIG.next_goal_league_url
     league_name: str = os.getenv(
         "XBET_LEAGUE_NAME",
         "FC 25. 3x3. Лига Конференций",

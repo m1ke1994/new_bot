@@ -6,12 +6,12 @@ from typing import Any
 from dotenv import load_dotenv
 from playwright.async_api import Page
 
-from xbet_config import get_xbet_url
+from xbet_config import URL_CONFIG
 
 
 load_dotenv()
 
-SITE_URL = get_xbet_url()
+SITE_URL = URL_CONFIG.xbet_url
 BALANCE_SELECTOR = ".balance__currency"
 BALANCE_CURRENCY = "RUB"
 

@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from backend.app.browser.manager import BROWSER_MANAGER
 from backend.app.demo.engine import ENGINE
+from xbet_config import URL_CONFIG
 
 
 router = APIRouter(prefix="/api/browser", tags=["browser"])
@@ -22,6 +23,12 @@ async def browser_stop():
 @router.get("/state")
 async def browser_state():
     return await BROWSER_MANAGER.snapshot()
+
+
+@router.get("/config-check")
+async def browser_config_check():
+    """Expose public URL diagnostics without credentials or tokens."""
+    return {"ok": True, **URL_CONFIG.public_dict()}
 
 
 @router.post("/market-canvas-debug")
