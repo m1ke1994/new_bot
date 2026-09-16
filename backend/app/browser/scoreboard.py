@@ -3,13 +3,14 @@ import re
 from playwright.async_api import Locator, Page
 
 from backend.app.demo.models import Score, ScoreboardSnapshot
+from xbet_config import SELECTORS
 
 
-SCOREBOARD_ROOT_SELECTOR = ".scoreboard-layout-head__footer"
-TEAM_SELECTOR = ".scoreboard-intro__team"
-TEAM_1_SCORE_SELECTOR = ".scoreboard-scores__item--team-1"
-TEAM_2_SCORE_SELECTOR = ".scoreboard-scores__item--team-2"
-TIMER_SELECTOR = ".scoreboard-timer span"
+SCOREBOARD_ROOT_SELECTOR = SELECTORS.scoreboard_root
+TEAM_SELECTOR = SELECTORS.scoreboard_team
+TEAM_1_SCORE_SELECTOR = SELECTORS.scoreboard_team_1_score
+TEAM_2_SCORE_SELECTOR = SELECTORS.scoreboard_team_2_score
+TIMER_SELECTOR = SELECTORS.scoreboard_timer
 
 _last_debug_scoreboard: tuple[str, str, int, int] | None = None
 

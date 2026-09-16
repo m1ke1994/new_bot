@@ -1,33 +1,22 @@
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from dotenv import load_dotenv
-
-from xbet_config import URL_CONFIG
+from xbet_config import RUNTIME_CONFIG, URL_CONFIG
 
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
-load_dotenv(ROOT_DIR / ".env")
 
 
 @dataclass(frozen=True)
 class DemoConfig:
-    mode: str = os.getenv("BET_MODE", "DEMO").strip().upper()
+    mode: str = RUNTIME_CONFIG.bet_mode
     league_url: str = URL_CONFIG.next_goal_league_url
-    league_name: str = os.getenv(
-        "XBET_LEAGUE_NAME",
-        "FC 25. 3x3. Лига Конференций",
-    ).strip()
-    score_poll_interval: float = float(
-        os.getenv("SCORE_POLL_INTERVAL", "0.20")
-    )
-    league_retry_interval: float = float(
-        os.getenv("MATCH_MONITOR_INTERVAL", "2")
-    )
-    ocr_max_attempts: int = int(os.getenv("OCR_MAX_ATTEMPTS", "5"))
-    ocr_retry_delay: float = float(os.getenv("OCR_RETRY_DELAY", "0.7"))
-    ocr_min_confidence: float = float(os.getenv("OCR_MIN_CONFIDENCE", "0.55"))
+    league_name: str = RUNTIME_CONFIG.league_name
+    score_poll_interval: float = RUNTIME_CONFIG.score_poll_interval
+    league_retry_interval: float = RUNTIME_CONFIG.match_monitor_interval
+    ocr_max_attempts: int = RUNTIME_CONFIG.ocr_max_attempts
+    ocr_retry_delay: float = RUNTIME_CONFIG.ocr_retry_delay
+    ocr_min_confidence: float = RUNTIME_CONFIG.ocr_min_confidence
     data_dir: Path = ROOT_DIR / "backend" / "data"
 
     def validate(self) -> None:

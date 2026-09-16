@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import re
 import shutil
 import time
@@ -14,6 +13,7 @@ from typing import Any
 import numpy as np
 
 from backend.app.demo.config import CONFIG, ROOT_DIR
+from xbet_config import RUNTIME_CONFIG, SELECTORS
 
 try:
     import cv2
@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover
     RapidOCR = None
 
 
-CANVAS_SELECTOR = "canvas.market-grid-canvas__canvas"
+CANVAS_SELECTOR = SELECTORS.canvas
 MIN_ODDS = 1.01
 MAX_ODDS = 100.0
 OCR_MIN_CONFIDENCE = (
@@ -112,7 +112,7 @@ def parse_odds(text: str) -> list[float]:
 
 def _tesseract_path() -> str | None:
     candidates = [
-        os.getenv("TESSERACT_CMD", "").strip(),
+        RUNTIME_CONFIG.tesseract_cmd,
         shutil.which("tesseract") or "",
         r"C:\Program Files\Tesseract-OCR\tesseract.exe",
         r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",

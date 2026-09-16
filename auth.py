@@ -3,17 +3,15 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
 from playwright.async_api import Page
 
-from xbet_config import URL_CONFIG
+from xbet_config import SELECTORS, TEXTS, URL_CONFIG
 
 
-load_dotenv()
-
-SITE_URL = URL_CONFIG.xbet_url
-BALANCE_SELECTOR = ".balance__currency"
-BALANCE_CURRENCY = "RUB"
+SITE_URL = URL_CONFIG.login_url
+# Compatibility names remain public; their values now come only from .env.
+BALANCE_SELECTOR = SELECTORS.auth_marker
+BALANCE_CURRENCY = TEXTS.auth_marker
 
 BASE_DIR = Path(__file__).resolve().parent
 PROFILE_DIR = BASE_DIR / "browser_profile"

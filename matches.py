@@ -4,38 +4,25 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
-from dotenv import load_dotenv
 from playwright.async_api import Locator, Page
 
 from auth import authorize
-from xbet_config import URL_CONFIG
+from xbet_config import RUNTIME_CONFIG, SELECTORS, URL_CONFIG, build_match_url
 
 
 # ============================================================
 # ENV / CONFIG
 # ============================================================
 
-load_dotenv()
-
 MATCHES_URL = URL_CONFIG.next_goal_league_url
-
-LEAGUE_NAME = os.getenv(
-    "XBET_LEAGUE_NAME",
-    "FC 25. 3x3. Лига Конференций",
-).strip()
-
-MONITOR_INTERVAL = float(
-    os.getenv("MATCH_MONITOR_INTERVAL", "2")
-)
+LEAGUE_NAME = RUNTIME_CONFIG.league_name
+MONITOR_INTERVAL = RUNTIME_CONFIG.match_monitor_interval
 
 BASE_DIR = Path(__file__).resolve().parent
 
-front_file_env = os.getenv(
-    "MATCHES_FRONT_FILE",
-    "front/frontend/public/matches.json",
-).strip()
+front_file_env = RUNTIME_CONFIG.matches_front_file
 
 FRONT_FILE = Path(front_file_env)
 if not FRONT_FILE.is_absolute():
@@ -46,15 +33,15 @@ if not FRONT_FILE.is_absolute():
 # SELECTORS
 # ============================================================
 
-MATCH_SELECTOR = "article.ui-game-card"
-TEAM_SELECTOR = ".ui-game-card-scoreboard__name"
-TIME_SELECTOR = ".ui-game-card__data"
-PERIOD_SELECTOR = ".ui-game-card__period"
-MARKET_SELECTOR = "button.game-card-market"
-MARKET_NAME_SELECTOR = ".ui-market__name"
-MARKET_VALUE_SELECTOR = ".ui-market__value"
-MATCH_LINK_SELECTOR = "a.ui-game-card__link"
-SCORE_SELECTOR = ".ui-game-card-scoreboard__score"
+MATCH_SELECTOR = SELECTORS.game_card
+TEAM_SELECTOR = SELECTORS.team_name
+TIME_SELECTOR = SELECTORS.match_time
+PERIOD_SELECTOR = SELECTORS.match_period
+MARKET_SELECTOR = SELECTORS.match_market
+MARKET_NAME_SELECTOR = SELECTORS.market_name
+MARKET_VALUE_SELECTOR = SELECTORS.market_value
+MATCH_LINK_SELECTOR = SELECTORS.match_link
+SCORE_SELECTOR = SELECTORS.score
 
 LEAGUE_PATH = urlparse(MATCHES_URL).path.rstrip("/")
 LEAGUE_MATCH_HREF_FRAGMENT = f"{LEAGUE_PATH}/"
@@ -140,11 +127,7 @@ def league_match_links(scope: Page | Locator) -> Locator:
 
 
 def match_card_for_link(link: Locator) -> Locator:
-    return link.locator(
-        "xpath=ancestor::article["
-        "contains(concat(' ', normalize-space(@class), ' '), ' ui-game-card ')"
-        "][1]"
-    ).first
+    return link.locator(SELECTORS.match_card_ancestor_xpath).first
 
 
 def exact_match_link_selector(href: str) -> str:
@@ -181,7 +164,7 @@ async def find_league_container(page: Page):
         log(f"Открыт другой путь: {current_path or '/'}")
         return None
 
-    container = page.locator("body")
+    container = page.locator(SELECTORS.page_body)
     await container.wait_for(state="attached", timeout=10_000)
     return container
 
@@ -303,7 +286,7 @@ async def parse_match(game, number: int):
     href = await get_match_href(game)
     match_id = get_match_id(href)
 
-    match_url = urljoin(MATCHES_URL, href) if href else None
+    match_url = build_match_url(href) if href else None
 
     print(f"[MATCH] {team1} — {team2}")
     print(f"[MATCH] URL: {match_url or '<не найден>'}")
