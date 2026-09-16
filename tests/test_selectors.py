@@ -38,11 +38,14 @@ from matches import (
 
 class SelectorTests(unittest.TestCase):
     def test_league_card_selectors_match_confirmed_dom(self):
-        self.assertEqual(MATCH_LINK_SELECTOR, "a.ui-game-card__link")
-        self.assertEqual(TEAM_SELECTOR, ".ui-game-card-scoreboard__name")
-        self.assertEqual(TIME_SELECTOR, ".ui-game-card__data")
-        self.assertEqual(PERIOD_SELECTOR, ".ui-game-card__period")
-        self.assertEqual(SCORE_SELECTOR, ".ui-game-card-scoreboard__score")
+        self.assertEqual(MATCH_LINK_SELECTOR, "a.dashboard-game-block__link")
+        self.assertEqual(TEAM_SELECTOR, ".dashboard-game-team-info__name")
+        self.assertEqual(TIME_SELECTOR, ".dashboard-game-info__time")
+        self.assertEqual(PERIOD_SELECTOR, ".dashboard-game-info__period")
+        self.assertEqual(
+            SCORE_SELECTOR,
+            ".ui-game-scores__item--total .ui-game-scores__num",
+        )
 
     def test_match_links_are_limited_to_configured_league(self):
         self.assertTrue(
