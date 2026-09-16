@@ -116,14 +116,10 @@ class UrlConfigTests(unittest.IsolatedAsyncioTestCase):
         app_source = (root / "front/frontend/src/App.vue").read_text(
             encoding="utf-8"
         )
-        forks_source = (
-            root / "front/frontend/src/views/ForksView.vue"
-        ).read_text(encoding="utf-8")
 
         self.assertIn("import.meta.env.VITE_API_BASE_URL", config_source)
         self.assertIn("fetch(apiUrl(path)", app_source)
-        self.assertIn("fetch(apiUrl(path)", forks_source)
-        self.assertNotIn("127.0.0.1", config_source + app_source + forks_source)
+        self.assertNotIn("127.0.0.1", config_source + app_source)
 
 
 if __name__ == "__main__":

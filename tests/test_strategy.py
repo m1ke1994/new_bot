@@ -21,12 +21,15 @@ from backend.app.demo.strategy import (
 
 
 class StrategyTests(unittest.TestCase):
-    def test_strategy_type_defaults_to_next_goal_and_accepts_total_even(self):
+    def test_strategy_type_defaults_to_next_goal_and_rejects_removed_total_even(self):
         self.assertEqual(StrategyConfig.from_payload({}).strategy_type, StrategyType.NEXT_GOAL)
         self.assertEqual(
-            StrategyConfig.from_payload({"strategy_type": "TOTAL_EVEN"}).strategy_type,
-            StrategyType.TOTAL_EVEN,
+            StrategyConfig.from_payload({"strategy_type": "FIRST_HALF_DRAW"}).strategy_type,
+            StrategyType.FIRST_HALF_DRAW,
         )
+        with self.assertRaises(ValueError):
+            StrategyConfig.from_payload({"strategy_type": "TOTAL_EVEN"})
+
 
     def test_match_filter_flags_default_to_enabled(self):
         config = StrategyConfig.from_payload({})

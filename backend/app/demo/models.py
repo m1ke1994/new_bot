@@ -104,15 +104,6 @@ class NextGoalOdds:
 
 
 @dataclass(frozen=True)
-class TotalEvenMarket:
-    odds: float
-    market: str = "Тотал чёт"
-    selection: str = "Да"
-    source: str = "DOM_PLAYWRIGHT"
-    locator: Any | None = None
-
-
-@dataclass(frozen=True)
 class FirstHalfDrawMarket:
     odds: float
     market: str = "1X2. 1-й тайм"

@@ -336,7 +336,6 @@ async function selectStrategyType(strategyType) {
 
   strategyConfig.value.strategy_type = strategyType
 
-  if (strategyType === 'TOTAL_EVEN') selectedMode.value = 'DEMO'
 
   pendingAction.value = 'save-strategy-type'
 
@@ -394,13 +393,6 @@ async function startMode(mode) {
 
   if (state.value.running || actionPending.value) return
 
-  if (mode === 'LIVE' && strategyConfig.value.strategy_type === 'TOTAL_EVEN') {
-
-    backendError.value = 'Стратегия «Тотал чёт» пока доступна только в DEMO.'
-
-    return
-
-  }
 
   selectedMode.value = mode
 
@@ -554,7 +546,6 @@ const stats = computed(() => ({ ...emptyStats, ...(state.value.stats || {}) }))
 
 const strategyComparison = computed(() => ([
   ['Следующий гол', state.value.stats?.by_strategy?.NEXT_GOAL || emptyStats],
-  ['Тотал чёт', state.value.stats?.by_strategy?.TOTAL_EVEN || emptyStats],
   ['Ничья — 1-й тайм', state.value.stats?.by_strategy?.FIRST_HALF_DRAW || emptyStats],
 ]))
 
@@ -590,10 +581,6 @@ const strategyPresentation = {
   NEXT_GOAL: {
     name: 'Следующий гол',
     description: 'Ставка на следующий гол выбранной команды.',
-  },
-  TOTAL_EVEN: {
-    name: 'Тотал чёт',
-    description: 'Ставка на «Тотал чёт — Да». Результат зависит от чётности общего количества голов.',
   },
   FIRST_HALF_DRAW: {
     name: 'Ничья — 1-й тайм',
@@ -827,7 +814,7 @@ onBeforeUnmount(() => {
 
         <button
           class="button button-danger"
-          :disabled="!canStart || strategyConfig.strategy_type === 'TOTAL_EVEN'"
+          :disabled="!canStart"
           @click="startMode('LIVE')"
         >
           {{ pendingAction === 'start' && selectedMode === 'LIVE'
@@ -962,14 +949,6 @@ onBeforeUnmount(() => {
 
             </label>
 
-            <label :class="['strategy-option', { selected: strategyConfig.strategy_type === 'TOTAL_EVEN' }]">
-
-              <input type="checkbox" :checked="strategyConfig.strategy_type === 'TOTAL_EVEN'" :disabled="state.running || actionPending" @click.prevent="selectStrategyType('TOTAL_EVEN')">
-
-              <span><strong>Тотал чёт</strong><small>Только DEMO</small></span>
-
-            </label>
-
             <label :class="['strategy-option', { selected: strategyConfig.strategy_type === 'FIRST_HALF_DRAW' }]">
 
               <input type="checkbox" :checked="strategyConfig.strategy_type === 'FIRST_HALF_DRAW'" :disabled="state.running || actionPending" @click.prevent="selectStrategyType('FIRST_HALF_DRAW')">
@@ -977,14 +956,6 @@ onBeforeUnmount(() => {
               <span><strong>Ничья — 1-й тайм</strong><small>DEMO и LIVE · расчёт после окончания тайма</small></span>
 
             </label>
-
-            <RouterLink class="strategy-option forks-strategy-option" to="/forks">
-
-              <span class="forks-strategy-icon">TT</span>
-
-              <span><strong>Вилки</strong><small>Настольный теннис</small></span>
-
-            </RouterLink>
 
           </div>
 
@@ -1324,7 +1295,7 @@ onBeforeUnmount(() => {
 
               </div>
 
-              <div v-if="!isFirstHalfDraw && state.strategy_type !== 'TOTAL_EVEN'">
+              <div v-if="!isFirstHalfDraw">
 
                 <span>СЛЕДУЮЩИЙ ГОЛ</span>
 
