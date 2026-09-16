@@ -136,7 +136,7 @@ class CanvasVisionTests(unittest.TestCase):
         )
 
         vision = CanvasVision()
-        regions = vision._rapid_regions(image)
+        regions = vision._detect(image)
         odds = [
             value
             for region in regions
