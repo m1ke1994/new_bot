@@ -23,7 +23,11 @@ from .state import TABLE_TENNIS_STATE, TableTennisStateStore
 #   Party 2     752178210-pavel-mukhin-igor-egorov-v
 # The player slug and league stay the same. Treat this as the same pinned match,
 # otherwise the old strict event-id guard reloads the main event forever.
-_EVENT_SEGMENT_RE = re.compile(r"^(\d+)(?:-(.+))?$")
+#
+# Real event ids are long numeric identifiers. Requiring at least six digits is
+# intentional: a trailing route such as ``/2-partiya`` must not be mistaken for
+# event_id=2 when walking URL segments from right to left.
+_EVENT_SEGMENT_RE = re.compile(r"^(\d{6,})(?:-(.+))?$")
 _PARTY_ALIAS_ACCEPT_WINDOW_SECONDS = 30.0
 _MARKET_RENDER_GRACE_SECONDS = 10.0
 _MARKET_RENDER_POLL_SECONDS = 0.25
