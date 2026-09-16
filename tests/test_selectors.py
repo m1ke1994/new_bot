@@ -2,10 +2,15 @@ import unittest
 
 from backend.app.browser.scoreboard import (
     SCOREBOARD_ROOT_SELECTOR,
+    SCOREBOARD_ROOT_SELECTORS,
     TEAM_1_SCORE_SELECTOR,
+    TEAM_1_SCORE_SELECTORS,
     TEAM_2_SCORE_SELECTOR,
+    TEAM_2_SCORE_SELECTORS,
     TEAM_SELECTOR as SCOREBOARD_TEAM_SELECTOR,
+    TEAM_SELECTORS as SCOREBOARD_TEAM_SELECTORS,
     TIMER_SELECTOR as SCOREBOARD_TIMER_SELECTOR,
+    TIMER_SELECTORS as SCOREBOARD_TIMER_SELECTORS,
     parse_timer_and_period,
 )
 from backend.app.browser.market import (
@@ -49,12 +54,32 @@ class SelectorTests(unittest.TestCase):
             is_league_match_href("/ru/live/fifa/another-league/749-test")
         )
 
-    def test_scoreboard_selectors_match_confirmed_dom(self):
-        self.assertEqual(SCOREBOARD_ROOT_SELECTOR, ".scoreboard-layout-head__footer")
-        self.assertEqual(SCOREBOARD_TIMER_SELECTOR, ".scoreboard-timer span")
-        self.assertEqual(SCOREBOARD_TEAM_SELECTOR, ".scoreboard-intro__team")
-        self.assertEqual(TEAM_1_SCORE_SELECTOR, ".scoreboard-scores__item--team-1")
-        self.assertEqual(TEAM_2_SCORE_SELECTOR, ".scoreboard-scores__item--team-2")
+    def test_scoreboard_selectors_support_both_confirmed_layouts(self):
+        self.assertIn(".scoreboard-layout-head__footer", SCOREBOARD_ROOT_SELECTORS)
+        self.assertIn(
+            ".scoreboard-compact-view-tab-panel__body",
+            SCOREBOARD_ROOT_SELECTORS,
+        )
+        self.assertIn(".scoreboard-intro__team", SCOREBOARD_TEAM_SELECTORS)
+        self.assertIn(".scoreboard-team-name__text", SCOREBOARD_TEAM_SELECTORS)
+        self.assertIn(
+            ".scoreboard-scores__item--team-1",
+            TEAM_1_SCORE_SELECTORS,
+        )
+        self.assertIn(
+            ".scoreboard-scores__score:not(.scoreboard-scores__score--team-2)",
+            TEAM_1_SCORE_SELECTORS,
+        )
+        self.assertIn(
+            ".scoreboard-scores__item--team-2",
+            TEAM_2_SCORE_SELECTORS,
+        )
+        self.assertIn(
+            ".scoreboard-scores__score--team-2",
+            TEAM_2_SCORE_SELECTORS,
+        )
+        self.assertIn(".scoreboard-timer span", SCOREBOARD_TIMER_SELECTORS)
+        self.assertIn(".ui-game-timer__label", SCOREBOARD_TIMER_SELECTORS)
 
     def test_live_timer_contains_period_and_upcoming_timer_does_not(self):
         self.assertEqual(
