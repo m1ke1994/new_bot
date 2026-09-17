@@ -59,10 +59,20 @@ TIMER_SELECTORS = _selector_candidates(
 
 _last_debug_scoreboard: tuple[str, str, int, int] | None = None
 _body_fallback_reported = False
+# Once a working selector is found we try it first on every 200ms score poll.
+# This removes repeated Playwright roundtrips across all fallback selectors.
+_selector_cache: dict[str, str] = {}
 
 
 class ScoreReadError(RuntimeError):
     pass
+
+
+async def _count(scope: Any, selector: str) -> int:
+    try:
+        return await scope.locator(selector).count()
+    except Exception:
+        return -1
 
 
 async def _find_locator(
@@ -71,9 +81,17 @@ async def _find_locator(
     *,
     minimum_count: int = 1,
     timeout_ms: int = 15_000,
+    cache_key: str | None = None,
 ) -> tuple[Locator, str]:
     if not selectors:
         raise ScoreReadError("Не настроены селекторы scoreboard.")
+
+    cached = _selector_cache.get(cache_key or "") if cache_key else None
+    if cached:
+        count = await _count(scope, cached)
+        if count >= minimum_count:
+            return scope.locator(cached), cached
+        _selector_cache.pop(cache_key, None)
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_ms / 1000
@@ -81,14 +99,12 @@ async def _find_locator(
 
     while True:
         for selector in selectors:
-            try:
-                locator = scope.locator(selector)
-                count = await locator.count()
-            except Exception:
-                count = -1
+            count = await _count(scope, selector)
             last_counts[selector] = count
             if count >= minimum_count:
-                return locator, selector
+                if cache_key:
+                    _selector_cache[cache_key] = selector
+                return scope.locator(selector), selector
 
         if loop.time() >= deadline:
             details = ", ".join(
@@ -97,26 +113,38 @@ async def _find_locator(
             raise ScoreReadError(
                 f"Scoreboard elements not found within {timeout_ms}ms: {details}"
             )
-        await asyncio.sleep(0.10)
+        await asyncio.sleep(0.05)
 
 
 async def _scoreboard_root(page: Page) -> Locator:
     global _body_fallback_reported
 
+    if _selector_cache.get("root") == "body":
+        body = page.locator("body").first
+        try:
+            if await body.count():
+                return body
+        except Exception:
+            _selector_cache.pop("root", None)
+
     try:
+        # The child selectors below validate the actual scoreboard. Waiting
+        # 2.5 seconds for a wrapper that may not exist only slowed every poll.
         root, _ = await _find_locator(
             page,
             SCOREBOARD_ROOT_SELECTORS,
-            timeout_ms=2_500,
+            timeout_ms=300,
+            cache_key="root",
         )
         return root.first
     except ScoreReadError:
         # A/B layouts sometimes remove the known wrapper but retain the team and
         # score elements. Scope to body and validate all required fields below.
         body = page.locator("body").first
-        await body.wait_for(state="attached", timeout=12_500)
+        await body.wait_for(state="attached", timeout=2_500)
+        _selector_cache["root"] = "body"
         if not _body_fallback_reported:
-            print("[SCOREBOARD] known root missing; using body fallback")
+            print("[SCOREBOARD] known root missing; using cached body fallback")
             _body_fallback_reported = True
         return body
 
@@ -140,10 +168,20 @@ def parse_timer_and_period(text: str) -> tuple[str, str]:
 
 
 async def _optional_timer_text(root: Locator) -> str:
+    cached = _selector_cache.get("timer")
+    if cached:
+        try:
+            locator = root.locator(cached).first
+            if await locator.count():
+                return (await locator.inner_text()).strip()
+        except Exception:
+            _selector_cache.pop("timer", None)
+
     for selector in TIMER_SELECTORS:
         try:
             locator = root.locator(selector).first
             if await locator.count():
+                _selector_cache["timer"] = selector
                 return (await locator.inner_text()).strip()
         except Exception:
             continue
@@ -159,19 +197,24 @@ async def read_scoreboard(page: Page) -> ScoreboardSnapshot:
             root,
             TEAM_SELECTORS,
             minimum_count=2,
-            timeout_ms=12_500,
+            timeout_ms=2_500,
+            cache_key="teams",
         )
         score1_candidates, score1_selector = await _find_locator(
             root,
             TEAM_1_SCORE_SELECTORS,
-            timeout_ms=12_500,
+            timeout_ms=2_500,
+            cache_key="score1",
         )
         score2_candidates, score2_selector = await _find_locator(
             root,
             TEAM_2_SCORE_SELECTORS,
-            timeout_ms=12_500,
+            timeout_ms=2_500,
+            cache_key="score2",
         )
 
+        # Once locators are resolved, only the four values below cross the
+        # Playwright boundary. The selector discovery cost is cached.
         team1 = (await names.nth(0).inner_text()).strip()
         team2 = (await names.nth(1).inner_text()).strip()
         score1 = _parse_score(await score1_candidates.first.inner_text())
@@ -189,7 +232,7 @@ async def read_scoreboard(page: Page) -> ScoreboardSnapshot:
             print(
                 "[SCOREBOARD_SELECTORS] "
                 f"teams={team_selector}; score1={score1_selector}; "
-                f"score2={score2_selector}"
+                f"score2={score2_selector}; cached=true"
             )
             print(f"[SCOREBOARD] timer={timer or '<пусто>'}")
             print(f"[SCOREBOARD] team1={team1}")
