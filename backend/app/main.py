@@ -9,6 +9,7 @@ from backend.app.browser.canvas_locking_adapter import (
     read_next_goal_odds as visual_lock_read_next_goal_odds,
 )
 from backend.app.browser.manager import BROWSER_MANAGER
+from backend.app.demo.budget_sync import sync_strategy_budget
 
 # Keep the current hybrid DOM+Canvas reader untouched and wrap only the
 # next-goal call with an additional visual padlock check.
@@ -23,6 +24,9 @@ from xbet_config import URL_CONFIG
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Rebase any persisted legacy budget to the currently saved stake row before
+    # the engine hydrates its in-memory DemoBudget instance.
+    await sync_strategy_budget(update_state=False)
     await ENGINE.restore()
     try:
         yield
