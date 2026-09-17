@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 
@@ -14,6 +15,16 @@ def _same_snapshot(left: Any, right: Any) -> bool:
         and getattr(left, "team1", None) == getattr(right, "team1", None)
         and getattr(left, "team2", None) == getattr(right, "team2", None)
         and getattr(left, "score", None) == getattr(right, "score", None)
+    )
+
+
+def _score_changed(left: Any, right: Any) -> bool:
+    return bool(
+        left is not None
+        and right is not None
+        and getattr(left, "team1", None) == getattr(right, "team1", None)
+        and getattr(left, "team2", None) == getattr(right, "team2", None)
+        and getattr(left, "score", None) != getattr(right, "score", None)
     )
 
 
@@ -84,6 +95,40 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
     original_read_fresh_score = engine_class._read_fresh_score
     original_sleep_or_stop = engine_class._sleep_or_stop
 
+    # Keep the existing frontend unchanged: it already renders repository logs.
+    # Enrich DEMO_BET_CREATED with the measured time from the detected score
+    # change to the actual virtual-bet creation, so the value appears directly
+    # in the live log stream.
+    repository = engine_module.REPOSITORY
+    if not getattr(repository, "_reaction_log_wrapped", False):
+        original_repository_log = repository.log
+
+        async def reaction_aware_log(event: str, message: str):
+            if event in {
+                "DEMO_START_REQUEST",
+                "DEMO_STOP",
+                "DATABASE_CLEARED",
+                "SEQUENCE_RESET",
+            }:
+                repository._reaction_started_perf = None
+
+            if event == "DEMO_BET_CREATED":
+                started = getattr(repository, "_reaction_started_perf", None)
+                if started is not None:
+                    elapsed = max(0.0, time.perf_counter() - float(started))
+                    repository._last_reaction_seconds = elapsed
+                    repository._reaction_started_perf = None
+                    message = (
+                        f"{message} | ⏱ реакция после гола: {elapsed:.3f} с"
+                    )
+
+            return await original_repository_log(event, message)
+
+        repository.log = reaction_aware_log
+        repository._reaction_log_wrapped = True
+        repository._reaction_started_perf = None
+        repository._last_reaction_seconds = None
+
     async def fast_wait_for_odds(
         self,
         snapshot,
@@ -145,7 +190,7 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
                 await engine_module.REPOSITORY.log(
                     "FAST_MARKET_READING",
                     (
-                        f"Следующий гол №{next_goal_number}; надёжный hybrid reader, "
+                        f"Следующий гол №{next_goal_number}; быстрый Canvas/DOM reader, "
                         "после фиксации коэффициента pre-bet проверки отключены"
                     ),
                 )
@@ -196,6 +241,25 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
                     self._config.blocked_events_switch_enabled
                     and _selected_side_is_locked(selected_side, odds)
                 )
+
+                reaction_started = getattr(
+                    engine_module.REPOSITORY,
+                    "_reaction_started_perf",
+                    None,
+                )
+                if reaction_started is not None:
+                    marker = float(reaction_started)
+                    if getattr(self, "_reaction_odds_logged_for", None) != marker:
+                        self._reaction_odds_logged_for = marker
+                        elapsed_to_odds = max(0.0, time.perf_counter() - marker)
+                        await engine_module.REPOSITORY.log(
+                            "REACTION_ODDS_READY",
+                            (
+                                f"Новый КФ прочитан через {elapsed_to_odds:.3f} с "
+                                f"после изменения счёта; odds={odds.team1}/{odds.team2}; "
+                                f"locked={str(selected_locked).lower()}"
+                            ),
+                        )
 
                 # Publish coefficients immediately, before any blocked-event
                 # decision. A bookmaker lock must never hide recognized odds on
@@ -373,12 +437,30 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
                 )
                 return cached
 
-        return await original_read_fresh_score(
+        current = await original_read_fresh_score(
             self,
             browser,
             selected_match,
             previous,
         )
+
+        if (
+            self._mode == "DEMO"
+            and self._config.strategy_type == engine_module.StrategyType.NEXT_GOAL
+            and _score_changed(previous, current)
+        ):
+            started = time.perf_counter()
+            engine_module.REPOSITORY._reaction_started_perf = started
+            self._reaction_odds_logged_for = None
+            await engine_module.REPOSITORY.log(
+                "REACTION_TIMER_STARTED",
+                (
+                    f"Изменение счёта обнаружено: {previous.score.text()} → "
+                    f"{current.score.text()}; замер до следующей виртуальной ставки запущен"
+                ),
+            )
+
+        return current
 
     async def fast_sleep_or_stop(self, seconds: float) -> None:
         if (
