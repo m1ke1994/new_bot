@@ -5,14 +5,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 import backend.app.demo.engine as demo_engine_module
-from backend.app.browser.canvas_market_adapter import (
+from backend.app.browser.canvas_locking_adapter import (
     read_next_goal_odds as canvas_aware_read_next_goal_odds,
 )
 from backend.app.browser.manager import BROWSER_MANAGER
 
 # Keep the strategy/engine unchanged while replacing only the external-market
-# reader. Engine methods resolve this module global at runtime, so both DEMO
-# and LIVE receive the same NextGoalOdds contract regardless of DOM vs canvas.
+# reader. The wrapper preserves the current OCR/DOM contract and additionally
+# converts a visually locked canvas outcome into MARKET_LOCKED.
 demo_engine_module.read_next_goal_odds = canvas_aware_read_next_goal_odds
 ENGINE = demo_engine_module.ENGINE
 
