@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
@@ -11,7 +12,13 @@ from playwright.async_api import Page
 from xbet_config import SELECTORS
 
 from . import market as hybrid_market
-from .canvas_vision import CANVAS_SELECTOR, decode_canvas_image
+from .canvas_vision import (
+    CANVAS_SELECTOR,
+    VISION,
+    CanvasVisionError,
+    capture_market_canvas,
+    decode_canvas_image,
+)
 
 
 Logger = Callable[[str, str], Awaitable[Any]]
@@ -196,12 +203,10 @@ async def detect_locked_next_goal_sides(
     canvas_width: float,
     canvas_height: float,
 ) -> dict[str, Any]:
-    """Take one lightweight screenshot after odds are mapped and inspect locks."""
+    """Fallback lock scan when odds came from the reliable multi-frame path."""
     try:
         canvas_selector = SELECTORS.canvas or CANVAS_SELECTOR
         canvas = page.locator(canvas_selector).first
-        # Odds were just read from this canvas, so a long wait here only slows
-        # the hot path if the node disappears between reads.
         await canvas.wait_for(state="visible", timeout=750)
         image_bytes = await canvas.screenshot(type="png")
         image = decode_canvas_image(image_bytes)
@@ -221,6 +226,144 @@ async def detect_locked_next_goal_sides(
         }
 
 
+async def _single_frame_canvas_read(
+    page: Page,
+    team1: str,
+    team2: str,
+    next_goal_number: int,
+    logger: Logger | None,
+) -> tuple[Any | None, dict[str, Any] | None]:
+    """Read both odds and visual locks from one current Canvas screenshot.
+
+    This is the hot DEMO path: no second screenshot and no confirmation frame.
+    If one-frame OCR cannot map the expected row, callers immediately fall back
+    to the existing reliable multi-frame reader instead of inventing values.
+    """
+    try:
+        captured = await capture_market_canvas(page)
+        analysis = await asyncio.to_thread(
+            VISION.analyze_image,
+            captured["image"],
+            save=False,
+            extended=False,
+            expected_goal_number=next_goal_number,
+        )
+    except CanvasVisionError as error:
+        await _log(
+            logger,
+            "ODDS_CANVAS_SINGLE_FRAME_MISS",
+            f"{error.status}: {error}; fallback to reliable reader",
+        )
+        return None, None
+    except Exception as error:
+        await _log(
+            logger,
+            "ODDS_CANVAS_SINGLE_FRAME_MISS",
+            f"{type(error).__name__}: {error}; fallback to reliable reader",
+        )
+        return None, None
+
+    mapping = analysis.get("next_goal_mapping") or {}
+    if analysis.get("status") != "CANVAS_ANALYZED" or not mapping:
+        await _log(
+            logger,
+            "ODDS_CANVAS_SINGLE_FRAME_MISS",
+            (
+                f"status={analysis.get('status')}; goal={next_goal_number}; "
+                "fallback to reliable reader"
+            ),
+        )
+        return None, None
+
+    recognized_goal = mapping.get("next_goal_number")
+    if recognized_goal is not None and int(recognized_goal) != int(next_goal_number):
+        await _log(
+            logger,
+            "ODDS_CANVAS_SINGLE_FRAME_MISS",
+            (
+                f"stale goal={recognized_goal}; expected={next_goal_number}; "
+                "fallback to reliable reader"
+            ),
+        )
+        return None, None
+
+    team1_region = mapping.get("team1") or {}
+    team2_region = mapping.get("team2") or {}
+    try:
+        team1_odd = float(team1_region["value"])
+        team2_odd = float(team2_region["value"])
+    except (KeyError, TypeError, ValueError):
+        await _log(
+            logger,
+            "ODDS_CANVAS_SINGLE_FRAME_MISS",
+            "One-frame OCR did not return two valid odds; fallback to reliable reader",
+        )
+        return None, None
+
+    canvas_shape = analysis.get("canvas") or {
+        "width": captured["width"],
+        "height": captured["height"],
+    }
+    canvas_width = max(1.0, float(canvas_shape.get("width") or captured["width"]))
+    canvas_height = max(1.0, float(canvas_shape.get("height") or captured["height"]))
+    team1_locator = hybrid_market.CanvasCoefficientLocator(
+        page,
+        team1_region,
+        canvas_shape,
+    )
+    team2_locator = hybrid_market.CanvasCoefficientLocator(
+        page,
+        team2_region,
+        canvas_shape,
+    )
+    confidence = float(mapping.get("confidence") or 0.0)
+    market = f"Следующий гол №{next_goal_number}"
+
+    lock_state = _locked_sides_from_image(
+        captured["image"],
+        team1_region=team1_region,
+        team2_region=team2_region,
+        canvas_width=canvas_width,
+        canvas_height=canvas_height,
+    )
+    lock_state = {**lock_state, "error": None}
+
+    await _log(
+        logger,
+        "ODDS_CANVAS_SINGLE_FRAME",
+        (
+            f"goal={next_goal_number}; odds={team1_odd}/{team2_odd}; "
+            f"locked_sides={lock_state['locked_sides']}; "
+            f"ocr_latency={analysis.get('latency_seconds')}s"
+        ),
+    )
+    await _log(logger, "NEXT_GOAL_MARKET_FOUND", market)
+    await _log(logger, "TEAM1_ODDS", f"Команда 1 / {team1} = {team1_odd}")
+    await _log(logger, "TEAM2_ODDS", f"Команда 2 / {team2} = {team2_odd}")
+    await _log(
+        logger,
+        "ODDS_SOURCE",
+        (
+            f"CANVAS_VISION_SINGLE_FRAME / "
+            f"{analysis.get('ocr_backend') or 'OCR'} / confidence={confidence:.3f}"
+        ),
+    )
+    await _log(logger, "ODDS_READY", f"{team1_odd} / {team2_odd}")
+
+    odds = hybrid_market.NextGoalOdds(
+        team1=team1_odd,
+        team2=team2_odd,
+        market=market,
+        next_goal_number=next_goal_number,
+        source="CANVAS_VISION",
+        ocr_backend=analysis.get("ocr_backend"),
+        confidence=confidence,
+        team1_locator=team1_locator,
+        team2_locator=team2_locator,
+    )
+    return odds, lock_state
+
+
 async def _read_odds_canvas_first(
     page: Page,
     team1: str,
@@ -230,13 +373,8 @@ async def _read_odds_canvas_first(
     logger: Logger | None,
     *,
     read_only: bool,
-):
-    """Use Canvas directly when the current bookmaker layout exposes it.
-
-    The previous hybrid path waited up to 2.5 seconds for DOM market groups that
-    do not exist on the current Canvas layout before starting OCR. We still keep
-    the old hybrid reader as a compatibility fallback when Canvas is absent.
-    """
+) -> tuple[Any, dict[str, Any] | None]:
+    """Prefer one-frame Canvas; keep the old hybrid reader as a safe fallback."""
     next_goal_number = score1 + score2 + 1
     try:
         await hybrid_market._prepare_market_search(
@@ -245,7 +383,7 @@ async def _read_odds_canvas_first(
             logger,
         )
     except hybrid_market.MarketReadError:
-        return await hybrid_market.read_next_goal_odds(
+        odds = await hybrid_market.read_next_goal_odds(
             page,
             team1,
             team2,
@@ -254,6 +392,7 @@ async def _read_odds_canvas_first(
             logger,
             read_only=read_only,
         )
+        return odds, None
 
     canvas_selector = SELECTORS.canvas or CANVAS_SELECTOR
     canvas = page.locator(canvas_selector).first
@@ -263,7 +402,7 @@ async def _read_odds_canvas_first(
         canvas_ready = False
 
     if not canvas_ready:
-        return await hybrid_market.read_next_goal_odds(
+        odds = await hybrid_market.read_next_goal_odds(
             page,
             team1,
             team2,
@@ -272,19 +411,40 @@ async def _read_odds_canvas_first(
             logger,
             read_only=read_only,
         )
+        return odds, None
 
     await _log(
         logger,
         "ODDS_CANVAS_FAST_PATH",
-        f"Canvas already visible; skipping DOM market timeout for goal №{next_goal_number}",
+        (
+            f"Canvas visible; one-frame odds+lock read for goal №{next_goal_number}; "
+            "DOM timeout and confirmation screenshot skipped"
+        ),
     )
-    return await hybrid_market._read_next_goal_odds_canvas(
+
+    odds, lock_state = await _single_frame_canvas_read(
         page,
         team1,
         team2,
         next_goal_number,
         logger,
     )
+    if odds is not None:
+        return odds, lock_state
+
+    await _log(
+        logger,
+        "ODDS_CANVAS_RELIABLE_FALLBACK",
+        f"One-frame read missed goal №{next_goal_number}; using reliable multi-frame OCR",
+    )
+    odds = await hybrid_market._read_next_goal_odds_canvas(
+        page,
+        team1,
+        team2,
+        next_goal_number,
+        logger,
+    )
+    return odds, None
 
 
 async def read_next_goal_odds(
@@ -297,12 +457,13 @@ async def read_next_goal_odds(
     *,
     read_only: bool = False,
 ):
-    """Read odds quickly, then add visual lock metadata.
+    """Read odds quickly and inspect visual lock state.
 
-    A lock is no longer allowed to hide valid coefficients from the frontend.
-    The DEMO runtime decides whether the *selected* side is blocked.
+    The normal Canvas path uses one screenshot for OCR and lock detection. A lock
+    never hides recognized coefficients from the frontend. The DEMO runtime
+    decides whether the selected side may be virtually placed.
     """
-    odds = await _read_odds_canvas_first(
+    odds, lock_state = await _read_odds_canvas_first(
         page,
         team1,
         team2,
@@ -322,13 +483,16 @@ async def read_next_goal_odds(
     ):
         return odds
 
-    lock_state = await detect_locked_next_goal_sides(
-        page,
-        team1_region=team1_locator.region,
-        team2_region=team2_locator.region,
-        canvas_width=team1_locator.canvas_width,
-        canvas_height=team1_locator.canvas_height,
-    )
+    # The fast path has already inspected the exact same pixels used for OCR.
+    # Only the reliable fallback needs a second screenshot for lock metadata.
+    if lock_state is None:
+        lock_state = await detect_locked_next_goal_sides(
+            page,
+            team1_region=team1_locator.region,
+            team2_region=team2_locator.region,
+            canvas_width=team1_locator.canvas_width,
+            canvas_height=team1_locator.canvas_height,
+        )
 
     locked_sides = tuple(int(side) for side in lock_state["locked_sides"])
     if locked_sides:
