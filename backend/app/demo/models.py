@@ -94,6 +94,8 @@ class NextGoalOdds:
     confidence: float | None = None
     team1_locator: Any | None = None
     team2_locator: Any | None = None
+    locked_sides: tuple[int, ...] = ()
+    lock_markers: Any | None = None
 
     def locator_for_side(self, side: Scorer) -> Any | None:
         if side == Scorer.TEAM_1:
