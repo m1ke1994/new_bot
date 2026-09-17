@@ -153,8 +153,9 @@ async def open_matches_page(page: Page):
         timeout=60_000,
     )
 
+    # Do not pay an unconditional 3-second delay. find_league_container() and
+    # the scanner below wait for the exact DOM elements they need.
     log("DOM страницы загружен.")
-    await page.wait_for_timeout(3000)
     log(f"Текущий URL: {page.url}")
 
 
