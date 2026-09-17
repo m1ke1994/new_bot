@@ -1,23 +1,17 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import Any
 
 import cv2
 import numpy as np
 from playwright.async_api import Page
 
-from backend.app.demo.models import NextGoalOdds
 from xbet_config import SELECTORS
 
 from . import market as hybrid_market
-from .canvas_vision import (
-    CANVAS_SELECTOR,
-    CanvasVisionError,
-    VISION,
-    capture_market_canvas,
-)
+from .canvas_vision import CANVAS_SELECTOR, decode_canvas_image
 
 
 Logger = Callable[[str, str], Awaitable[Any]]
@@ -54,7 +48,12 @@ def detect_lock_marker(
     canvas_width: float,
     canvas_height: float,
 ) -> dict[str, Any] | None:
-    """Detect the bookmaker padlock drawn next to one team next-goal outcome."""
+    """Detect the small bookmaker padlock next to one team outcome.
+
+    The search is deliberately kept close to the mapped coefficient. The old
+    wide Team-2 scan could mistake ordinary text/icons for a padlock and then
+    suppress otherwise valid coefficients.
+    """
     if side not in {1, 2}:
         raise ValueError(f"Unsupported side: {side}")
     if image is None or image.size == 0 or canvas_width <= 0 or canvas_height <= 0:
@@ -74,15 +73,11 @@ def detect_lock_marker(
     top = max(0, round(center_y - half_band))
     bottom = min(image_height, round(center_y + half_band + 1))
 
-    # Team 1 is the left outcome column and Team 2 is the middle column.
-    # Restrict the icon search to the matching team zone so a lock on
-    # "Не будет N-го гола" cannot mark a team outcome as blocked.
-    if side == 1:
-        left = max(0, round(image_width * 0.01))
-        right = min(round(box["x"] - 2), round(image_width * 0.24))
-    else:
-        left = max(0, round(image_width * 0.30))
-        right = min(round(box["x"] - 2), round(image_width * 0.56))
+    side_left = round(image_width * (0.01 if side == 1 else 0.30))
+    side_right = round(image_width * (0.24 if side == 1 else 0.56))
+    proximity = max(80, round(image_width * 0.14))
+    left = max(0, side_left, round(box["x"] - proximity))
+    right = min(round(box["x"] - 2), side_right)
 
     if right - left < 8 or bottom - top < 8:
         return None
@@ -101,21 +96,21 @@ def detect_lock_marker(
 
     icon_scale = max(10.0, box["height"])
     min_h = max(7, round(icon_scale * 0.45))
-    max_h = min(32, max(18, round(icon_scale * 1.80)))
+    max_h = min(30, max(17, round(icon_scale * 1.65)))
     min_w = max(5, round(icon_scale * 0.25))
-    max_w = min(24, max(14, round(icon_scale * 1.10)))
+    max_w = min(20, max(13, round(icon_scale * 0.95)))
 
     candidates: list[dict[str, Any]] = []
     for label in range(1, count):
         x, y, width, height, area = (int(value) for value in stats[label])
-        if x <= 2 or x + width >= roi.shape[1] - 2:
+        if x <= 1 or x + width >= roi.shape[1] - 1:
             continue
         if not (min_w <= width <= max_w and min_h <= height <= max_h):
             continue
 
         aspect = width / height
         fill = area / float(width * height)
-        if not (0.40 <= aspect <= 1.15 and 0.38 <= fill <= 0.92):
+        if not (0.42 <= aspect <= 1.05 and 0.42 <= fill <= 0.90):
             continue
 
         component = (mask[y : y + height, x : x + width] > 0).astype(np.uint8)
@@ -125,21 +120,23 @@ def detect_lock_marker(
         bottom_rows = component[max(0, height - max(2, round(height * 0.32))) :]
         bottom_fill = float(bottom_rows.mean()) if bottom_rows.size else 0.0
 
-        # Padlock silhouette: sparse shackle above a dense body.
-        if not (0.05 <= upper_fill <= 0.72):
+        if not (0.05 <= upper_fill <= 0.68):
             continue
-        if lower_fill < 0.64 or bottom_fill < 0.70:
+        if lower_fill < 0.68 or bottom_fill < 0.74:
             continue
-        if lower_fill - upper_fill < 0.08:
+        if lower_fill - upper_fill < 0.12:
             continue
 
         center_x = left + x + width / 2
         distance_to_odds = max(0.0, box["x"] - center_x)
+        if distance_to_odds > proximity:
+            continue
+
         score = (
             lower_fill * 2.0
             + bottom_fill
             + (lower_fill - upper_fill)
-            - min(distance_to_odds / max(1.0, image_width), 1.0)
+            - distance_to_odds / max(1.0, proximity)
         )
         candidates.append(
             {
@@ -153,6 +150,7 @@ def detect_lock_marker(
                 "bottom_fill": round(bottom_fill, 3),
                 "background": round(background, 1),
                 "dark_limit": dark_limit,
+                "distance_to_odds": round(distance_to_odds, 1),
                 "_score": score,
             }
         )
@@ -198,11 +196,15 @@ async def detect_locked_next_goal_sides(
     canvas_width: float,
     canvas_height: float,
 ) -> dict[str, Any]:
-    """Compatibility helper used by diagnostics/tests."""
+    """Take one lightweight screenshot after odds are mapped and inspect locks."""
     try:
-        captured = await capture_market_canvas(page)
+        canvas_selector = SELECTORS.canvas or CANVAS_SELECTOR
+        canvas = page.locator(canvas_selector).first
+        await canvas.wait_for(state="visible", timeout=2_500)
+        image_bytes = await canvas.screenshot(type="png")
+        image = decode_canvas_image(image_bytes)
         result = _locked_sides_from_image(
-            captured["image"],
+            image,
             team1_region=team1_region,
             team2_region=team2_region,
             canvas_width=canvas_width,
@@ -217,180 +219,6 @@ async def detect_locked_next_goal_sides(
         }
 
 
-async def _prepare_fast_canvas(page: Page, logger: Logger | None) -> bool:
-    """Prepare the market search once; return True when the canvas is visible."""
-    try:
-        await hybrid_market._prepare_market_search(
-            page,
-            hybrid_market.NEXT_GOAL_SEARCH_TEXT,
-            logger,
-        )
-    except hybrid_market.MarketReadError as error:
-        await _log(
-            logger,
-            "FAST_MARKET_SEARCH_NOT_READY",
-            f"{error.status}: {error}",
-        )
-
-    canvas_selector = SELECTORS.canvas or CANVAS_SELECTOR
-    canvas = page.locator(canvas_selector).first
-    try:
-        return await canvas.count() > 0 and await canvas.is_visible()
-    except Exception:
-        return False
-
-
-async def _analyze_single_frame(
-    page: Page,
-    *,
-    expected_goal_number: int,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Capture exactly one canvas frame and map the requested row from it."""
-    captured = await capture_market_canvas(page)
-    image = captured["image"]
-
-    analysis = await asyncio.to_thread(
-        VISION.analyze_image,
-        image,
-        save=False,
-        extended=False,
-        expected_goal_number=expected_goal_number,
-    )
-
-    # This is not a second market reading. If the fast OCR layout pass misses
-    # labels, re-process the exact same pixels once with the extended detector.
-    if not analysis.get("next_goal_mapping"):
-        analysis = await asyncio.to_thread(
-            VISION.analyze_image,
-            image,
-            save=False,
-            extended=True,
-            expected_goal_number=expected_goal_number,
-        )
-
-    return captured, analysis
-
-
-async def _read_fast_canvas_next_goal_odds(
-    page: Page,
-    team1: str,
-    team2: str,
-    score1: int,
-    score2: int,
-    logger: Logger | None,
-) -> NextGoalOdds:
-    next_goal_number = score1 + score2 + 1
-    captured, analysis = await _analyze_single_frame(
-        page,
-        expected_goal_number=next_goal_number,
-    )
-    mapping = analysis.get("next_goal_mapping") or {}
-
-    if analysis.get("status") != "CANVAS_ANALYZED" or not mapping:
-        raise hybrid_market.MarketNotAvailable(
-            "Один текущий кадр canvas не дал коэффициенты нужного рынка.",
-            status="ODDS_NOT_FOUND",
-            details={
-                "source": "CANVAS_FAST_FRAME",
-                "vision_status": analysis.get("status"),
-                "next_goal_number": next_goal_number,
-            },
-        )
-
-    recognized_goal = mapping.get("next_goal_number")
-    if recognized_goal is not None and int(recognized_goal) != next_goal_number:
-        raise hybrid_market.MarketNotAvailable(
-            f"Canvas показывает гол №{recognized_goal}, ожидается №{next_goal_number}.",
-            status="STALE_MARKET",
-            details={
-                "source": "CANVAS_FAST_FRAME",
-                "recognized_goal_number": recognized_goal,
-                "expected_goal_number": next_goal_number,
-            },
-        )
-
-    team1_region = mapping.get("team1") or {}
-    team2_region = mapping.get("team2") or {}
-    canvas_meta = analysis.get("canvas") or {}
-    canvas_width = float(canvas_meta.get("width") or captured.get("width") or 0)
-    canvas_height = float(canvas_meta.get("height") or captured.get("height") or 0)
-
-    try:
-        team1_odd = float(team1_region["value"])
-        team2_odd = float(team2_region["value"])
-    except (KeyError, TypeError, ValueError) as error:
-        raise hybrid_market.MarketNotAvailable(
-            "Текущий кадр не содержит два валидных коэффициента.",
-            status="ODDS_NOT_FOUND",
-            details={"source": "CANVAS_FAST_FRAME"},
-        ) from error
-
-    lock_state = _locked_sides_from_image(
-        captured["image"],
-        team1_region=team1_region,
-        team2_region=team2_region,
-        canvas_width=canvas_width,
-        canvas_height=canvas_height,
-    )
-    if lock_state["locked_sides"]:
-        await _log(
-            logger,
-            "CANVAS_MARKET_LOCKED",
-            (
-                f"Следующий гол №{next_goal_number}: "
-                f"визуально заблокированы стороны {lock_state['locked_sides']}"
-            ),
-        )
-        raise hybrid_market.MarketNotAvailable(
-            f"Рынок следующего гола №{next_goal_number} заблокирован букмекером.",
-            status="MARKET_LOCKED",
-            details={
-                "source": "CANVAS_FAST_VISUAL_LOCK",
-                "next_goal_number": next_goal_number,
-                "locked_sides": lock_state["locked_sides"],
-                "market_available": True,
-                "lock_markers": lock_state["markers"],
-            },
-        )
-
-    confidence = float(mapping.get("confidence") or 0.0)
-    canvas_shape = {"width": canvas_width, "height": canvas_height}
-    market = f"Следующий гол №{next_goal_number}"
-
-    await _log(logger, "NEXT_GOAL_MARKET_FOUND", market)
-    await _log(logger, "TEAM1_ODDS", f"Команда 1 / {team1} = {team1_odd}")
-    await _log(logger, "TEAM2_ODDS", f"Команда 2 / {team2} = {team2_odd}")
-    await _log(
-        logger,
-        "ODDS_SOURCE",
-        (
-            "CANVAS_FAST_FRAME / one screenshot / no stability confirmation / "
-            f"confidence={confidence:.3f}"
-        ),
-    )
-    await _log(logger, "ODDS_READY", f"{team1_odd} / {team2_odd}")
-
-    return NextGoalOdds(
-        team1=team1_odd,
-        team2=team2_odd,
-        market=market,
-        next_goal_number=next_goal_number,
-        source="CANVAS_FAST_FRAME",
-        ocr_backend=analysis.get("ocr_backend"),
-        confidence=confidence,
-        team1_locator=hybrid_market.CanvasCoefficientLocator(
-            page,
-            team1_region,
-            canvas_shape,
-        ),
-        team2_locator=hybrid_market.CanvasCoefficientLocator(
-            page,
-            team2_region,
-            canvas_shape,
-        ),
-    )
-
-
 async def read_next_goal_odds(
     page: Page,
     team1: str,
@@ -401,32 +229,12 @@ async def read_next_goal_odds(
     *,
     read_only: bool = False,
 ):
-    """Fast strategy reader: one canvas frame is the virtual-bet decision frame."""
-    _ = read_only  # API compatibility.
+    """Use the proven hybrid odds reader, then add lock metadata.
 
-    if await _prepare_fast_canvas(page, logger):
-        try:
-            return await _read_fast_canvas_next_goal_odds(
-                page,
-                team1,
-                team2,
-                score1,
-                score2,
-                logger,
-            )
-        except CanvasVisionError as error:
-            raise hybrid_market.MarketNotAvailable(
-                str(error),
-                status="ODDS_NOT_FOUND",
-                details={
-                    "source": "CANVAS_FAST_FRAME",
-                    "vision_status": error.status,
-                },
-            ) from error
-
-    # Compatibility only for an old non-canvas layout. The current canvas
-    # layout never enters the old two/three-frame stability confirmation path.
-    return await hybrid_market.read_next_goal_odds(
+    A lock is no longer allowed to hide valid coefficients from the frontend.
+    The DEMO runtime decides whether the *selected* side is blocked.
+    """
+    odds = await hybrid_market.read_next_goal_odds(
         page,
         team1,
         team2,
@@ -434,4 +242,46 @@ async def read_next_goal_odds(
         score2,
         logger,
         read_only=read_only,
+    )
+
+    if odds.source != "CANVAS_VISION":
+        return odds
+
+    team1_locator = odds.team1_locator
+    team2_locator = odds.team2_locator
+    if not isinstance(team1_locator, hybrid_market.CanvasCoefficientLocator) or not isinstance(
+        team2_locator, hybrid_market.CanvasCoefficientLocator
+    ):
+        return odds
+
+    lock_state = await detect_locked_next_goal_sides(
+        page,
+        team1_region=team1_locator.region,
+        team2_region=team2_locator.region,
+        canvas_width=team1_locator.canvas_width,
+        canvas_height=team1_locator.canvas_height,
+    )
+
+    locked_sides = tuple(int(side) for side in lock_state["locked_sides"])
+    if locked_sides:
+        await _log(
+            logger,
+            "CANVAS_LOCK_STATE",
+            (
+                f"Следующий гол №{odds.next_goal_number}: "
+                f"locked_sides={list(locked_sides)} markers={lock_state['markers']}"
+            ),
+        )
+
+    if lock_state["error"]:
+        await _log(
+            logger,
+            "CANVAS_LOCK_DETECTOR_SKIPPED",
+            lock_state["error"],
+        )
+
+    return replace(
+        odds,
+        locked_sides=locked_sides,
+        lock_markers=lock_state["markers"],
     )
