@@ -482,19 +482,34 @@ class CanvasVision:
                 expected_goal_number=expected_goal_number,
             )
             if mapping is None and expected_goal_number is not None:
-                # Keep the actually visible market for diagnostics/UI even
-                # when the scoreboard expects another goal number. The market
-                # layer will mark it STALE and refuse to place a bet.
-                mapping = _map_next_goal_market(
+                # OCR sometimes misses the long labels in the first visible
+                # row but reads both odds. A later row still gives us a safe
+                # structural anchor (columns, vertical spacing and goal
+                # number), so recover the expected row immediately above it.
+                anchor = _map_next_goal_market(
                     regions,
                     numbers,
                     headers,
                     width,
                     height,
                 )
-                if mapping is not None:
-                    mapping["expected_goal_number"] = expected_goal_number
-                    mapping["goal_number_matches"] = False
+                if anchor is not None:
+                    mapping = _infer_expected_row_from_anchor(
+                        numbers,
+                        headers,
+                        width,
+                        height,
+                        anchor,
+                        expected_goal_number,
+                    )
+                    if mapping is None:
+                        # Keep the actually visible market for diagnostics/UI
+                        # when it cannot be related safely to the expected
+                        # row. The market layer will mark it STALE and refuse
+                        # to place a bet.
+                        mapping = anchor
+                        mapping["expected_goal_number"] = expected_goal_number
+                        mapping["goal_number_matches"] = False
         latency = round(time.perf_counter() - started, 3)
         status = "CANVAS_ANALYZED"
         if not regions:
@@ -657,6 +672,142 @@ def _goal_label(region: dict[str, Any], side: int) -> int | None:
     return None
 
 
+def _odds_rows(
+    numbers: list[dict[str, Any]], width: int
+) -> list[dict[str, Any]]:
+    """Return vertically aligned TEAM_1/TEAM_2 coefficient rows."""
+    grouped: list[list[dict[str, Any]]] = []
+    for item in (candidate for candidate in numbers if candidate["usable"]):
+        center_y = item["y"] + item["height"] / 2
+        row = next(
+            (
+                group
+                for group in grouped
+                if abs(
+                    center_y
+                    - sum(x["y"] + x["height"] / 2 for x in group) / len(group)
+                )
+                <= 12
+            ),
+            None,
+        )
+        if row is None:
+            grouped.append([item])
+        else:
+            row.append(item)
+
+    rows: list[dict[str, Any]] = []
+    for group in sorted(grouped, key=lambda values: min(item["y"] for item in values)):
+        group = sorted(group, key=lambda item: item["x"])
+        left = [
+            item
+            for item in group
+            if item["x"] + item["width"] / 2 < width * 0.36
+        ]
+        middle = [
+            item
+            for item in group
+            if width * 0.36
+            <= item["x"] + item["width"] / 2
+            < width * 0.70
+        ]
+        if not left or not middle:
+            continue
+        team1, team2 = left[-1], middle[-1]
+        center_y = (
+            team1["y"]
+            + team1["height"] / 2
+            + team2["y"]
+            + team2["height"] / 2
+        ) / 2
+        rows.append({"team1": team1, "team2": team2, "center_y": center_y})
+    return rows
+
+
+def _infer_expected_row_from_anchor(
+    numbers: list[dict[str, Any]],
+    headers: list[dict[str, int]],
+    width: int,
+    height: int,
+    anchor: dict[str, Any],
+    expected_goal_number: int,
+) -> dict[str, Any] | None:
+    """Recover an earlier expected row when its outcome labels were missed.
+
+    This is deliberately conservative: only consecutive rows above a fully
+    recognised structural anchor are accepted, and both odds columns must
+    remain aligned. It cannot turn an unrelated numeric row into a bet.
+    """
+    anchor_goal = int(anchor.get("next_goal_number") or 0)
+    row_offset = anchor_goal - expected_goal_number
+    if row_offset <= 0:
+        return None
+
+    rows = _odds_rows(numbers, width)
+    anchor_team1 = anchor["team1"]
+    anchor_team2 = anchor["team2"]
+    anchor_y = (
+        anchor_team1["y"]
+        + anchor_team1["height"] / 2
+        + anchor_team2["y"]
+        + anchor_team2["height"] / 2
+    ) / 2
+    anchor_index = min(
+        range(len(rows)),
+        key=lambda index: abs(rows[index]["center_y"] - anchor_y),
+        default=-1,
+    )
+    expected_index = anchor_index - row_offset
+    if anchor_index < 0 or expected_index < 0:
+        return None
+
+    candidate = rows[expected_index]
+    gap_per_row = (anchor_y - candidate["center_y"]) / row_offset
+    if not 16 <= gap_per_row <= 60:
+        return None
+
+    team1 = candidate["team1"]
+    team2 = candidate["team2"]
+    team1_center = team1["x"] + team1["width"] / 2
+    team2_center = team2["x"] + team2["width"] / 2
+    anchor_team1_center = anchor_team1["x"] + anchor_team1["width"] / 2
+    anchor_team2_center = anchor_team2["x"] + anchor_team2["width"] / 2
+    if (
+        abs(team1_center - anchor_team1_center) > width * 0.12
+        or abs(team2_center - anchor_team2_center) > width * 0.12
+    ):
+        return None
+
+    preceding = [
+        band
+        for band in headers
+        if band["y"] + band["height"] <= candidate["center_y"]
+    ]
+    header = preceding[-1] if preceding else None
+    if header is None or candidate["center_y"] - (header["y"] + header["height"]) > 65:
+        return None
+    following = [band for band in headers if band["y"] > candidate["center_y"]]
+    bottom = following[0]["y"] if following else min(height, int(anchor_y + 90))
+    confidence = min(float(team1["confidence"]), float(team2["confidence"]))
+    return {
+        "market": f"Следующий гол ({expected_goal_number})",
+        "next_goal_number": expected_goal_number,
+        "expected_goal_number": expected_goal_number,
+        "goal_number_matches": True,
+        "market_bbox": {
+            "x": 0,
+            "y": header["y"],
+            "width": width,
+            "height": max(1, bottom - header["y"]),
+        },
+        "mapping_method": "ROW_ORDER_FROM_STRUCTURAL_ANCHOR",
+        "team1": team1,
+        "team2": team2,
+        "confidence": round(confidence, 4),
+        "anchor_goal_number": anchor_goal,
+    }
+
+
 def _map_next_goal_market(
     regions: list[dict[str, Any]],
     numbers: list[dict[str, Any]],
@@ -666,40 +817,11 @@ def _map_next_goal_market(
     *,
     expected_goal_number: int | None = None,
 ) -> dict[str, Any] | None:
-    rows: list[list[dict[str, Any]]] = []
-    for item in (candidate for candidate in numbers if candidate["usable"]):
-        center = item["y"] + item["height"] / 2
-        row = next(
-            (
-                group
-                for group in rows
-                if abs(
-                    center
-                    - sum(x["y"] + x["height"] / 2 for x in group) / len(group)
-                )
-                <= 12
-            ),
-            None,
-        )
-        if row is None:
-            rows.append([item])
-        else:
-            row.append(item)
-
-    for row in sorted(rows, key=lambda group: min(item["y"] for item in group)):
-        row = sorted(row, key=lambda item: item["x"])
-        left = [item for item in row if item["x"] + item["width"] / 2 < width * 0.36]
-        middle = [
-            item
-            for item in row
-            if width * 0.36 <= item["x"] + item["width"] / 2 < width * 0.70
-        ]
-        if not left or not middle:
-            continue
-        first, second = left[-1], middle[-1]
+    for row in _odds_rows(numbers, width):
+        first, second = row["team1"], row["team2"]
         first_center_y = first["y"] + first["height"] / 2
         second_center_y = second["y"] + second["height"] / 2
-        center_y = (first_center_y + second_center_y) / 2
+        center_y = row["center_y"]
         side1_labels = [
             item
             for item in regions
