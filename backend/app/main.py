@@ -4,8 +4,17 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+import backend.app.demo.engine as demo_engine_module
+from backend.app.browser.canvas_locking_adapter import (
+    read_next_goal_odds as visual_lock_read_next_goal_odds,
+)
 from backend.app.browser.manager import BROWSER_MANAGER
-from backend.app.demo.engine import ENGINE
+
+# Keep the current hybrid DOM+Canvas reader untouched and wrap only the
+# next-goal call with an additional visual padlock check.
+demo_engine_module.read_next_goal_odds = visual_lock_read_next_goal_odds
+ENGINE = demo_engine_module.ENGINE
+
 from backend.app.routes.browser import router as browser_router
 from backend.app.routes.demo import router as demo_router
 from backend.app.routes.live import router as live_router
