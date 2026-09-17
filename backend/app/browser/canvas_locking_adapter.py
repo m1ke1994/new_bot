@@ -200,7 +200,9 @@ async def detect_locked_next_goal_sides(
     try:
         canvas_selector = SELECTORS.canvas or CANVAS_SELECTOR
         canvas = page.locator(canvas_selector).first
-        await canvas.wait_for(state="visible", timeout=2_500)
+        # Odds were just read from this canvas, so a long wait here only slows
+        # the hot path if the node disappears between reads.
+        await canvas.wait_for(state="visible", timeout=750)
         image_bytes = await canvas.screenshot(type="png")
         image = decode_canvas_image(image_bytes)
         result = _locked_sides_from_image(
@@ -219,6 +221,72 @@ async def detect_locked_next_goal_sides(
         }
 
 
+async def _read_odds_canvas_first(
+    page: Page,
+    team1: str,
+    team2: str,
+    score1: int,
+    score2: int,
+    logger: Logger | None,
+    *,
+    read_only: bool,
+):
+    """Use Canvas directly when the current bookmaker layout exposes it.
+
+    The previous hybrid path waited up to 2.5 seconds for DOM market groups that
+    do not exist on the current Canvas layout before starting OCR. We still keep
+    the old hybrid reader as a compatibility fallback when Canvas is absent.
+    """
+    next_goal_number = score1 + score2 + 1
+    try:
+        await hybrid_market._prepare_market_search(
+            page,
+            hybrid_market.NEXT_GOAL_SEARCH_TEXT,
+            logger,
+        )
+    except hybrid_market.MarketReadError:
+        return await hybrid_market.read_next_goal_odds(
+            page,
+            team1,
+            team2,
+            score1,
+            score2,
+            logger,
+            read_only=read_only,
+        )
+
+    canvas_selector = SELECTORS.canvas or CANVAS_SELECTOR
+    canvas = page.locator(canvas_selector).first
+    try:
+        canvas_ready = bool(await canvas.count() and await canvas.is_visible())
+    except Exception:
+        canvas_ready = False
+
+    if not canvas_ready:
+        return await hybrid_market.read_next_goal_odds(
+            page,
+            team1,
+            team2,
+            score1,
+            score2,
+            logger,
+            read_only=read_only,
+        )
+
+    await _log(
+        logger,
+        "ODDS_CANVAS_FAST_PATH",
+        f"Canvas already visible; skipping DOM market timeout for goal №{next_goal_number}",
+    )
+    return await hybrid_market._read_next_goal_odds_canvas(
+        page,
+        team1,
+        team2,
+        next_goal_number,
+        logger,
+    )
+
+
 async def read_next_goal_odds(
     page: Page,
     team1: str,
@@ -229,12 +297,12 @@ async def read_next_goal_odds(
     *,
     read_only: bool = False,
 ):
-    """Use the proven hybrid odds reader, then add lock metadata.
+    """Read odds quickly, then add visual lock metadata.
 
     A lock is no longer allowed to hide valid coefficients from the frontend.
     The DEMO runtime decides whether the *selected* side is blocked.
     """
-    odds = await hybrid_market.read_next_goal_odds(
+    odds = await _read_odds_canvas_first(
         page,
         team1,
         team2,
