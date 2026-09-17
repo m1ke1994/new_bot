@@ -36,6 +36,44 @@ def _consume_fast_snapshot(engine: Any, previous: Any) -> Any | None:
     return cached
 
 
+def _side_number(side: Any) -> int | None:
+    value = getattr(side, "value", side)
+    value = str(value or "").upper()
+    if value == "TEAM_1":
+        return 1
+    if value == "TEAM_2":
+        return 2
+    return None
+
+
+def _resolve_selected_side(engine_module: Any, engine: Any, odds: Any, demo_blocked_window: Any) -> Any | None:
+    if demo_blocked_window is not None:
+        return demo_blocked_window.selected_side
+    current_series = getattr(engine, "_current_series", None)
+    if current_series is not None:
+        return current_series.selected_side
+    if float(odds.team1) > float(odds.team2):
+        return engine_module.Scorer.TEAM_1
+    if float(odds.team2) > float(odds.team1):
+        return engine_module.Scorer.TEAM_2
+    return None
+
+
+def _selected_and_opponent_odds(side: Any, odds: Any) -> tuple[float | None, float | None]:
+    side_number = _side_number(side)
+    if side_number == 1:
+        return float(odds.team1), float(odds.team2)
+    if side_number == 2:
+        return float(odds.team2), float(odds.team1)
+    return None, None
+
+
+def _selected_side_is_locked(side: Any, odds: Any) -> bool:
+    side_number = _side_number(side)
+    locked = {int(value) for value in (getattr(odds, "locked_sides", ()) or ())}
+    return side_number is not None and side_number in locked
+
+
 def install_fast_next_goal_runtime(engine_module: Any) -> None:
     """Patch only DEMO NEXT_GOAL timing; LIVE keeps the original safety checks."""
     engine_class = engine_module.DemoEngine
@@ -55,8 +93,6 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
         blocked_selected_side=None,
         demo_blocked_window=None,
     ):
-        # LIVE placement keeps every existing confirmation/race guard. The fast
-        # path is intentionally limited to virtual DEMO bets.
         if self._mode != "DEMO":
             return await original_wait_for_odds(
                 self,
@@ -74,7 +110,9 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
             browser = engine_module.MatchBrowser(page)
 
             try:
-                # One scoreboard read defines which next-goal row is required.
+                # This read happens BEFORE coefficient capture. Once a valid
+                # coefficient is captured, no additional scoreboard/odds read is
+                # allowed before the virtual bet is created.
                 fresh = await browser.snapshot()
                 if fresh.team1 != snapshot.team1 or fresh.team2 != snapshot.team2:
                     raise engine_module.RecoverableDemoError(
@@ -106,7 +144,10 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
             if attempt == 1:
                 await engine_module.REPOSITORY.log(
                     "FAST_MARKET_READING",
-                    f"Следующий гол №{next_goal_number}; один кадр, без повторной проверки коэффициента",
+                    (
+                        f"Следующий гол №{next_goal_number}; надёжный hybrid reader, "
+                        "после фиксации коэффициента pre-bet проверки отключены"
+                    ),
                 )
 
             await self._status(
@@ -114,23 +155,15 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
                 f"Ждём рынок следующего гола №{next_goal_number}",
                 "WAITING_FOR_MARKET",
             )
+            # Do not erase previously captured coefficients while a new market
+            # frame is being read. This was the reason the frontend looked empty
+            # during MARKET_LOCKED/ODDS_NOT_FOUND retries.
             await engine_module.STATE.update(
                 market_reader={
-                    "source": "CANVAS FAST FRAME",
+                    "source": "HYBRID FAST DEMO",
                     "status": "READING",
                     "attempt": attempt,
                     "next_goal_number": next_goal_number,
-                },
-                odds={
-                    "selected": None,
-                    "opponent": None,
-                    "team1": None,
-                    "team2": None,
-                    "market": f"Следующий гол №{next_goal_number}",
-                    "source": "CANVAS_FAST_FRAME",
-                    "backend": None,
-                    "confidence": None,
-                    "status": "WAITING_FOR_MARKET",
                 },
             )
 
@@ -146,18 +179,108 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
                         read_only=True,
                     )
 
-                # IMPORTANT: odds capture is the virtual-bet ordering boundary.
-                # Do not re-read scoreboard or coefficient after this point.
-                _cache_fast_snapshot(self, snapshot)
+                selected_side = _resolve_selected_side(
+                    engine_module,
+                    self,
+                    odds,
+                    demo_blocked_window,
+                )
+                selected_odd, opponent_odd = _selected_and_opponent_odds(
+                    selected_side,
+                    odds,
+                )
+                locked_sides = tuple(
+                    int(value) for value in (getattr(odds, "locked_sides", ()) or ())
+                )
+                selected_locked = bool(
+                    self._config.blocked_events_switch_enabled
+                    and _selected_side_is_locked(selected_side, odds)
+                )
 
+                # Publish coefficients immediately, before any blocked-event
+                # decision. A bookmaker lock must never hide recognized odds on
+                # the frontend.
                 await engine_module.STATE.update(
                     market_reader={
                         "source": odds.source,
-                        "status": "READY",
+                        "status": "MARKET_LOCKED" if selected_locked else "READY",
                         "attempt": attempt,
                         "next_goal_number": odds.next_goal_number,
-                    }
+                    },
+                    odds={
+                        "selected": selected_odd,
+                        "opponent": opponent_odd,
+                        "team1": float(odds.team1),
+                        "team2": float(odds.team2),
+                        "market": odds.market,
+                        "source": odds.source,
+                        "backend": odds.ocr_backend,
+                        "confidence": odds.confidence,
+                        "status": "MARKET_LOCKED" if selected_locked else "READY",
+                        "locked_sides": list(locked_sides),
+                    },
+                    market_available=True,
+                    market_locked=selected_locked,
+                    odds_available=True,
+                    odds_value=selected_odd,
+                    market_odds=selected_odd,
                 )
+
+                if selected_locked:
+                    if (
+                        demo_blocked_window is not None
+                        and demo_blocked_window.market_was_ready
+                        and not demo_blocked_window.blocked_window_active
+                    ):
+                        demo_blocked_window.blocked_window_active = True
+                        demo_blocked_window.blocked_score_before = snapshot.score
+                        await engine_module.REPOSITORY.log(
+                            "DEMO_BLOCKED_WINDOW_STARTED",
+                            (
+                                "[NEXT_GOAL][DEMO][BLOCKED] selected outcome visually locked; "
+                                f"match_id={demo_blocked_window.match_id}; "
+                                f"selected_team={demo_blocked_window.selected_team}; "
+                                f"step={demo_blocked_window.step}; "
+                                f"stake={demo_blocked_window.stake:g}; "
+                                f"score={snapshot.score.text()}; "
+                                f"locked_sides={list(locked_sides)}"
+                            ),
+                        )
+
+                    if attempt == 1 or attempt % 10 == 0:
+                        await engine_module.REPOSITORY.log(
+                            "MARKET_LOCKED",
+                            (
+                                f"Выбранный исход заблокирован; коэффициенты сохранены "
+                                f"на фронте: {odds.team1} / {odds.team2}; "
+                                f"locked_sides={list(locked_sides)}"
+                            ),
+                        )
+                    await self._status(
+                        engine_module.DemoStatus.MARKET_LOCKED,
+                        "Выбранный исход заблокирован; ждём открытие рынка",
+                        "MARKET_LOCKED",
+                    )
+                    await original_sleep_or_stop(
+                        self,
+                        engine_module.CONFIG.ocr_retry_delay,
+                    )
+                    continue
+
+                if locked_sides and self._config.blocked_events_switch_enabled:
+                    await engine_module.REPOSITORY.log(
+                        "NON_SELECTED_LOCK_IGNORED",
+                        (
+                            f"Заблокированы стороны {list(locked_sides)}, но выбранная "
+                            "сторона доступна; виртуальная ставка продолжается"
+                        ),
+                    )
+
+                # IMPORTANT: coefficient capture is the virtual-bet ordering
+                # boundary. From here to simulated placement we reuse the same
+                # scoreboard snapshot and do not re-read the coefficient.
+                _cache_fast_snapshot(self, snapshot)
+
                 await self._status(
                     engine_module.DemoStatus.ODDS_READY,
                     f"Коэффициенты зафиксированы: {odds.team1} / {odds.team2}",
@@ -172,7 +295,7 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
                     await engine_module.REPOSITORY.log(
                         "DEMO_BLOCKED_MARKET_RECOVERED",
                         (
-                            "[NEXT_GOAL][DEMO][BLOCKED] fresh market ready; "
+                            "[NEXT_GOAL][DEMO][BLOCKED] selected outcome available; "
                             f"score={snapshot.score.text()} step={demo_blocked_window.step} "
                             f"stake={demo_blocked_window.stake:g}"
                         ),
@@ -195,30 +318,35 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
                     and not demo_blocked_window.blocked_window_active
                 ):
                     demo_blocked_window.blocked_window_active = True
+                    demo_blocked_window.blocked_score_before = snapshot.score
                     await engine_module.REPOSITORY.log(
                         "DEMO_BLOCKED_WINDOW_STARTED",
                         (
-                            "[NEXT_GOAL][DEMO][BLOCKED] outcome unavailable; "
+                            "[NEXT_GOAL][DEMO][BLOCKED] market unavailable; "
                             f"match_id={demo_blocked_window.match_id}; "
                             f"selected_team={demo_blocked_window.selected_team}; "
                             f"step={demo_blocked_window.step}; "
                             f"stake={demo_blocked_window.stake:g}; "
-                            f"blocked_score_before={demo_blocked_window.blocked_score_before.text()}; "
+                            f"blocked_score_before={snapshot.score.text()}; "
                             f"market_status={error.status}"
                         ),
                     )
 
                 await engine_module.STATE.update(
                     market_reader={
-                        "source": "CANVAS FAST FRAME",
+                        "source": "HYBRID FAST DEMO",
                         "status": error.status,
                         "attempt": attempt,
                         "next_goal_number": next_goal_number,
-                    }
+                    },
+                    market_locked=error.status == "MARKET_LOCKED",
                 )
                 if attempt == 1 or attempt % 10 == 0:
                     await engine_module.REPOSITORY.log(error.status, str(error))
-                await original_sleep_or_stop(self, engine_module.CONFIG.ocr_retry_delay)
+                await original_sleep_or_stop(
+                    self,
+                    engine_module.CONFIG.ocr_retry_delay,
+                )
 
         return None
 
