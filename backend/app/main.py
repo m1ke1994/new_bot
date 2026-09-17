@@ -10,10 +10,13 @@ from backend.app.browser.canvas_locking_adapter import (
 )
 from backend.app.browser.manager import BROWSER_MANAGER
 from backend.app.demo.budget_sync import sync_strategy_budget
+from backend.app.demo.fast_next_goal_runtime import install_fast_next_goal_runtime
 
-# Keep the current hybrid DOM+Canvas reader untouched and wrap only the
-# next-goal call with an additional visual padlock check.
+# Use the single-frame Canvas reader with visual lock detection for NEXT_GOAL.
 demo_engine_module.read_next_goal_odds = visual_lock_read_next_goal_odds
+# DEMO virtual bets use the captured odds frame as the placement boundary.
+# LIVE mode keeps the original confirmation and race-protection flow.
+install_fast_next_goal_runtime(demo_engine_module)
 ENGINE = demo_engine_module.ENGINE
 
 from backend.app.routes.browser import router as browser_router
