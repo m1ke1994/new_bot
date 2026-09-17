@@ -27,8 +27,10 @@ async def browser_state():
 
 @router.get("/config-check")
 async def browser_config_check():
-    """Expose public URL diagnostics without credentials or tokens."""
-    return {"ok": True, **URL_CONFIG.public_dict()}
+    """Expose only public runtime diagnostics; never expose auth-oriented fields."""
+    public = URL_CONFIG.public_dict()
+    public.pop("login_url", None)
+    return {"ok": True, **public}
 
 
 @router.post("/market-canvas-debug")

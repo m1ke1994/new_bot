@@ -78,7 +78,6 @@ class UrlConfig:
     login_target: str
     live_target: str
     next_goal_target: str
-    table_tennis_target: str
     backend_host: str
     backend_port: int
     backend_cors_origins: tuple[str, ...]
@@ -94,20 +93,9 @@ class UrlConfig:
             if source.get("SITE_FIFA_URL")
             else "XBET_FIFA_3X3_CONFERENCE_LEAGUE_PATH"
         )
-        table_name = (
-            "SITE_TABLE_TENNIS_URL"
-            if source.get("SITE_TABLE_TENNIS_URL")
-            else "XBET_TABLE_TENNIS_PATH"
-        )
         next_goal_target = _validated_target(
             _required(source, next_goal_name), next_goal_name
         )
-        table_tennis_target = _value(source, table_name)
-        if not table_tennis_target:
-            table_tennis_target = _value(source, "TABLE_TENNIS_URL")
-        if not table_tennis_target:
-            raise RuntimeError(f"Missing required site configuration:\n{table_name}")
-        table_tennis_target = _validated_target(table_tennis_target, table_name)
         login_target = _validated_target(
             _value(source, "SITE_LOGIN_URL") or base_url, "SITE_LOGIN_URL"
         )
@@ -139,7 +127,6 @@ class UrlConfig:
             login_target=login_target,
             live_target=live_target,
             next_goal_target=next_goal_target,
-            table_tennis_target=table_tennis_target,
             backend_host=backend_host,
             backend_port=backend_port,
             backend_cors_origins=cors_origins,
@@ -163,20 +150,8 @@ class UrlConfig:
         return join_url(self.xbet_url, self.next_goal_target)
 
     @property
-    def table_tennis_url(self) -> str:
-        return join_url(self.xbet_url, self.table_tennis_target)
-
-    @property
     def next_goal_league_path(self) -> str:
         return urlsplit(self.next_goal_league_url).path
-
-    @property
-    def table_tennis_path(self) -> str:
-        return urlsplit(self.table_tennis_url).path
-
-    @property
-    def table_tennis_root_path(self) -> str:
-        return urlsplit(self.table_tennis_url).path.rstrip("/")
 
     def public_dict(self) -> dict[str, object]:
         return {
@@ -185,8 +160,6 @@ class UrlConfig:
             "live_url": self.live_url,
             "next_goal_league_path": self.next_goal_league_path,
             "next_goal_league_url": self.next_goal_league_url,
-            "table_tennis_path": self.table_tennis_path,
-            "table_tennis_url": self.table_tennis_url,
             "backend_host": self.backend_host,
             "backend_port": self.backend_port,
             "backend_cors_origins": list(self.backend_cors_origins),
@@ -238,19 +211,6 @@ class SelectorConfig:
     locked_bet: str
     locked_bet_text: str
     remove_bet_buttons: tuple[str, ...]
-    league_item: str
-    league_group: str
-    league_link_template: str
-    league_title: str
-    league_games_count: str
-    accordion_trigger: str
-    market_content_item: str
-    market_group_header: str
-    market_group_list: str
-    market_group_selection: str
-    table_market_groups: tuple[str, ...]
-    table_market_titles: tuple[str, ...]
-    table_market_buttons: tuple[str, ...]
 
     @classmethod
     def from_env(
@@ -310,19 +270,6 @@ class SelectorConfig:
             locked_bet=one("SELECTOR_LOCKED_BET"),
             locked_bet_text=one("SELECTOR_LOCKED_BET_TEXT"),
             remove_bet_buttons=many("SELECTOR_REMOVE_BET_BUTTON"),
-            league_item=one("SELECTOR_LEAGUE_ITEM"),
-            league_group=one("SELECTOR_LEAGUE_GROUP"),
-            league_link_template=one("SELECTOR_LEAGUE_LINK_TEMPLATE"),
-            league_title=one("SELECTOR_LEAGUE_TITLE"),
-            league_games_count=one("SELECTOR_LEAGUE_GAMES_COUNT"),
-            accordion_trigger=one("SELECTOR_ACCORDION_TRIGGER"),
-            market_content_item=one("SELECTOR_MARKET_CONTENT_ITEM"),
-            market_group_header=one("SELECTOR_MARKET_GROUP_HEADER"),
-            market_group_list=one("SELECTOR_MARKET_GROUP_LIST"),
-            market_group_selection=one("SELECTOR_MARKET_GROUP_SELECTION"),
-            table_market_groups=many("SELECTOR_TABLE_MARKET_GROUPS"),
-            table_market_titles=many("SELECTOR_TABLE_MARKET_TITLES"),
-            table_market_buttons=many("SELECTOR_TABLE_MARKET_BUTTONS"),
         )
         config.require(*required)
         return config
@@ -346,21 +293,12 @@ class TextConfig:
     goals: str
     next_goal: str
     next_goal_search: str
-    total_even: str
-    total_even_search: str
-    affirmative_selection: str
     first_half_market: str
     draw_selection: str
     first_half_tab: str
     game_over: str
     bet_confirm: str
     locked_event: str
-    main_game: str
-    first_party: str
-    second_party: str
-    party_market_template: str
-    player_one_aliases: tuple[str, ...]
-    player_two_aliases: tuple[str, ...]
     market_response_keywords: tuple[str, ...]
 
     @classmethod
@@ -375,21 +313,12 @@ class TextConfig:
             goals=required("TEXT_GOALS_FILTER"),
             next_goal=required("TEXT_NEXT_GOAL"),
             next_goal_search=required("TEXT_NEXT_GOAL_SEARCH"),
-            total_even=required("TEXT_TOTAL_EVEN"),
-            total_even_search=required("TEXT_TOTAL_EVEN_SEARCH"),
-            affirmative_selection=required("TEXT_AFFIRMATIVE_SELECTION"),
             first_half_market=required("TEXT_FIRST_HALF_MARKET"),
             draw_selection=required("TEXT_DRAW_SELECTION"),
             first_half_tab=required("TEXT_FIRST_HALF_TAB"),
             game_over=required("TEXT_GAME_OVER"),
             bet_confirm=required("TEXT_BET_CONFIRM"),
             locked_event=required("TEXT_LOCKED_EVENT"),
-            main_game=required("TEXT_MAIN_GAME"),
-            first_party=required("TEXT_FIRST_PARTY"),
-            second_party=required("TEXT_SECOND_PARTY"),
-            party_market_template=required("TEXT_PARTY_MARKET_TEMPLATE"),
-            player_one_aliases=split_config_list(required("TEXT_PLAYER_ONE_ALIASES")),
-            player_two_aliases=split_config_list(required("TEXT_PLAYER_TWO_ALIASES")),
             market_response_keywords=split_config_list(
                 required("TEXT_MARKET_RESPONSE_KEYWORDS")
             ),
@@ -401,8 +330,6 @@ class RuntimeConfig:
     league_name: str
     match_monitor_interval: float
     matches_front_file: str
-    table_tennis_odds_poll_interval: float
-    table_tennis_min_arb_percent: float
     bet_mode: str
     score_poll_interval: float
     ocr_max_attempts: int
@@ -418,12 +345,6 @@ class RuntimeConfig:
             match_monitor_interval=float(_value(source, "MATCH_MONITOR_INTERVAL") or "2"),
             matches_front_file=_value(source, "MATCHES_FRONT_FILE")
             or "front/frontend/public/matches.json",
-            table_tennis_odds_poll_interval=max(
-                0.5, float(_value(source, "TABLE_TENNIS_ODDS_POLL_INTERVAL") or "1.5")
-            ),
-            table_tennis_min_arb_percent=max(
-                0.0, float(_value(source, "TABLE_TENNIS_MIN_ARB_PERCENT") or "0.5")
-            ),
             bet_mode=(_value(source, "BET_MODE") or "DEMO").upper(),
             score_poll_interval=float(_value(source, "SCORE_POLL_INTERVAL") or "0.20"),
             ocr_max_attempts=int(_value(source, "OCR_MAX_ATTEMPTS") or "5"),
@@ -446,15 +367,3 @@ def build_match_url(href: str) -> str:
 
 def get_xbet_url(path: str = "") -> str:
     return join_url(URL_CONFIG.base_url, path) if path else URL_CONFIG.base_url
-
-
-def get_table_tennis_url() -> str:
-    return URL_CONFIG.table_tennis_url
-
-
-def get_table_tennis_odds_poll_interval() -> float:
-    return RUNTIME_CONFIG.table_tennis_odds_poll_interval
-
-
-def get_table_tennis_min_arb_percent() -> float:
-    return RUNTIME_CONFIG.table_tennis_min_arb_percent

@@ -4,23 +4,11 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-import backend.app.demo.engine as demo_engine_module
-from backend.app.browser.canvas_market_adapter import (
-    read_next_goal_odds as canvas_aware_read_next_goal_odds,
-)
 from backend.app.browser.manager import BROWSER_MANAGER
-
-# Keep the strategy/engine unchanged while replacing only the external-market
-# reader. Engine methods resolve this module global at runtime, so both DEMO
-# and LIVE receive the same NextGoalOdds contract regardless of DOM vs canvas.
-demo_engine_module.read_next_goal_odds = canvas_aware_read_next_goal_odds
-ENGINE = demo_engine_module.ENGINE
-
+from backend.app.demo.engine import ENGINE
 from backend.app.routes.browser import router as browser_router
 from backend.app.routes.demo import router as demo_router
 from backend.app.routes.live import router as live_router
-from backend.app.routes.table_tennis import router as table_tennis_router
-from backend.app.table_tennis.forks_scanner import TABLE_TENNIS_SCANNER
 from xbet_config import URL_CONFIG
 
 
@@ -30,8 +18,6 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
-        if TABLE_TENNIS_SCANNER.scanning:
-            await TABLE_TENNIS_SCANNER.stop()
         await ENGINE.stop()
         await BROWSER_MANAGER.stop()
 
@@ -51,7 +37,6 @@ app.add_middleware(
 app.include_router(demo_router)
 app.include_router(browser_router)
 app.include_router(live_router)
-app.include_router(table_tennis_router)
 
 
 @app.get("/api/health")

@@ -400,7 +400,6 @@ class DemoRepository:
         result = summarize()
         result["by_strategy"] = {
             "NEXT_GOAL": summarize("NEXT_GOAL"),
-            "TOTAL_EVEN": summarize("TOTAL_EVEN"),
             "FIRST_HALF_DRAW": summarize("FIRST_HALF_DRAW"),
         }
         return result

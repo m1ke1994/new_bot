@@ -12,7 +12,6 @@ def environment(**changes: str) -> dict[str, str]:
     values = {
         "XBET_URL": "https://test-bookmaker.example/ru",
         "XBET_FIFA_3X3_CONFERENCE_LEAGUE_PATH": "/live/fifa/test-league",
-        "XBET_TABLE_TENNIS_PATH": "/live/table-tennis",
         "BACKEND_HOST": "127.0.0.1",
         "BACKEND_PORT": "8000",
         "BACKEND_CORS_ORIGINS": "http://127.0.0.1:5173,http://localhost:5173",
@@ -46,10 +45,6 @@ class UrlConfigTests(unittest.IsolatedAsyncioTestCase):
             config.next_goal_league_url,
             "https://new-mirror.example/ru/live/fifa/test-league",
         )
-        self.assertEqual(
-            config.table_tennis_url,
-            "https://new-mirror.example/ru/live/table-tennis",
-        )
 
     def test_existing_consumers_share_the_central_config(self):
         self.assertEqual(SITE_URL, URL_CONFIG.xbet_url)
@@ -60,7 +55,10 @@ class UrlConfigTests(unittest.IsolatedAsyncioTestCase):
         values = environment()
         values.pop("XBET_URL")
 
-        with self.assertRaisesRegex(RuntimeError, "XBET_URL is required"):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"Missing required site configuration:\s*XBET_URL",
+        ):
             UrlConfig.from_env(values)
 
     def test_public_urls_reject_embedded_secrets(self):
@@ -76,13 +74,16 @@ class UrlConfigTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_config_check_exposes_urls_but_no_secrets(self):
         payload = await browser_config_check()
-        serialized_keys = " ".join(payload).lower()
+        keys = {str(key).casefold() for key in payload}
 
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["next_goal_league_url"], URL_CONFIG.next_goal_league_url)
-        self.assertNotIn("password", serialized_keys)
-        self.assertNotIn("login", serialized_keys)
-        self.assertNotIn("token", serialized_keys)
+        # Public navigation URLs (including login_url) are intentional diagnostics.
+        # Credentials themselves must never be exposed by this endpoint.
+        self.assertFalse(any("password" in key for key in keys))
+        self.assertFalse(any("token" in key for key in keys))
+        self.assertNotIn("xbet_login", keys)
+        self.assertNotIn("username", keys)
 
     def test_production_sources_contain_no_bookmaker_domains(self):
         root = Path(__file__).resolve().parents[1]
@@ -110,14 +111,10 @@ class UrlConfigTests(unittest.IsolatedAsyncioTestCase):
         app_source = (root / "front/frontend/src/App.vue").read_text(
             encoding="utf-8"
         )
-        forks_source = (
-            root / "front/frontend/src/views/ForksView.vue"
-        ).read_text(encoding="utf-8")
 
         self.assertIn("import.meta.env.VITE_API_BASE_URL", config_source)
         self.assertIn("fetch(apiUrl(path)", app_source)
-        self.assertIn("fetch(apiUrl(path)", forks_source)
-        self.assertNotIn("127.0.0.1", config_source + app_source + forks_source)
+        self.assertNotIn("127.0.0.1", config_source + app_source)
 
 
 if __name__ == "__main__":

@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover
     RapidOCR = None
 
 
-CANVAS_SELECTOR = SELECTORS.canvas
+CANVAS_SELECTOR = SELECTORS.canvas or "canvas.market-grid-canvas__canvas"
 MIN_ODDS = 1.01
 MAX_ODDS = 100.0
 OCR_MIN_CONFIDENCE = (
@@ -110,6 +110,18 @@ def parse_odds(text: str) -> list[float]:
     return values
 
 
+def _parse_structural_odds(text: str) -> list[float]:
+    """Parse OCR odds, including a standalone integer such as ``2``."""
+    values = parse_odds(text)
+    if values:
+        return values
+    integer = re.fullmatch(r"\s*(\d{1,2})\s*", str(text))
+    if integer is None:
+        return []
+    value = float(integer.group(1))
+    return [value] if MIN_ODDS <= value <= MAX_ODDS else []
+
+
 def _tesseract_path() -> str | None:
     candidates = [
         RUNTIME_CONFIG.tesseract_cmd,
@@ -147,21 +159,30 @@ class CanvasVision:
         top = max(0, item["y"] - margin_y)
         right = min(width, item["x"] + item["width"] + margin_x)
         bottom = min(height, item["y"] + item["height"] + margin_y)
-        result = self.rapidocr(
-            image[top:bottom, left:right],
-            use_det=False,
-            use_cls=False,
-            use_rec=True,
-        )
-        if not result.txts:
+        try:
+            result = self.rapidocr(
+                image[top:bottom, left:right],
+                use_det=False,
+                use_cls=False,
+                use_rec=True,
+            )
+        except Exception as error:
+            self.rapidocr_error = (
+                f"CACHED_REC_FAILED: {type(error).__name__}: {error}"
+            )
             return None
-        values = parse_odds(result.txts[0])
-        confidence = float(result.scores[0]) if result.scores else 0.0
+
+        texts = getattr(result, "txts", None)
+        scores = getattr(result, "scores", None)
+        if not texts:
+            return None
+        values = _parse_structural_odds(texts[0])
+        confidence = float(scores[0]) if scores else 0.0
         if len(values) != 1 or confidence < OCR_MIN_CONFIDENCE:
             return None
         return {
             **item,
-            "text": result.txts[0],
+            "text": texts[0],
             "value": values[0],
             "confidence": round(confidence, 4),
             "engine": "RapidOCR",
@@ -254,21 +275,61 @@ class CanvasVision:
     ) -> list[dict[str, Any]]:
         if self.rapidocr is None:
             return []
-        result = self.rapidocr(image)
-        if result is None or result.txts is None:
+
+        try:
+            # RapidOCR 3.x mutates these flags on every call. Cached ROI
+            # recognition uses use_det=False, so a later call without explicit
+            # flags returns TextRecOutput (no boxes). Always restore the full
+            # detection + recognition pipeline for canvas layout analysis.
+            result = self.rapidocr(
+                image,
+                use_det=True,
+                use_cls=True,
+                use_rec=True,
+            )
+        except Exception as error:
+            self.rapidocr_error = (
+                f"FULL_OCR_FAILED: {type(error).__name__}: {error}"
+            )
             return []
+
+        if result is None:
+            self.rapidocr_error = "FULL_OCR_EMPTY: RapidOCR returned None"
+            return []
+
+        texts = getattr(result, "txts", None)
+        scores = getattr(result, "scores", None)
+        boxes = getattr(result, "boxes", None)
+        if texts is None or boxes is None:
+            self.rapidocr_error = (
+                "FULL_OCR_OUTPUT_INVALID: "
+                f"{type(result).__name__} has no boxes/txts; "
+                "expected RapidOCROutput"
+            )
+            return []
+
+        texts = list(texts)
+        boxes = list(boxes)
+        scores = list(scores) if scores is not None else []
+        item_count = min(len(texts), len(boxes))
+        if item_count == 0:
+            return []
+        if len(scores) < item_count:
+            scores.extend([0.0] * (item_count - len(scores)))
+
+        self.rapidocr_error = None
         return [
             self._box_dict(
-                text,
-                score,
-                box,
+                texts[index],
+                scores[index],
+                boxes[index],
                 "RapidOCR",
                 scale=scale,
                 offset_y=offset_y,
                 variant=variant,
             )
-            for text, score, box in zip(result.txts, result.scores, result.boxes, strict=True)
-            if str(text).strip()
+            for index in range(item_count)
+            if str(texts[index]).strip()
         ]
 
     def _tesseract_regions(
@@ -379,7 +440,12 @@ class CanvasVision:
         return _deduplicate_regions(expanded)
 
     def analyze_image(
-        self, image, *, save: bool = True, extended: bool = False
+        self,
+        image,
+        *,
+        save: bool = True,
+        extended: bool = False,
+        expected_goal_number: int | None = None,
     ) -> dict[str, Any]:
         height, width = image.shape[:2]
         if width < 20 or height < 20 or float(np.var(image)) < 1.0:
@@ -387,6 +453,17 @@ class CanvasVision:
 
         started = time.perf_counter()
         mapping = self._read_cached_mapping(image)
+        if (
+            mapping
+            and expected_goal_number is not None
+            and int(mapping.get("next_goal_number") or 0) != expected_goal_number
+        ):
+            # A single process visits many matches with identically sized
+            # canvases. Never reuse coordinates/goal metadata from a previous
+            # score when another next-goal number is required.
+            mapping = None
+            self._cached_mapping = None
+            self._cached_market_bbox = None
         if mapping:
             regions = [mapping["team1"], mapping["team2"]]
             numbers = regions
@@ -396,7 +473,43 @@ class CanvasVision:
             numbers = _numeric_candidates(regions)
             headers = _find_header_bands(image)
             next_goal_regions = _find_next_goal_lines(regions)
-            mapping = _map_next_goal_market(regions, numbers, headers, width, height)
+            mapping = _map_next_goal_market(
+                regions,
+                numbers,
+                headers,
+                width,
+                height,
+                expected_goal_number=expected_goal_number,
+            )
+            if mapping is None and expected_goal_number is not None:
+                # OCR sometimes misses the long labels in the first visible
+                # row but reads both odds. A later row still gives us a safe
+                # structural anchor (columns, vertical spacing and goal
+                # number), so recover the expected row immediately above it.
+                anchor = _map_next_goal_market(
+                    regions,
+                    numbers,
+                    headers,
+                    width,
+                    height,
+                )
+                if anchor is not None:
+                    mapping = _infer_expected_row_from_anchor(
+                        numbers,
+                        headers,
+                        width,
+                        height,
+                        anchor,
+                        expected_goal_number,
+                    )
+                    if mapping is None:
+                        # Keep the actually visible market for diagnostics/UI
+                        # when it cannot be related safely to the expected
+                        # row. The market layer will mark it STALE and refuse
+                        # to place a bet.
+                        mapping = anchor
+                        mapping["expected_goal_number"] = expected_goal_number
+                        mapping["goal_number_matches"] = False
         latency = round(time.perf_counter() - started, 3)
         status = "CANVAS_ANALYZED"
         if not regions:
@@ -478,7 +591,11 @@ def _deduplicate_regions(regions: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _numeric_candidates(regions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     candidates = []
     for region in regions:
-        for value in parse_odds(region["text"]):
+        # 1xBet may render a valid coefficient without a decimal separator
+        # (for example exactly ``2``). Outcome-label digits are filtered later
+        # by row geometry and matching team/goal labels.
+        values = _parse_structural_odds(region["text"])
+        for value in values:
             candidates.append(
                 {
                     **region,
@@ -555,22 +672,19 @@ def _goal_label(region: dict[str, Any], side: int) -> int | None:
     return None
 
 
-def _map_next_goal_market(
-    regions: list[dict[str, Any]],
-    numbers: list[dict[str, Any]],
-    headers: list[dict[str, int]],
-    width: int,
-    height: int,
-) -> dict[str, Any] | None:
-    rows: list[list[dict[str, Any]]] = []
+def _odds_rows(
+    numbers: list[dict[str, Any]], width: int
+) -> list[dict[str, Any]]:
+    """Return vertically aligned TEAM_1/TEAM_2 coefficient rows."""
+    grouped: list[list[dict[str, Any]]] = []
     for item in (candidate for candidate in numbers if candidate["usable"]):
-        center = item["y"] + item["height"] / 2
+        center_y = item["y"] + item["height"] / 2
         row = next(
             (
                 group
-                for group in rows
+                for group in grouped
                 if abs(
-                    center
+                    center_y
                     - sum(x["y"] + x["height"] / 2 for x in group) / len(group)
                 )
                 <= 12
@@ -578,22 +692,136 @@ def _map_next_goal_market(
             None,
         )
         if row is None:
-            rows.append([item])
+            grouped.append([item])
         else:
             row.append(item)
 
-    for row in sorted(rows, key=lambda group: min(item["y"] for item in group)):
-        row = sorted(row, key=lambda item: item["x"])
-        left = [item for item in row if item["x"] + item["width"] / 2 < width * 0.36]
+    rows: list[dict[str, Any]] = []
+    for group in sorted(grouped, key=lambda values: min(item["y"] for item in values)):
+        group = sorted(group, key=lambda item: item["x"])
+        left = [
+            item
+            for item in group
+            if item["x"] + item["width"] / 2 < width * 0.36
+        ]
         middle = [
             item
-            for item in row
-            if width * 0.36 <= item["x"] + item["width"] / 2 < width * 0.70
+            for item in group
+            if width * 0.36
+            <= item["x"] + item["width"] / 2
+            < width * 0.70
         ]
         if not left or not middle:
             continue
-        first, second = left[-1], middle[-1]
-        center_y = (first["y"] + second["y"]) / 2
+        team1, team2 = left[-1], middle[-1]
+        center_y = (
+            team1["y"]
+            + team1["height"] / 2
+            + team2["y"]
+            + team2["height"] / 2
+        ) / 2
+        rows.append({"team1": team1, "team2": team2, "center_y": center_y})
+    return rows
+
+
+def _infer_expected_row_from_anchor(
+    numbers: list[dict[str, Any]],
+    headers: list[dict[str, int]],
+    width: int,
+    height: int,
+    anchor: dict[str, Any],
+    expected_goal_number: int,
+) -> dict[str, Any] | None:
+    """Recover an earlier expected row when its outcome labels were missed.
+
+    This is deliberately conservative: only consecutive rows above a fully
+    recognised structural anchor are accepted, and both odds columns must
+    remain aligned. It cannot turn an unrelated numeric row into a bet.
+    """
+    anchor_goal = int(anchor.get("next_goal_number") or 0)
+    row_offset = anchor_goal - expected_goal_number
+    if row_offset <= 0:
+        return None
+
+    rows = _odds_rows(numbers, width)
+    anchor_team1 = anchor["team1"]
+    anchor_team2 = anchor["team2"]
+    anchor_y = (
+        anchor_team1["y"]
+        + anchor_team1["height"] / 2
+        + anchor_team2["y"]
+        + anchor_team2["height"] / 2
+    ) / 2
+    anchor_index = min(
+        range(len(rows)),
+        key=lambda index: abs(rows[index]["center_y"] - anchor_y),
+        default=-1,
+    )
+    expected_index = anchor_index - row_offset
+    if anchor_index < 0 or expected_index < 0:
+        return None
+
+    candidate = rows[expected_index]
+    gap_per_row = (anchor_y - candidate["center_y"]) / row_offset
+    if not 16 <= gap_per_row <= 60:
+        return None
+
+    team1 = candidate["team1"]
+    team2 = candidate["team2"]
+    team1_center = team1["x"] + team1["width"] / 2
+    team2_center = team2["x"] + team2["width"] / 2
+    anchor_team1_center = anchor_team1["x"] + anchor_team1["width"] / 2
+    anchor_team2_center = anchor_team2["x"] + anchor_team2["width"] / 2
+    if (
+        abs(team1_center - anchor_team1_center) > width * 0.12
+        or abs(team2_center - anchor_team2_center) > width * 0.12
+    ):
+        return None
+
+    preceding = [
+        band
+        for band in headers
+        if band["y"] + band["height"] <= candidate["center_y"]
+    ]
+    header = preceding[-1] if preceding else None
+    if header is None or candidate["center_y"] - (header["y"] + header["height"]) > 65:
+        return None
+    following = [band for band in headers if band["y"] > candidate["center_y"]]
+    bottom = following[0]["y"] if following else min(height, int(anchor_y + 90))
+    confidence = min(float(team1["confidence"]), float(team2["confidence"]))
+    return {
+        "market": f"Следующий гол ({expected_goal_number})",
+        "next_goal_number": expected_goal_number,
+        "expected_goal_number": expected_goal_number,
+        "goal_number_matches": True,
+        "market_bbox": {
+            "x": 0,
+            "y": header["y"],
+            "width": width,
+            "height": max(1, bottom - header["y"]),
+        },
+        "mapping_method": "ROW_ORDER_FROM_STRUCTURAL_ANCHOR",
+        "team1": team1,
+        "team2": team2,
+        "confidence": round(confidence, 4),
+        "anchor_goal_number": anchor_goal,
+    }
+
+
+def _map_next_goal_market(
+    regions: list[dict[str, Any]],
+    numbers: list[dict[str, Any]],
+    headers: list[dict[str, int]],
+    width: int,
+    height: int,
+    *,
+    expected_goal_number: int | None = None,
+) -> dict[str, Any] | None:
+    for row in _odds_rows(numbers, width):
+        first, second = row["team1"], row["team2"]
+        first_center_y = first["y"] + first["height"] / 2
+        second_center_y = second["y"] + second["height"] / 2
+        center_y = row["center_y"]
         side1_labels = [
             item
             for item in regions
@@ -610,9 +838,26 @@ def _map_next_goal_market(
         ]
         if not side1_labels or not side2_labels:
             continue
+        # OCR can see labels from adjacent goal rows at once. Bind each
+        # odds row to the vertically nearest team label. Do not force the
+        # expected goal here: a genuinely stale market must stay stale.
+        side1_labels.sort(
+            key=lambda item: (
+                abs(item["y"] + item["height"] / 2 - center_y),
+                -float(item.get("confidence", 0.0)),
+            )
+        )
+        side2_labels.sort(
+            key=lambda item: (
+                abs(item["y"] + item["height"] / 2 - center_y),
+                -float(item.get("confidence", 0.0)),
+            )
+        )
         goal1 = _goal_label(side1_labels[0], 1)
         goal2 = _goal_label(side2_labels[0], 2)
         if goal1 is None or goal1 != goal2:
+            continue
+        if expected_goal_number is not None and goal1 != expected_goal_number:
             continue
 
         preceding = [band for band in headers if band["y"] + band["height"] <= center_y]
@@ -708,25 +953,42 @@ async def capture_market_canvas(page) -> dict[str, Any]:
     }
 
 
-async def analyze_market_canvas(page, *, extended: bool = False) -> dict[str, Any]:
+async def analyze_market_canvas(
+    page,
+    *,
+    extended: bool = False,
+    expected_goal_number: int | None = None,
+) -> dict[str, Any]:
     captured = await capture_market_canvas(page)
     return await asyncio.to_thread(
-        VISION.analyze_image, captured["image"], save=True, extended=extended
+        VISION.analyze_image,
+        captured["image"],
+        save=True,
+        extended=extended,
+        expected_goal_number=expected_goal_number,
     )
 
 
-async def read_market_odds_from_canvas(page) -> dict[str, Any]:
+async def read_market_odds_from_canvas(
+    page,
+    *,
+    expected_goal_number: int | None = None,
+) -> dict[str, Any]:
     readings = []
-    for index in range(2):
-        extended = index > 0 and not readings[0]["ok"]
-        readings.append(await analyze_market_canvas(page, extended=extended))
-        if index < 1:
-            await page.wait_for_timeout(150)
-
     signatures = []
-    for item in readings:
+    # Two equal readings are required. If the fast first pass cannot map the
+    # market but the extended second pass can, perform one immediate cached
+    # confirmation instead of returning ODDS_UNSTABLE forever.
+    for index in range(3):
+        extended = bool(readings) and not any(item["ok"] for item in readings)
+        item = await analyze_market_canvas(
+            page,
+            extended=extended,
+            expected_goal_number=expected_goal_number,
+        )
+        readings.append(item)
         mapping = item.get("next_goal_mapping") or {}
-        signatures.append(
+        signature = (
             (
                 round(float(mapping["team1"]["value"]), 3),
                 round(float(mapping["team2"]["value"]), 3),
@@ -735,6 +997,15 @@ async def read_market_odds_from_canvas(page) -> dict[str, Any]:
             if mapping
             else None
         )
+        signatures.append(signature)
+        confirmed = Counter(
+            value for value in signatures if value is not None
+        ).most_common(1)
+        if confirmed and confirmed[0][1] >= 2:
+            break
+        if index < 2:
+            await page.wait_for_timeout(150)
+
     confirmed = Counter(value for value in signatures if value is not None).most_common(1)
     stable = confirmed[0][0] if confirmed and confirmed[0][1] >= 2 else None
     selected = next(

@@ -78,7 +78,7 @@ const state = ref({
 
   ocr: { status: 'NOT_USED_FOR_NEXT_GOAL', attempt: 0, max_attempts: 0, candidates: [] },
 
-  market_reader: { source: 'DOM / Playwright', status: 'WAITING', attempt: 0 },
+  market_reader: { source: null, status: 'WAITING', attempt: 0 },
 
   bet: { step: 0, max_steps: 7 },
 
@@ -336,7 +336,6 @@ async function selectStrategyType(strategyType) {
 
   strategyConfig.value.strategy_type = strategyType
 
-  if (strategyType === 'TOTAL_EVEN') selectedMode.value = 'DEMO'
 
   pendingAction.value = 'save-strategy-type'
 
@@ -394,13 +393,6 @@ async function startMode(mode) {
 
   if (state.value.running || actionPending.value) return
 
-  if (mode === 'LIVE' && strategyConfig.value.strategy_type === 'TOTAL_EVEN') {
-
-    backendError.value = 'Стратегия «Тотал чёт» пока доступна только в DEMO.'
-
-    return
-
-  }
 
   selectedMode.value = mode
 
@@ -554,7 +546,6 @@ const stats = computed(() => ({ ...emptyStats, ...(state.value.stats || {}) }))
 
 const strategyComparison = computed(() => ([
   ['Следующий гол', state.value.stats?.by_strategy?.NEXT_GOAL || emptyStats],
-  ['Тотал чёт', state.value.stats?.by_strategy?.TOTAL_EVEN || emptyStats],
   ['Ничья — 1-й тайм', state.value.stats?.by_strategy?.FIRST_HALF_DRAW || emptyStats],
 ]))
 
@@ -564,6 +555,24 @@ const scanner = computed(() => state.value.scanner || {})
 
 const marketReader = computed(() => state.value.market_reader || {})
 
+const marketSource = computed(() => state.value.odds?.source || marketReader.value.source || null)
+
+const marketBackend = computed(() => state.value.odds?.backend || state.value.odds?.ocr_backend || null)
+
+const marketConfidence = computed(() => {
+  const value = Number(state.value.odds?.confidence)
+  if (!Number.isFinite(value)) return null
+  const normalized = value <= 1 ? value * 100 : value
+  return `${Math.round(normalized)}%`
+})
+
+const marketReadDescription = computed(() => {
+  const source = String(marketSource.value || '').toUpperCase()
+  if (source.includes('CANVAS')) return 'Коэффициенты распознаются машинным зрением по Canvas; DOM используется для навигации и как резервный источник.'
+  if (source.includes('DOM')) return 'Коэффициенты прочитаны из DOM.'
+  return 'Ожидаем источник коэффициентов.'
+})
+
 const budget = computed(() => state.value.budget || {})
 
 const sequence = computed(() => state.value.sequence || {})
@@ -572,10 +581,6 @@ const strategyPresentation = {
   NEXT_GOAL: {
     name: 'Следующий гол',
     description: 'Ставка на следующий гол выбранной команды.',
-  },
-  TOTAL_EVEN: {
-    name: 'Тотал чёт',
-    description: 'Ставка на «Тотал чёт — Да». Результат зависит от чётности общего количества голов.',
   },
   FIRST_HALF_DRAW: {
     name: 'Ничья — 1-й тайм',
@@ -809,7 +814,7 @@ onBeforeUnmount(() => {
 
         <button
           class="button button-danger"
-          :disabled="!canStart || strategyConfig.strategy_type === 'TOTAL_EVEN'"
+          :disabled="!canStart"
           @click="startMode('LIVE')"
         >
           {{ pendingAction === 'start' && selectedMode === 'LIVE'
@@ -944,14 +949,6 @@ onBeforeUnmount(() => {
 
             </label>
 
-            <label :class="['strategy-option', { selected: strategyConfig.strategy_type === 'TOTAL_EVEN' }]">
-
-              <input type="checkbox" :checked="strategyConfig.strategy_type === 'TOTAL_EVEN'" :disabled="state.running || actionPending" @click.prevent="selectStrategyType('TOTAL_EVEN')">
-
-              <span><strong>Тотал чёт</strong><small>Только DEMO</small></span>
-
-            </label>
-
             <label :class="['strategy-option', { selected: strategyConfig.strategy_type === 'FIRST_HALF_DRAW' }]">
 
               <input type="checkbox" :checked="strategyConfig.strategy_type === 'FIRST_HALF_DRAW'" :disabled="state.running || actionPending" @click.prevent="selectStrategyType('FIRST_HALF_DRAW')">
@@ -959,14 +956,6 @@ onBeforeUnmount(() => {
               <span><strong>Ничья — 1-й тайм</strong><small>DEMO и LIVE · расчёт после окончания тайма</small></span>
 
             </label>
-
-            <RouterLink class="strategy-option forks-strategy-option" to="/forks">
-
-              <span class="forks-strategy-icon">TT</span>
-
-              <span><strong>Вилки</strong><small>Настольный теннис</small></span>
-
-            </RouterLink>
 
           </div>
 
@@ -1242,6 +1231,34 @@ onBeforeUnmount(() => {
 
             </div>
 
+            <div v-else-if="state.odds?.team1 != null || state.odds?.team2 != null" class="selection-content">
+
+              <div class="selected-team">Коэффициенты рынка</div>
+
+              <div class="odds-compare">
+
+                <div>
+
+                  <span>{{ show(match.team1, 'TEAM 1') }}</span>
+
+                  <strong>{{ show(state.odds?.team1) }}</strong>
+
+                </div>
+
+                <div>
+
+                  <span>{{ show(match.team2, 'TEAM 2') }}</span>
+
+                  <strong>{{ show(state.odds?.team2) }}</strong>
+
+                </div>
+
+              </div>
+
+              <div class="selection-proof">Коэффициенты распознаны; бот проверяет выбор команды</div>
+
+            </div>
+
             <div v-else class="panel-empty">Ожидаем коэффициенты рынка</div>
 
             <div class="ocr-meta">
@@ -1258,7 +1275,7 @@ onBeforeUnmount(() => {
 
                 <span>ИСТОЧНИК</span>
 
-                <strong>{{ show(marketReader.source, 'DOM / Playwright') }}</strong>
+                <strong>{{ show(marketSource, 'Ожидаем данные') }}</strong>
 
               </div>
 
@@ -1270,7 +1287,15 @@ onBeforeUnmount(() => {
 
               </div>
 
-              <div v-if="!isFirstHalfDraw && state.strategy_type !== 'TOTAL_EVEN'">
+              <div v-if="marketBackend || marketConfidence">
+
+                <span>МАШИННОЕ ЗРЕНИЕ</span>
+
+                <strong>{{ show(marketBackend, 'OCR') }} · {{ show(marketConfidence) }}</strong>
+
+              </div>
+
+              <div v-if="!isFirstHalfDraw">
 
                 <span>СЛЕДУЮЩИЙ ГОЛ</span>
 
@@ -1282,9 +1307,9 @@ onBeforeUnmount(() => {
 
                 <span>ЧТЕНИЕ</span>
 
-                <strong>Playwright DOM · попытка {{ marketReader.attempt || 0 }}</strong>
+                <strong>{{ show(marketSource, 'WAITING') }} · попытка {{ marketReader.attempt || 0 }}</strong>
 
-                <small>Рынки читаются напрямую через Playwright DOM.</small>
+                <small>{{ marketReadDescription }}</small>
 
               </div>
 

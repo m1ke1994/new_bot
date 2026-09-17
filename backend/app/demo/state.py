@@ -11,7 +11,6 @@ from .models import DemoStatus
 
 STRATEGY_PRESENTATION = {
     "NEXT_GOAL": ("Следующий гол", "Следующий гол", None),
-    "TOTAL_EVEN": ("Тотал чёт", "Тотал чёт", "Да"),
     "FIRST_HALF_DRAW": ("Ничья — 1-й тайм", "1X2. 1-й тайм", "Ничья"),
 }
 
@@ -72,7 +71,7 @@ def initial_state() -> dict[str, Any]:
             "market_bbox": None,
         },
         "market_reader": {
-            "source": "DOM / Playwright",
+            "source": "HYBRID / DOM + Canvas Vision",
             "status": "WAITING",
             "attempt": 0,
             "next_goal_number": None,
