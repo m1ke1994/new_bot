@@ -2,6 +2,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
+from backend.app.demo.budget_sync import sync_strategy_budget
 from backend.app.demo.engine import (
     BrowserStartError,
     DatabaseClearBlockedError,
@@ -51,7 +52,9 @@ async def get_strategy_config():
 @router.put("/strategy-config")
 async def save_strategy_config(payload: dict[str, Any]):
     try:
-        return await ENGINE.save_strategy_config(payload)
+        saved = await ENGINE.save_strategy_config(payload)
+        await sync_strategy_budget()
+        return saved
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
