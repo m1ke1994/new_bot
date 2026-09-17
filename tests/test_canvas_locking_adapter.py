@@ -43,8 +43,9 @@ class CanvasLockMarkerTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(marker)
-        self.assertGreaterEqual(marker["lower_fill"], 0.64)
-        self.assertGreaterEqual(marker["bottom_fill"], 0.70)
+        self.assertGreaterEqual(marker["lower_fill"], 0.68)
+        self.assertGreaterEqual(marker["bottom_fill"], 0.74)
+        self.assertLessEqual(marker["distance_to_odds"], 80)
 
     def test_plain_outcome_has_no_lock(self):
         image = np.full((100, 300, 3), 238, dtype=np.uint8)
@@ -60,7 +61,7 @@ class CanvasLockMarkerTests(unittest.TestCase):
 
 
 class CanvasLockingHybridTests(unittest.IsolatedAsyncioTestCase):
-    async def test_canvas_visual_lock_becomes_market_locked(self):
+    async def test_canvas_visual_lock_keeps_odds_and_adds_metadata(self):
         page = object()
         canvas_shape = {"width": 800, "height": 400}
         team1_locator = hybrid_market.CanvasCoefficientLocator(
@@ -100,19 +101,18 @@ class CanvasLockingHybridTests(unittest.IsolatedAsyncioTestCase):
                 }
             ),
         ):
-            with self.assertRaises(hybrid_market.MarketNotAvailable) as raised:
-                await adapter.read_next_goal_odds(
-                    page,
-                    "Roma",
-                    "Nice",
-                    2,
-                    1,
-                )
+            result = await adapter.read_next_goal_odds(
+                page,
+                "Roma",
+                "Nice",
+                2,
+                1,
+            )
 
-        self.assertEqual(raised.exception.status, "MARKET_LOCKED")
-        self.assertEqual(raised.exception.details["locked_sides"], [1])
-        self.assertEqual(raised.exception.details["source"], "CANVAS_VISUAL_LOCK")
-        self.assertTrue(raised.exception.details["market_available"])
+        self.assertEqual(result.team1, 2.14)
+        self.assertEqual(result.team2, 1.71)
+        self.assertEqual(result.locked_sides, (1,))
+        self.assertIn("1", result.lock_markers)
 
     async def test_dom_result_is_not_rechecked_as_canvas(self):
         page = object()
