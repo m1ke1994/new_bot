@@ -5,9 +5,12 @@ from backend.app.demo.fast_next_goal_runtime import (
     FAST_PREBET_CACHE_USES,
     _cache_fast_snapshot,
     _consume_fast_snapshot,
+    _selected_and_opponent_odds,
+    _selected_side_is_locked,
+    _side_number,
 )
 from backend.app.demo.engine import selected_team_scored_between
-from backend.app.demo.models import Score, Scorer
+from backend.app.demo.models import NextGoalOdds, Score, Scorer
 
 
 class FastNextGoalRuntimeTests(unittest.TestCase):
@@ -33,6 +36,23 @@ class FastNextGoalRuntimeTests(unittest.TestCase):
 
         self.assertIsNone(_consume_fast_snapshot(engine, changed))
         self.assertEqual(engine._fast_demo_odds_snapshot_uses, 0)
+
+    def test_only_selected_side_lock_blocks_virtual_bet(self):
+        odds = NextGoalOdds(
+            team1=2.11,
+            team2=1.77,
+            locked_sides=(2,),
+        )
+        self.assertFalse(_selected_side_is_locked(Scorer.TEAM_1, odds))
+        self.assertTrue(_selected_side_is_locked(Scorer.TEAM_2, odds))
+
+    def test_selected_and_opponent_odds_follow_fixed_side(self):
+        odds = NextGoalOdds(team1=1.82, team2=2.07)
+        self.assertEqual(_side_number(Scorer.TEAM_2), 2)
+        self.assertEqual(
+            _selected_and_opponent_odds(Scorer.TEAM_2, odds),
+            (2.07, 1.82),
+        )
 
     def test_opponent_goal_during_block_keeps_selected_team_unscored(self):
         before = Score(1, 0)
