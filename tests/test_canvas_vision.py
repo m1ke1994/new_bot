@@ -40,6 +40,57 @@ class _FakeRapidEngine:
 
 class CanvasVisionTests(unittest.TestCase):
 
+    def test_expected_first_row_is_recovered_from_second_row_anchor(self):
+        def region(text, x, y, width):
+            return {
+                "text": text,
+                "confidence": 0.99,
+                "x": x,
+                "y": y,
+                "width": width,
+                "height": 18,
+                "engine": "RapidOCR",
+                "variant": "original",
+            }
+
+        # This mirrors the real failure: RapidOCR reads both odds rows but
+        # misses the long labels in row 1. Row 2 remains a full structural
+        # anchor and must not cause a false STALE_MARKET.
+        regions = [
+            region("1.7", 250, 100, 35),
+            region("2.05", 570, 100, 55),
+            region("Команда 1 - 2-й гол", 20, 134, 170),
+            region("1.704", 250, 134, 55),
+            region("Команда 2 - 2-й гол", 340, 134, 170),
+            region("2.05", 570, 134, 55),
+        ]
+        image = np.zeros((260, 951, 3), dtype=np.uint8)
+        image[:180] = 255
+        vision = CanvasVision()
+        vision._read_cached_mapping = Mock(return_value=None)
+        vision._detect = Mock(return_value=regions)
+
+        with patch(
+            "backend.app.browser.canvas_vision._find_header_bands",
+            return_value=[{"x": 0, "y": 65, "width": 951, "height": 20}],
+        ):
+            analysis = vision.analyze_image(
+                image,
+                save=False,
+                expected_goal_number=1,
+            )
+
+        mapping = analysis["next_goal_mapping"]
+        self.assertEqual(analysis["status"], "CANVAS_ANALYZED")
+        self.assertEqual(mapping["next_goal_number"], 1)
+        self.assertEqual(mapping["team1"]["value"], 1.7)
+        self.assertEqual(mapping["team2"]["value"], 2.05)
+        self.assertTrue(mapping["goal_number_matches"])
+        self.assertEqual(
+            mapping["mapping_method"], "ROW_ORDER_FROM_STRUCTURAL_ANCHOR"
+        )
+        self.assertEqual(mapping["anchor_goal_number"], 2)
+
     def test_visible_market_is_kept_when_goal_number_differs(self):
         def region(text, x, y, width):
             return {
