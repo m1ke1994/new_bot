@@ -90,6 +90,7 @@ CANVAS_2D_HOOK_SCRIPT = r"""
         if (!item) {
             item = {
                 id,
+                element: canvas,
                 generation: 0,
                 texts: [],
                 rects: [],
@@ -256,7 +257,32 @@ CANVAS_2D_HOOK_SCRIPT = r"""
         if (!item || !args.length) return;
         const image = args[0];
         let dx = 0, dy = 0, dw = 0, dh = 0;
+        let sx = 0, sy = 0, sw = 0, sh = 0;
+        let sourceCanvasId = null;
+        let sourceCanvasClass = "";
+        try {
+            const isCanvasLike = image && (
+                image instanceof HTMLCanvasElement
+                || (typeof OffscreenCanvas !== "undefined" && image instanceof OffscreenCanvas)
+            );
+            if (isCanvasLike) {
+                const sourceItem = canvasState(image);
+                sourceCanvasId = sourceItem ? sourceItem.id : null;
+                sourceCanvasClass = String(
+                    (image.className && (
+                        typeof image.className === "string"
+                            ? image.className
+                            : image.className.baseVal
+                    )) || ""
+                );
+            }
+        } catch (_) {}
+
         if (args.length >= 9) {
+            sx = Number(args[1]) || 0;
+            sy = Number(args[2]) || 0;
+            sw = Number(args[3]) || 0;
+            sh = Number(args[4]) || 0;
             dx = Number(args[5]) || 0;
             dy = Number(args[6]) || 0;
             dw = Number(args[7]) || 0;
@@ -266,17 +292,32 @@ CANVAS_2D_HOOK_SCRIPT = r"""
             dy = Number(args[2]) || 0;
             dw = Number(args[3]) || 0;
             dh = Number(args[4]) || 0;
+            try {
+                sw = Number(image.naturalWidth || image.videoWidth || image.width) || dw;
+                sh = Number(image.naturalHeight || image.videoHeight || image.height) || dh;
+            } catch (_) {
+                sw = dw;
+                sh = dh;
+            }
         } else if (args.length >= 3) {
             dx = Number(args[1]) || 0;
             dy = Number(args[2]) || 0;
             try {
                 dw = Number(image.naturalWidth || image.videoWidth || image.width) || 0;
                 dh = Number(image.naturalHeight || image.videoHeight || image.height) || 0;
+                sw = dw;
+                sh = dh;
             } catch (_) {}
         }
         if (dw <= 0 || dh <= 0) return;
         rememberCall("drawImage", {
             source: sourceMeta(image),
+            source_canvas_id: sourceCanvasId,
+            source_canvas_class: sourceCanvasClass,
+            source_x: sx,
+            source_y: sy,
+            source_width: sw,
+            source_height: sh,
             x: dx,
             y: dy,
             width: dw,
@@ -293,6 +334,12 @@ CANVAS_2D_HOOK_SCRIPT = r"""
             width: box.width,
             height: box.height,
             source: sourceMeta(image),
+            source_canvas_id: sourceCanvasId,
+            source_canvas_class: sourceCanvasClass,
+            source_x: sx,
+            source_y: sy,
+            source_width: sw,
+            source_height: sh,
             alpha: Number(ctx.globalAlpha ?? 1),
         });
         trim(item.images);
@@ -490,6 +537,36 @@ CANVAS_2D_HOOK_SCRIPT = r"""
         return Array.from(latest.values()).sort((a, b) => a.seq - b.seq);
     };
 
+    const serializeCanvas = (canvasItem) => {
+        if (!canvasItem) return null;
+        const generation = canvasItem.generation;
+        const sameGeneration = (entry) => entry.generation === generation;
+        let className = "";
+        let tagName = "";
+        try {
+            const element = canvasItem.element;
+            tagName = String((element && element.tagName) || "");
+            if (element && element.className) {
+                className = typeof element.className === "string"
+                    ? element.className
+                    : String(element.className.baseVal || "");
+            }
+        } catch (_) {}
+        return {
+            id: canvasItem.id,
+            generation,
+            width: Number(canvasItem.width || 0),
+            height: Number(canvasItem.height || 0),
+            class_name: className,
+            tag_name: tagName,
+            texts: latestTextByAnchor(
+                canvasItem.texts.filter(sameGeneration)
+            ),
+            rects: canvasItem.rects.filter(sameGeneration).slice(-1200),
+            images: canvasItem.images.filter(sameGeneration).slice(-600),
+        };
+    };
+
     state.snapshot = (selector) => {
         let canvas = null;
         try {
@@ -524,6 +601,7 @@ CANVAS_2D_HOOK_SCRIPT = r"""
             hook_version: state.version,
             status: "READY",
             generation,
+            selected_canvas_id: item ? item.id : null,
             canvas: {
                 id: item ? item.id : null,
                 width: Number(canvas.width || 0),
@@ -534,6 +612,9 @@ CANVAS_2D_HOOK_SCRIPT = r"""
             texts: item ? latestTextByAnchor(item.texts.filter(sameGeneration)) : [],
             rects: item ? item.rects.filter(sameGeneration).slice(-1200) : [],
             images: item ? item.images.filter(sameGeneration).slice(-600) : [],
+            canvases: Array.from(state.canvases.values())
+                .map(serializeCanvas)
+                .filter(Boolean),
             diagnostics: {
                 ...state.diagnostics,
                 calls: { ...state.diagnostics.calls },
