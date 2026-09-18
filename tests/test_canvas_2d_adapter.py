@@ -98,6 +98,71 @@ class Canvas2DAdapterTests(unittest.TestCase):
             "private-icon-glyph",
         )
 
+    def test_reads_internal_canvas_and_projects_to_visible_canvas(self):
+        source = self.snapshot()
+        source_layer = {
+            "id": 1,
+            "width": 1000,
+            "height": 500,
+            "class_name": "market-grid-canvas__offscreen-canvas",
+            "texts": source["texts"],
+            "rects": source["rects"],
+            "images": [],
+        }
+        visible_layer = {
+            "id": 2,
+            "width": 500,
+            "height": 250,
+            "class_name": "market-grid-canvas__canvas",
+            "texts": [],
+            "rects": [],
+            "images": [
+                {
+                    "seq": 20,
+                    "source_canvas_id": 1,
+                    "source_x": 0,
+                    "source_y": 0,
+                    "source_width": 1000,
+                    "source_height": 500,
+                    "x": 0,
+                    "y": 0,
+                    "width": 500,
+                    "height": 250,
+                }
+            ],
+        }
+        snapshot = {
+            "status": "READY",
+            "selected_canvas_id": 2,
+            "canvas": {
+                "id": 2,
+                "width": 500,
+                "height": 250,
+                "css_width": 500,
+                "css_height": 250,
+            },
+            "texts": [],
+            "rects": [],
+            "images": visible_layer["images"],
+            "canvases": [source_layer, visible_layer],
+        }
+
+        mapping = map_next_goal_snapshot(snapshot, 3)
+
+        self.assertIsNotNone(mapping)
+        assert mapping is not None
+        self.assertEqual(mapping.source_canvas_id, 1)
+        self.assertEqual(mapping.team1_odds, 1.935)
+        self.assertEqual(mapping.team2_odds, 2.04)
+        self.assertEqual(
+            mapping.team1_click_region,
+            {"x": 105.0, "y": 44.0, "width": 65.0, "height": 22.0},
+        )
+        self.assertEqual(
+            mapping.team2_click_region,
+            {"x": 277.5, "y": 44.0, "width": 65.0, "height": 22.0},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
