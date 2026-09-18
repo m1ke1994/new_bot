@@ -40,8 +40,9 @@ class FrontendBetContractTests(unittest.TestCase):
         )
         self.assertIn("state.value.odds?.backend", self.app_source)
         self.assertIn("state.value.odds?.confidence", self.app_source)
-        self.assertIn("source.includes('CANVAS')", self.app_source)
-        self.assertIn("машинным зрением по Canvas", self.app_source)
+        self.assertIn("source.includes('CANVAS_2D')", self.app_source)
+        self.assertIn("Canvas 2D через fillText/draw calls, без OCR", self.app_source)
+        self.assertNotIn("МАШИННОЕ ЗРЕНИЕ", self.app_source)
         self.assertNotIn(
             "Рынки читаются напрямую через Playwright DOM.",
             self.app_source,
