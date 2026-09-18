@@ -24,7 +24,8 @@ class FrontendCanvasStateTests(unittest.TestCase):
         self.assertIn("state.value.odds?.source", self.source)
         self.assertIn("const marketBackend = computed", self.source)
         self.assertIn("const marketConfidence = computed", self.source)
-        self.assertIn("машинным зрением по Canvas", self.source)
+        self.assertIn("Canvas 2D через fillText/draw calls, без OCR", self.source)
+        self.assertNotIn("машинным зрением по Canvas", self.source)
         self.assertNotIn("Рынки читаются напрямую через Playwright DOM.", self.source)
         self.assertNotIn("market_reader: { source: 'DOM / Playwright'", self.source)
 
