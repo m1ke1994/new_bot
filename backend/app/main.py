@@ -5,15 +5,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 import backend.app.demo.engine as demo_engine_module
-from backend.app.browser.canvas_locking_adapter import (
-    read_next_goal_odds as visual_lock_read_next_goal_odds,
+from backend.app.browser.canvas_2d_adapter import (
+    read_next_goal_odds as canvas_2d_read_next_goal_odds,
 )
 from backend.app.browser.manager import BROWSER_MANAGER
 from backend.app.demo.budget_sync import sync_strategy_budget
 from backend.app.demo.fast_next_goal_runtime import install_fast_next_goal_runtime
 
-# Use the single-frame Canvas reader with visual lock detection for NEXT_GOAL.
-demo_engine_module.read_next_goal_odds = visual_lock_read_next_goal_odds
+# NEXT_GOAL reads Canvas 2D draw calls directly. OCR / machine vision is not
+# used by the active runtime path; DOM remains the fallback when no canvas exists.
+demo_engine_module.read_next_goal_odds = canvas_2d_read_next_goal_odds
 # DEMO virtual bets use the captured odds frame as the placement boundary.
 # LIVE mode keeps the original confirmation and race-protection flow.
 install_fast_next_goal_runtime(demo_engine_module)
