@@ -568,7 +568,8 @@ const marketConfidence = computed(() => {
 
 const marketReadDescription = computed(() => {
   const source = String(marketSource.value || '').toUpperCase()
-  if (source.includes('CANVAS')) return 'Коэффициенты распознаются машинным зрением по Canvas; DOM используется для навигации и как резервный источник.'
+  if (source.includes('CANVAS_2D')) return 'Коэффициенты читаются напрямую из Canvas 2D через fillText/draw calls, без OCR.'
+  if (source.includes('CANVAS')) return 'Используется резервный Canvas-источник.'
   if (source.includes('DOM')) return 'Коэффициенты прочитаны из DOM.'
   return 'Ожидаем источник коэффициентов.'
 })
