@@ -27,18 +27,44 @@ HOOKED_PAGE_IDS: set[int] = set()
 
 CANVAS_2D_HOOK_SCRIPT = r"""
 (() => {
-    if (window.__autobetCanvas2D && window.__autobetCanvas2D.version === 1) {
+    if (window.__autobetCanvas2D && window.__autobetCanvas2D.version === 2) {
         return;
     }
 
     const state = {
-        version: 1,
+        version: 2,
         seq: 0,
         nextCanvasId: 1,
         canvases: new Map(),
+        diagnostics: {
+            installed_at: Date.now(),
+            calls: {},
+            contexts: {},
+            transfer_control_to_offscreen: 0,
+            create_image_bitmap: 0,
+            offscreen_canvas_available: typeof OffscreenCanvas !== "undefined",
+            offscreen_2d_available: typeof OffscreenCanvasRenderingContext2D !== "undefined",
+        },
+        recentCalls: [],
     };
 
     const maxItems = 2500;
+    const maxRecentCalls = 80;
+
+    const bump = (name) => {
+        state.diagnostics.calls[name] = (state.diagnostics.calls[name] || 0) + 1;
+    };
+
+    const rememberCall = (method, details = {}) => {
+        state.recentCalls.push({
+            seq: ++state.seq,
+            method,
+            ...details,
+        });
+        if (state.recentCalls.length > maxRecentCalls) {
+            state.recentCalls.splice(0, state.recentCalls.length - maxRecentCalls);
+        }
+    };
 
     const trim = (items) => {
         if (items.length > maxItems) {
@@ -148,6 +174,13 @@ CANVAS_2D_HOOK_SCRIPT = r"""
     };
 
     const recordText = (ctx, text, x, y, kind) => {
+        bump(kind);
+        rememberCall(kind, {
+            text: String(text),
+            x: Number(x) || 0,
+            y: Number(y) || 0,
+            context: ctx && ctx.constructor ? ctx.constructor.name : "unknown",
+        });
         const item = canvasState(ctx.canvas);
         if (!item) return;
         const box = textBounds(ctx, text, x, y);
@@ -172,6 +205,7 @@ CANVAS_2D_HOOK_SCRIPT = r"""
     };
 
     const recordRect = (ctx, x, y, width, height, kind) => {
+        bump(kind);
         const item = canvasState(ctx.canvas);
         if (!item) return;
         const box = rectBounds(ctx, Number(x) || 0, Number(y) || 0, Number(width) || 0, Number(height) || 0);
@@ -217,6 +251,7 @@ CANVAS_2D_HOOK_SCRIPT = r"""
     };
 
     const recordImage = (ctx, args) => {
+        bump("drawImage");
         const item = canvasState(ctx.canvas);
         if (!item || !args.length) return;
         const image = args[0];
@@ -240,6 +275,14 @@ CANVAS_2D_HOOK_SCRIPT = r"""
             } catch (_) {}
         }
         if (dw <= 0 || dh <= 0) return;
+        rememberCall("drawImage", {
+            source: sourceMeta(image),
+            x: dx,
+            y: dy,
+            width: dw,
+            height: dh,
+            context: ctx && ctx.constructor ? ctx.constructor.name : "unknown",
+        });
         const box = rectBounds(ctx, dx, dy, dw, dh);
         item.images.push({
             seq: ++state.seq,
@@ -255,13 +298,8 @@ CANVAS_2D_HOOK_SCRIPT = r"""
         trim(item.images);
     };
 
-    const proto = window.CanvasRenderingContext2D && CanvasRenderingContext2D.prototype;
-    if (!proto) {
-        window.__autobetCanvas2D = state;
-        return;
-    }
-
-    const patch = (name, wrapper) => {
+    const patchMethod = (proto, name, wrapper) => {
+        if (!proto) return;
         const original = proto[name];
         if (typeof original !== "function") return;
         if (original.__autobetCanvas2DWrapped) return;
@@ -276,42 +314,45 @@ CANVAS_2D_HOOK_SCRIPT = r"""
         proto[name] = wrapped;
     };
 
-    patch("fillText", function(original, args) {
+    const patch2DPrototype = (proto) => {
+        if (!proto) return;
+
+        patchMethod(proto, "fillText", function(original, args) {
         try { recordText(this, args[0], args[1], args[2], "fillText"); } catch (_) {}
         return original.apply(this, args);
     });
 
-    patch("strokeText", function(original, args) {
+        patchMethod(proto, "strokeText", function(original, args) {
         try { recordText(this, args[0], args[1], args[2], "strokeText"); } catch (_) {}
         return original.apply(this, args);
     });
 
-    patch("fillRect", function(original, args) {
+        patchMethod(proto, "fillRect", function(original, args) {
         try { recordRect(this, args[0], args[1], args[2], args[3], "fillRect"); } catch (_) {}
         return original.apply(this, args);
     });
 
-    patch("strokeRect", function(original, args) {
+        patchMethod(proto, "strokeRect", function(original, args) {
         try { recordRect(this, args[0], args[1], args[2], args[3], "strokeRect"); } catch (_) {}
         return original.apply(this, args);
     });
 
-    patch("rect", function(original, args) {
+        patchMethod(proto, "rect", function(original, args) {
         try { recordRect(this, args[0], args[1], args[2], args[3], "rect"); } catch (_) {}
         return original.apply(this, args);
     });
 
-    patch("roundRect", function(original, args) {
+        patchMethod(proto, "roundRect", function(original, args) {
         try { recordRect(this, args[0], args[1], args[2], args[3], "roundRect"); } catch (_) {}
         return original.apply(this, args);
     });
 
-    patch("drawImage", function(original, args) {
+        patchMethod(proto, "drawImage", function(original, args) {
         try { recordImage(this, args); } catch (_) {}
         return original.apply(this, args);
     });
 
-    patch("clearRect", function(original, args) {
+        patchMethod(proto, "clearRect", function(original, args) {
         try {
             const item = canvasState(this.canvas);
             if (item) {
@@ -327,7 +368,117 @@ CANVAS_2D_HOOK_SCRIPT = r"""
             }
         } catch (_) {}
         return original.apply(this, args);
-    });
+        });
+
+        patchMethod(proto, "putImageData", function(original, args) {
+            bump("putImageData");
+            const image = args[0];
+            rememberCall("putImageData", {
+                x: Number(args[1]) || 0,
+                y: Number(args[2]) || 0,
+                width: image && Number(image.width) ? Number(image.width) : 0,
+                height: image && Number(image.height) ? Number(image.height) : 0,
+                context: this && this.constructor ? this.constructor.name : "unknown",
+            });
+            return original.apply(this, args);
+        });
+
+        for (const method of [
+            "beginPath", "moveTo", "lineTo", "bezierCurveTo", "quadraticCurveTo",
+            "arc", "arcTo", "ellipse", "fill", "stroke", "clip",
+        ]) {
+            patchMethod(proto, method, function(original, args) {
+                bump(method);
+                return original.apply(this, args);
+            });
+        }
+    };
+
+    patch2DPrototype(
+        window.CanvasRenderingContext2D
+            ? CanvasRenderingContext2D.prototype
+            : null
+    );
+    patch2DPrototype(
+        window.OffscreenCanvasRenderingContext2D
+            ? OffscreenCanvasRenderingContext2D.prototype
+            : null
+    );
+
+    if (window.HTMLCanvasElement && HTMLCanvasElement.prototype) {
+        patchMethod(
+            HTMLCanvasElement.prototype,
+            "getContext",
+            function(original, args) {
+                const type = String(args[0] || "unknown").toLowerCase();
+                state.diagnostics.contexts[type] =
+                    (state.diagnostics.contexts[type] || 0) + 1;
+                rememberCall("getContext", {
+                    type,
+                    width: Number(this.width || 0),
+                    height: Number(this.height || 0),
+                });
+                return original.apply(this, args);
+            }
+        );
+
+        patchMethod(
+            HTMLCanvasElement.prototype,
+            "transferControlToOffscreen",
+            function(original, args) {
+                state.diagnostics.transfer_control_to_offscreen += 1;
+                bump("transferControlToOffscreen");
+                rememberCall("transferControlToOffscreen", {
+                    width: Number(this.width || 0),
+                    height: Number(this.height || 0),
+                });
+                return original.apply(this, args);
+            }
+        );
+    }
+
+    if (window.OffscreenCanvas && OffscreenCanvas.prototype) {
+        patchMethod(
+            OffscreenCanvas.prototype,
+            "getContext",
+            function(original, args) {
+                const type = String(args[0] || "unknown").toLowerCase();
+                const key = "offscreen:" + type;
+                state.diagnostics.contexts[key] =
+                    (state.diagnostics.contexts[key] || 0) + 1;
+                rememberCall("offscreen.getContext", {
+                    type,
+                    width: Number(this.width || 0),
+                    height: Number(this.height || 0),
+                });
+                return original.apply(this, args);
+            }
+        );
+    }
+
+    if (typeof window.createImageBitmap === "function") {
+        const originalCreateImageBitmap = window.createImageBitmap;
+        if (!originalCreateImageBitmap.__autobetCanvas2DWrapped) {
+            const wrappedCreateImageBitmap = function(...args) {
+                state.diagnostics.create_image_bitmap += 1;
+                bump("createImageBitmap");
+                rememberCall("createImageBitmap", {
+                    source: sourceMeta(args[0]),
+                });
+                return originalCreateImageBitmap.apply(this, args);
+            };
+            try {
+                Object.defineProperty(
+                    wrappedCreateImageBitmap,
+                    "__autobetCanvas2DWrapped",
+                    { value: true }
+                );
+            } catch (_) {
+                wrappedCreateImageBitmap.__autobetCanvas2DWrapped = true;
+            }
+            window.createImageBitmap = wrappedCreateImageBitmap;
+        }
+    }
 
     const latestTextByAnchor = (items) => {
         const latest = new Map();
@@ -370,6 +521,7 @@ CANVAS_2D_HOOK_SCRIPT = r"""
 
         return {
             hooked: true,
+            hook_version: state.version,
             status: "READY",
             generation,
             canvas: {
@@ -382,6 +534,13 @@ CANVAS_2D_HOOK_SCRIPT = r"""
             texts: item ? latestTextByAnchor(item.texts.filter(sameGeneration)) : [],
             rects: item ? item.rects.filter(sameGeneration).slice(-1200) : [],
             images: item ? item.images.filter(sameGeneration).slice(-600) : [],
+            diagnostics: {
+                ...state.diagnostics,
+                calls: { ...state.diagnostics.calls },
+                contexts: { ...state.diagnostics.contexts },
+                canvases_seen: state.canvases.size,
+                recent_calls: state.recentCalls.slice(-40),
+            },
         };
     };
 
@@ -414,6 +573,7 @@ class _CachedMarket:
 
 
 _LAST_MARKETS: dict[int, _CachedMarket] = {}
+_LAST_DIAGNOSTIC_SIGNATURES: dict[int, str] = {}
 
 
 async def _log(logger: Logger | None, event: str, message: str) -> None:
@@ -774,6 +934,7 @@ async def capture_canvas_2d_snapshot(page: Page) -> dict[str, Any]:
                     texts: [],
                     rects: [],
                     images: [],
+                    diagnostics: {},
                 };
             }
             return api.snapshot(selector);
@@ -832,6 +993,83 @@ def _cached_market_is_usable(
     )
 
 
+def _diagnostic_signature(snapshot: dict[str, Any]) -> str:
+    diagnostics = snapshot.get("diagnostics") or {}
+    calls = diagnostics.get("calls") or {}
+    contexts = diagnostics.get("contexts") or {}
+    recent = diagnostics.get("recent_calls") or []
+    recent_methods = [str(item.get("method") or "") for item in recent[-8:]]
+    return repr(
+        (
+            tuple(sorted((str(key), int(value)) for key, value in calls.items())),
+            tuple(sorted((str(key), int(value)) for key, value in contexts.items())),
+            int(diagnostics.get("transfer_control_to_offscreen") or 0),
+            int(diagnostics.get("create_image_bitmap") or 0),
+            tuple(recent_methods),
+        )
+    )
+
+
+def _diagnostic_message(snapshot: dict[str, Any]) -> str:
+    diagnostics = snapshot.get("diagnostics") or {}
+    calls = diagnostics.get("calls") or {}
+    contexts = diagnostics.get("contexts") or {}
+    recent = diagnostics.get("recent_calls") or []
+    sample_parts: list[str] = []
+    for item in recent[-12:]:
+        method = str(item.get("method") or "?")
+        if method in {"fillText", "strokeText"}:
+            sample_parts.append(
+                f"{method}({str(item.get('text') or '')!r}@"
+                f"{item.get('x')},{item.get('y')})"
+            )
+        elif method in {
+            "drawImage",
+            "putImageData",
+            "transferControlToOffscreen",
+            "getContext",
+            "offscreen.getContext",
+            "createImageBitmap",
+        }:
+            sample_parts.append(f"{method}({item})")
+
+    return (
+        f"hook_v={snapshot.get('hook_version') or diagnostics.get('version') or 2}; "
+        f"status={snapshot.get('status')}; "
+        f"contexts={contexts}; calls={calls}; "
+        f"offscreen_available={diagnostics.get('offscreen_canvas_available')}; "
+        f"offscreen_2d_available={diagnostics.get('offscreen_2d_available')}; "
+        f"transfer_offscreen={diagnostics.get('transfer_control_to_offscreen', 0)}; "
+        f"createImageBitmap={diagnostics.get('create_image_bitmap', 0)}; "
+        f"canvases_seen={diagnostics.get('canvases_seen', 0)}; "
+        f"texts={len(snapshot.get('texts') or [])}; "
+        f"rects={len(snapshot.get('rects') or [])}; "
+        f"images={len(snapshot.get('images') or [])}; "
+        f"recent=[{' | '.join(sample_parts)}]"
+    )
+
+
+async def _log_canvas_diagnostics(
+    page: Page,
+    snapshot: dict[str, Any],
+    logger: Logger | None,
+    *,
+    force: bool = False,
+) -> None:
+    if logger is None:
+        return
+    signature = _diagnostic_signature(snapshot)
+    page_id = id(page)
+    if not force and _LAST_DIAGNOSTIC_SIGNATURES.get(page_id) == signature:
+        return
+    _LAST_DIAGNOSTIC_SIGNATURES[page_id] = signature
+    await _log(
+        logger,
+        "CANVAS_2D_DIAGNOSTICS",
+        _diagnostic_message(snapshot),
+    )
+
+
 async def read_next_goal_odds(
     page: Page,
     team1: str,
@@ -880,6 +1118,7 @@ async def read_next_goal_odds(
         )
 
     snapshot, mapping = await _capture_mapping(page, next_goal_number)
+    await _log_canvas_diagnostics(page, snapshot, logger)
     cache_key = id(page)
     cached = _LAST_MARKETS.get(cache_key)
 
@@ -899,6 +1138,12 @@ async def read_next_goal_odds(
                 await search_input.fill(hybrid_market.NEXT_GOAL_SEARCH_TEXT)
                 await page.wait_for_timeout(80)
                 snapshot, mapping = await _capture_mapping(page, next_goal_number)
+                await _log_canvas_diagnostics(
+                    page,
+                    snapshot,
+                    logger,
+                    force=True,
+                )
             except Exception:
                 pass
 
@@ -954,6 +1199,7 @@ async def read_next_goal_odds(
                 "rect_count": len(snapshot.get("rects") or []),
                 "image_count": len(snapshot.get("images") or []),
                 "hook_status": snapshot.get("status"),
+                "canvas_2d_diagnostics": snapshot.get("diagnostics") or {},
             },
         )
 
