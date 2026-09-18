@@ -637,8 +637,12 @@ class Canvas2DMarketMapping:
     team2_odds: float
     team1_region: dict[str, float]
     team2_region: dict[str, float]
+    team1_click_region: dict[str, float]
+    team2_click_region: dict[str, float]
     team1_text_region: dict[str, Any]
     team2_text_region: dict[str, Any]
+    source_canvas_id: int | None
+    source_canvas: dict[str, Any]
     canvas: dict[str, Any]
 
 
@@ -650,6 +654,9 @@ class _CachedMarket:
     team2_odds: float
     team1_region: dict[str, float]
     team2_region: dict[str, float]
+    team1_click_region: dict[str, float]
+    team2_click_region: dict[str, float]
+    source_canvas_id: int | None
     canvas: dict[str, Any]
 
 
@@ -790,23 +797,29 @@ def _button_region(
     }
 
 
-def map_next_goal_snapshot(
-    snapshot: dict[str, Any],
+def _map_next_goal_layer(
+    layer: dict[str, Any],
     expected_goal_number: int,
-) -> Canvas2DMarketMapping | None:
-    canvas = snapshot.get("canvas") or {}
-    width = float(canvas.get("width") or 0.0)
-    height = float(canvas.get("height") or 0.0)
+) -> tuple[
+    float,
+    float,
+    dict[str, float],
+    dict[str, float],
+    dict[str, Any],
+    dict[str, Any],
+] | None:
+    width = float(layer.get("width") or 0.0)
+    height = float(layer.get("height") or 0.0)
     if width <= 0 or height <= 0:
         return None
 
     texts = [
         item
-        for item in (snapshot.get("texts") or [])
+        for item in (layer.get("texts") or [])
         if str(item.get("text") or "").strip()
         and float(item.get("alpha") if item.get("alpha") is not None else 1.0) > 0.03
     ]
-    rects = list(snapshot.get("rects") or [])
+    rects = list(layer.get("rects") or [])
     if not texts:
         return None
 
@@ -854,25 +867,168 @@ def map_next_goal_snapshot(
         if goal1 != expected_goal_number or goal2 != expected_goal_number:
             continue
 
-        return Canvas2DMarketMapping(
-            next_goal_number=expected_goal_number,
-            team1_odds=team1_odds,
-            team2_odds=team2_odds,
-            team1_region=_button_region(
+        return (
+            team1_odds,
+            team2_odds,
+            _button_region(
                 team1_text,
                 rects,
                 canvas_width=width,
                 canvas_height=height,
             ),
-            team2_region=_button_region(
+            _button_region(
                 team2_text,
                 rects,
                 canvas_width=width,
                 canvas_height=height,
             ),
-            team1_text_region=dict(team1_text),
-            team2_text_region=dict(team2_text),
-            canvas=dict(canvas),
+            dict(team1_text),
+            dict(team2_text),
+        )
+    return None
+
+
+def _canvas_layer_by_id(
+    snapshot: dict[str, Any],
+    canvas_id: int | None,
+) -> dict[str, Any] | None:
+    if canvas_id is None:
+        return None
+    for layer in snapshot.get("canvases") or []:
+        if int(layer.get("id") or -1) == int(canvas_id):
+            return layer
+    return None
+
+
+def _project_region_to_visible_canvas(
+    region: dict[str, float],
+    *,
+    source_layer: dict[str, Any],
+    snapshot: dict[str, Any],
+) -> dict[str, float]:
+    source_id = source_layer.get("id")
+    selected_id = snapshot.get("selected_canvas_id")
+    if source_id is None or selected_id is None or int(source_id) == int(selected_id):
+        return dict(region)
+
+    visible_images = snapshot.get("images") or []
+    projections = [
+        image
+        for image in visible_images
+        if image.get("source_canvas_id") is not None
+        and int(image.get("source_canvas_id")) == int(source_id)
+    ]
+    if not projections:
+        return dict(region)
+
+    image = max(projections, key=lambda item: int(item.get("seq") or 0))
+    source_width = float(
+        image.get("source_width")
+        or source_layer.get("width")
+        or 0.0
+    )
+    source_height = float(
+        image.get("source_height")
+        or source_layer.get("height")
+        or 0.0
+    )
+    if source_width <= 0 or source_height <= 0:
+        return dict(region)
+
+    source_x = float(image.get("source_x") or 0.0)
+    source_y = float(image.get("source_y") or 0.0)
+    dest_x = float(image.get("x") or 0.0)
+    dest_y = float(image.get("y") or 0.0)
+    dest_width = float(image.get("width") or source_width)
+    dest_height = float(image.get("height") or source_height)
+
+    scale_x = dest_width / source_width
+    scale_y = dest_height / source_height
+    return {
+        "x": dest_x + (float(region["x"]) - source_x) * scale_x,
+        "y": dest_y + (float(region["y"]) - source_y) * scale_y,
+        "width": float(region["width"]) * scale_x,
+        "height": float(region["height"]) * scale_y,
+    }
+
+
+def map_next_goal_snapshot(
+    snapshot: dict[str, Any],
+    expected_goal_number: int,
+) -> Canvas2DMarketMapping | None:
+    visible_canvas = snapshot.get("canvas") or {}
+    layers = list(snapshot.get("canvases") or [])
+
+    # Prefer the internal market layer with actual fillText calls. The visible
+    # canvas often contains only one drawImage() of this offscreen HTML canvas.
+    layers.sort(
+        key=lambda layer: (
+            len(layer.get("texts") or []),
+            len(layer.get("rects") or []),
+        ),
+        reverse=True,
+    )
+
+    # Backward compatibility for tests/snapshots created before multi-canvas
+    # instrumentation.
+    if not layers:
+        layers = [
+            {
+                "id": snapshot.get("selected_canvas_id"),
+                "width": visible_canvas.get("width"),
+                "height": visible_canvas.get("height"),
+                "texts": snapshot.get("texts") or [],
+                "rects": snapshot.get("rects") or [],
+                "images": snapshot.get("images") or [],
+                "class_name": "",
+            }
+        ]
+
+    for layer in layers:
+        mapped = _map_next_goal_layer(layer, expected_goal_number)
+        if mapped is None:
+            continue
+
+        (
+            team1_odds,
+            team2_odds,
+            team1_region,
+            team2_region,
+            team1_text,
+            team2_text,
+        ) = mapped
+
+        team1_click_region = _project_region_to_visible_canvas(
+            team1_region,
+            source_layer=layer,
+            snapshot=snapshot,
+        )
+        team2_click_region = _project_region_to_visible_canvas(
+            team2_region,
+            source_layer=layer,
+            snapshot=snapshot,
+        )
+
+        return Canvas2DMarketMapping(
+            next_goal_number=expected_goal_number,
+            team1_odds=team1_odds,
+            team2_odds=team2_odds,
+            team1_region=team1_region,
+            team2_region=team2_region,
+            team1_click_region=team1_click_region,
+            team2_click_region=team2_click_region,
+            team1_text_region=team1_text,
+            team2_text_region=team2_text,
+            source_canvas_id=(
+                int(layer["id"]) if layer.get("id") is not None else None
+            ),
+            source_canvas={
+                "id": layer.get("id"),
+                "width": layer.get("width"),
+                "height": layer.get("height"),
+                "class_name": layer.get("class_name"),
+            },
+            canvas=dict(visible_canvas),
         )
     return None
 
