@@ -116,11 +116,38 @@ class BrowserManager:
             self.playwright = None
             raise
 
+        # Install the Canvas 2D instrumentation before any bookmaker navigation.
+        # The active page may already exist (persistent context), so we also inject
+        # the hook into its current document. Future documents/frames receive it
+        # automatically through BrowserContext.add_init_script().
+        from backend.app.browser.canvas_2d_adapter import CANVAS_2D_HOOK_SCRIPT
+
+        await context.add_init_script(CANVAS_2D_HOOK_SCRIPT)
+
         self.context = context
         self.generation += 1
         self._context_closed = False
         context.on("close", lambda *_: self._mark_context_closed())
         self.page = context.pages[0] if context.pages else await context.new_page()
+
+        for existing_page in context.pages:
+            if existing_page.is_closed():
+                continue
+            try:
+                await existing_page.evaluate(CANVAS_2D_HOOK_SCRIPT)
+            except Exception:
+                # Cross-navigation / browser-internal pages can reject evaluate.
+                # The init script is still registered for the next real document.
+                pass
+
+        await self._log(
+            "CANVAS_2D_HOOK_INSTALLED_EARLY",
+            (
+                "Canvas 2D hook v2 registered on BrowserContext before site navigation; "
+                "tracking getContext/fillText/drawImage/putImageData/"
+                "transferControlToOffscreen/path calls."
+            ),
+        )
         await self._log(
             "BROWSER_CONTEXT_RECOVERED" if recovered else "BROWSER_STARTED",
             "Visible persistent Chromium context is ready",
