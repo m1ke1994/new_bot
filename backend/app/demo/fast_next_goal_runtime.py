@@ -85,6 +85,15 @@ def _selected_side_is_locked(side: Any, odds: Any) -> bool:
     return side_number is not None and side_number in locked
 
 
+def _reader_source_label(odds: Any) -> str:
+    source = str(getattr(odds, "source", "") or "")
+    if source == "CANVAS_2D":
+        return "Canvas 2D / fillText"
+    if source == "CANVAS_VISION":
+        return f"Canvas Vision / {getattr(odds, 'ocr_backend', None) or 'OCR'}"
+    return "DOM / Playwright"
+
+
 def install_fast_next_goal_runtime(engine_module: Any) -> None:
     """Patch only DEMO NEXT_GOAL timing; LIVE keeps the original safety checks."""
     engine_class = engine_module.DemoEngine
@@ -266,7 +275,7 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
                 # the frontend.
                 await engine_module.STATE.update(
                     market_reader={
-                        "source": odds.source,
+                        "source": _reader_source_label(odds),
                         "status": "MARKET_LOCKED" if selected_locked else "READY",
                         "attempt": attempt,
                         "next_goal_number": odds.next_goal_number,
