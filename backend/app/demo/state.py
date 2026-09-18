@@ -71,7 +71,7 @@ def initial_state() -> dict[str, Any]:
             "market_bbox": None,
         },
         "market_reader": {
-            "source": "HYBRID / DOM + Canvas Vision",
+            "source": "CANVAS 2D / fillText + DOM fallback",
             "status": "WAITING",
             "attempt": 0,
             "next_goal_number": None,
