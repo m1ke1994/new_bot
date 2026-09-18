@@ -24,6 +24,33 @@ class RuntimeWiringTests(unittest.TestCase):
         self.assertNotIn("visual_lock_read_next_goal_odds", main_source)
         self.assertIn("canvas_2d_read_next_goal_odds", main_source)
 
+    def test_canvas_hook_is_registered_on_context_before_page_use(self):
+        manager_source = Path("backend/app/browser/manager.py").read_text(
+            encoding="utf-8"
+        )
+        hook_pos = manager_source.index(
+            "await context.add_init_script(CANVAS_2D_HOOK_SCRIPT)"
+        )
+        page_pos = manager_source.index(
+            "self.page = context.pages[0] if context.pages else await context.new_page()"
+        )
+        self.assertLess(hook_pos, page_pos)
+        self.assertIn("CANVAS_2D_HOOK_INSTALLED_EARLY", manager_source)
+
+    def test_canvas_hook_tracks_renderer_diagnostics(self):
+        source = Path("backend/app/browser/canvas_2d_adapter.py").read_text(
+            encoding="utf-8"
+        )
+        for marker in (
+            "transferControlToOffscreen",
+            "putImageData",
+            "createImageBitmap",
+            "OffscreenCanvasRenderingContext2D",
+            "CANVAS_2D_DIAGNOSTICS",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, source)
+
 
 if __name__ == "__main__":
     unittest.main()
