@@ -1290,9 +1290,9 @@ onBeforeUnmount(() => {
 
               <div v-if="marketBackend || marketConfidence">
 
-                <span>МАШИННОЕ ЗРЕНИЕ</span>
+                <span>CANVAS 2D READER</span>
 
-                <strong>{{ show(marketBackend, 'OCR') }} · {{ show(marketConfidence) }}</strong>
+                <strong>{{ show(marketBackend, 'fillText') }}<template v-if="marketConfidence"> · {{ marketConfidence }}</template></strong>
 
               </div>
 
