@@ -560,7 +560,9 @@ const marketSource = computed(() => state.value.odds?.source || marketReader.val
 const marketBackend = computed(() => state.value.odds?.backend || state.value.odds?.ocr_backend || null)
 
 const marketConfidence = computed(() => {
-  const value = Number(state.value.odds?.confidence)
+  const raw = state.value.odds?.confidence
+  if (raw === null || raw === undefined || raw === '') return null
+  const value = Number(raw)
   if (!Number.isFinite(value)) return null
   const normalized = value <= 1 ? value * 100 : value
   return `${Math.round(normalized)}%`
