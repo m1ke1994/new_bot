@@ -1033,6 +1033,20 @@ def map_next_goal_snapshot(
     return None
 
 
+def _mapping_source_layer(
+    snapshot: dict[str, Any],
+    source_canvas_id: int | None,
+) -> dict[str, Any]:
+    layer = _canvas_layer_by_id(snapshot, source_canvas_id)
+    if layer is not None:
+        return layer
+    return {
+        "texts": snapshot.get("texts") or [],
+        "rects": snapshot.get("rects") or [],
+        "images": snapshot.get("images") or [],
+    }
+
+
 def _lock_text_reason(value: str) -> str | None:
     text = str(value or "")
     if not text:
@@ -1388,7 +1402,7 @@ async def read_next_goal_odds(
         if _cached_market_is_usable(page, cached, next_goal_number, snapshot):
             assert cached is not None
             lock_state = detect_lock_state(
-                snapshot,
+                _mapping_source_layer(snapshot, cached.source_canvas_id),
                 team1_region=cached.team1_region,
                 team2_region=cached.team2_region,
             )
@@ -1411,12 +1425,12 @@ async def read_next_goal_odds(
                     confidence=1.0,
                     team1_locator=Canvas2DCoefficientLocator(
                         page,
-                        cached.team1_region,
+                        cached.team1_click_region,
                         cached.canvas,
                     ),
                     team2_locator=Canvas2DCoefficientLocator(
                         page,
-                        cached.team2_region,
+                        cached.team2_click_region,
                         cached.canvas,
                     ),
                     locked_sides=lock_state["locked_sides"],
@@ -1440,8 +1454,9 @@ async def read_next_goal_odds(
             },
         )
 
+    source_layer = _mapping_source_layer(snapshot, mapping.source_canvas_id)
     lock_state = detect_lock_state(
-        snapshot,
+        source_layer,
         team1_region=mapping.team1_region,
         team2_region=mapping.team2_region,
     )
@@ -1453,6 +1468,9 @@ async def read_next_goal_odds(
         team2_odds=mapping.team2_odds,
         team1_region=mapping.team1_region,
         team2_region=mapping.team2_region,
+        team1_click_region=mapping.team1_click_region,
+        team2_click_region=mapping.team2_click_region,
+        source_canvas_id=mapping.source_canvas_id,
         canvas=mapping.canvas,
     )
 
@@ -1463,7 +1481,12 @@ async def read_next_goal_odds(
         (
             f"goal={next_goal_number}; odds={mapping.team1_odds}/{mapping.team2_odds}; "
             f"locked_sides={list(lock_state['locked_sides'])}; "
-            f"team1_button={mapping.team1_region}; team2_button={mapping.team2_region}"
+            f"source_canvas_id={mapping.source_canvas_id}; "
+            f"source_class={mapping.source_canvas.get('class_name')}; "
+            f"team1_source_button={mapping.team1_region}; "
+            f"team2_source_button={mapping.team2_region}; "
+            f"team1_click={mapping.team1_click_region}; "
+            f"team2_click={mapping.team2_click_region}"
         ),
     )
     await _log(logger, "NEXT_GOAL_MARKET_FOUND", market)
@@ -1498,12 +1521,12 @@ async def read_next_goal_odds(
         confidence=1.0,
         team1_locator=Canvas2DCoefficientLocator(
             page,
-            mapping.team1_region,
+            mapping.team1_click_region,
             mapping.canvas,
         ),
         team2_locator=Canvas2DCoefficientLocator(
             page,
-            mapping.team2_region,
+            mapping.team2_click_region,
             mapping.canvas,
         ),
         locked_sides=lock_state["locked_sides"],
