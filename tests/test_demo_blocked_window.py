@@ -171,9 +171,9 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
             1.74,
             market="Следующий гол №1",
             next_goal_number=1,
-            source="CANVAS_VISION",
-            ocr_backend="RapidOCR",
-            confidence=0.99,
+            source="CANVAS_2D",
+            ocr_backend="fillText",
+            confidence=1.0,
         )
         _, _, _, result, _, state = await self.run_market_wait(
             [snapshot(0, 0), snapshot(0, 0)],
@@ -183,8 +183,8 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result[1], canvas_odds)
         self.assertEqual(state["odds"]["team1"], 2.0)
         self.assertEqual(state["odds"]["team2"], 1.74)
-        self.assertEqual(state["odds"]["source"], "CANVAS_VISION")
-        self.assertEqual(state["market_reader"]["source"], "Canvas Vision / RapidOCR")
+        self.assertEqual(state["odds"]["source"], "CANVAS_2D")
+        self.assertEqual(state["market_reader"]["source"], "Canvas 2D / fillText")
         self.assertEqual(state["market_reader"]["status"], "READY")
 
     async def test_initial_market_loading_is_not_a_demo_blocked_window(self):
