@@ -10,12 +10,7 @@ from playwright.async_api import Page, Response
 from backend.app.demo.models import FirstHalfDrawMarket, NextGoalOdds
 from xbet_config import SELECTORS, TEXTS
 
-from .canvas_vision import (
-    CANVAS_SELECTOR,
-    CanvasVisionError,
-    analyze_market_canvas,
-    read_market_odds_from_canvas,
-)
+CANVAS_SELECTOR = SELECTORS.canvas or "canvas.market-grid-canvas__canvas"
 
 
 Logger = Callable[[str, str], Awaitable[Any]]
@@ -628,6 +623,10 @@ async def market_canvas_debug(
     page: Page,
     logger: Logger | None = None,
 ) -> dict[str, Any]:
+    # Legacy diagnostics only. Importing the vision stack lazily keeps OCR/OpenCV
+    # completely out of the normal Canvas 2D NEXT_GOAL runtime.
+    from .canvas_vision import CanvasVisionError, analyze_market_canvas
+
     try:
         search_selector = await _prepare_market_search(
             page, NEXT_GOAL_SEARCH_TEXT, logger
@@ -784,6 +783,10 @@ async def _read_next_goal_odds_canvas(
     next_goal_number: int,
     logger: Logger | None,
 ) -> NextGoalOdds:
+    # Legacy fallback retained for rollback/debug only; active NEXT_GOAL runtime
+    # is wired to canvas_2d_adapter and never enters this function.
+    from .canvas_vision import CanvasVisionError, read_market_odds_from_canvas
+
     canvas = page.locator(CANVAS_SELECTOR).first
     try:
         await canvas.wait_for(state="visible", timeout=3_500)
