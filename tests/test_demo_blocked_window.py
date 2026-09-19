@@ -184,7 +184,7 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["odds"]["team1"], 2.0)
         self.assertEqual(state["odds"]["team2"], 1.74)
         self.assertEqual(state["odds"]["source"], "CANVAS_2D")
-        self.assertEqual(state["market_reader"]["source"], "Canvas 2D / fillText")
+        self.assertEqual(state["market_reader"]["source"], "Canvas 2D / draw calls")
         self.assertEqual(state["market_reader"]["status"], "READY")
 
     async def test_initial_market_loading_is_not_a_demo_blocked_window(self):
