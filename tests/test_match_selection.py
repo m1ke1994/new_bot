@@ -87,6 +87,114 @@ class LeagueTeamFilterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(browser.last_scan_stats["excluded"], 2)
         write_front.assert_awaited_once_with(result)
 
+    async def test_transient_empty_countdown_is_retried_before_selection(self):
+        class FakeLinks:
+            async def count(self):
+                return 1
+
+            def nth(self, index):
+                return index
+
+        transient = {
+            "id": "nearest",
+            "team1": "Nice",
+            "team2": "West Ham",
+            "finished": False,
+            "is_upcoming": False,
+            "period": "",
+            "time": "",
+            "time_seconds": None,
+        }
+        resolved = {
+            **transient,
+            "is_upcoming": True,
+            "time": "09:11",
+            "time_seconds": 551,
+        }
+        page = AsyncMock()
+        with (
+            patch(
+                "backend.app.browser.league.find_league_container",
+                AsyncMock(return_value=object()),
+            ),
+            patch(
+                "backend.app.browser.league.league_match_links",
+                return_value=FakeLinks(),
+            ),
+            patch(
+                "backend.app.browser.league.match_card_for_link",
+                side_effect=lambda item: item,
+            ),
+            patch(
+                "backend.app.browser.league.parse_match",
+                AsyncMock(side_effect=[transient, resolved]),
+            ),
+            patch("backend.app.browser.league.write_front", AsyncMock()),
+        ):
+            browser = LeagueBrowser(page, exclude_teams_enabled=False)
+            result = await browser.scan()
+
+        self.assertEqual([item["id"] for item in result], ["nearest"])
+        self.assertEqual(browser.last_scan_stats["unclassified"], 0)
+        page.wait_for_timeout.assert_awaited_once()
+
+    async def test_unclassified_nearest_card_blocks_later_match_selection(self):
+        class FakeLinks:
+            async def count(self):
+                return 2
+
+            def nth(self, index):
+                return index
+
+        unresolved = {
+            "id": "nearest",
+            "team1": "Nice",
+            "team2": "West Ham",
+            "finished": False,
+            "is_upcoming": False,
+            "period": "",
+            "time": "",
+            "time_seconds": None,
+        }
+        later = {
+            "id": "later",
+            "team1": "Chelsea",
+            "team2": "Fiorentina",
+            "finished": False,
+            "is_upcoming": True,
+            "period": "",
+            "time": "18:58",
+            "time_seconds": 1138,
+        }
+        write_front = AsyncMock()
+        side_effect = [unresolved, unresolved, unresolved, unresolved, later]
+        with (
+            patch(
+                "backend.app.browser.league.find_league_container",
+                AsyncMock(return_value=object()),
+            ),
+            patch(
+                "backend.app.browser.league.league_match_links",
+                return_value=FakeLinks(),
+            ),
+            patch(
+                "backend.app.browser.league.match_card_for_link",
+                side_effect=lambda item: item,
+            ),
+            patch(
+                "backend.app.browser.league.parse_match",
+                AsyncMock(side_effect=side_effect),
+            ),
+            patch("backend.app.browser.league.write_front", write_front),
+        ):
+            browser = LeagueBrowser(AsyncMock(), exclude_teams_enabled=False)
+            result = await browser.scan()
+
+        self.assertEqual(result, [])
+        self.assertEqual(browser.last_scan_stats["unclassified"], 1)
+        self.assertEqual(browser.skipped_unclassified[0]["id"], "nearest")
+        write_front.assert_awaited_once_with([later])
+
     async def test_disabled_filter_keeps_excluded_team_in_candidates(self):
         class FakeLinks:
             async def count(self):

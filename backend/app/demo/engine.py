@@ -620,7 +620,10 @@ class DemoEngine:
             await REPOSITORY.log(
                 "MATCHES_FILTERED",
                 f"Всего: {stats['total']}; Started: {stats['started']}; "
-                f"Excluded: {stats.get('excluded', 0)}; Upcoming: {stats['upcoming']}",
+                f"Finished: {stats.get('finished', 0)}; "
+                f"Excluded: {stats.get('excluded', 0)}; "
+                f"Unclassified: {stats.get('unclassified', 0)}; "
+                f"Upcoming: {stats['upcoming']}",
             )
             for item in league.skipped_started:
                 await REPOSITORY.log(
@@ -633,6 +636,27 @@ class DemoEngine:
                     f"{item['team1']} — {item['team2']}: match excluded by team filter "
                     f"({item['excluded_team']})",
                 )
+            for item in getattr(league, "skipped_unclassified", []):
+                await REPOSITORY.log(
+                    "MATCH_UNCLASSIFIED",
+                    (
+                        f"{item.get('team1', '<не прочитано>')} — "
+                        f"{item.get('team2', '<не прочитано>')} / "
+                        f"time={item.get('time')!r}; period={item.get('period')!r}; "
+                        f"reason={item.get('reason', 'unknown')}"
+                    ),
+                )
+            if stats.get("unclassified", 0):
+                await REPOSITORY.log(
+                    "MATCH_SCAN_INCOMPLETE",
+                    (
+                        "Есть карточки матча в промежуточном DOM-состоянии; "
+                        "не выбираем более поздний матч, повторяем сканирование"
+                    ),
+                )
+                await STATE.update(scanner={**stats, "selected": None})
+                await self._sleep_or_stop(CONFIG.league_retry_interval)
+                continue
             allowed_matches = []
             for item in matches:
                 excluded_team = excluded_team_in_match(

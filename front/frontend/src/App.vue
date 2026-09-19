@@ -1122,7 +1122,97 @@ onBeforeUnmount(() => {
 
         </section>
 
-        <section class="primary-grid">
+        <section class="secondary-grid">
+
+          <article class="panel bet-panel">
+
+            <header class="panel-header compact">
+
+              <div>
+
+                <span class="eyebrow">VIRTUAL BET</span>
+
+                <h2>Текущая ставка</h2>
+
+              </div>
+
+              <span class="step-badge">{{ bet.step || 0 }} / {{ bet.max_steps || 7 }}</span>
+
+            </header>
+
+            <div class="bet-grid">
+
+              <div><span>СУММА</span><strong>{{ show(bet.amount) }} <small>RUB</small></strong></div>
+
+              <div><span>МАТЧ</span><strong>{{ show(bet.match, state.match ? `${match.team1} — ${match.team2}` : null) }}</strong></div>
+
+              <div><span>РЫНОК</span><strong>{{ show(bet.market, 'Следующий гол') }}</strong></div>
+
+              <div><span>{{ isFirstHalfDraw ? 'ВЫБОР' : 'КОМАНДА' }}</span><strong>{{ show(state.selected_team) }}</strong></div>
+
+              <div><span>СТОРОНА</span><strong>{{ show(bet.side_label) }}</strong></div>
+
+              <div><span>КОЭФФИЦИЕНТ</span><strong class="green">{{ show(bet.odds) }}</strong></div>
+
+              <div><span>СЧЁТ ПЕРЕД СТАВКОЙ</span><strong>{{ show(bet.score_before) }}</strong></div>
+
+              <div v-if="!isFirstHalfDraw"><span>НОМЕР СЛЕДУЮЩЕГО ГОЛА</span><strong>{{ show(bet.next_goal_number) }}</strong></div>
+
+              <div><span>STATUS</span><strong>{{ show(bet.status, state.status) }}</strong></div>
+
+              <div><span>ПОСЛЕДНИЙ РЕЗУЛЬТАТ</span><strong>{{ show(state.last_result, lastChange.result) }}</strong></div>
+
+            </div>
+
+          </article>
+
+          <article class="panel change-panel">
+
+            <header class="panel-header compact">
+
+              <div>
+
+                <span class="eyebrow">LAST EVENT</span>
+
+                <h2>Последнее изменение</h2>
+
+              </div>
+
+              <span
+
+                v-if="lastChange.result"
+
+                :class="['result-badge', String(lastChange.result).toLowerCase()]"
+
+              >{{ lastChange.result }}</span>
+
+            </header>
+
+            <div v-if="state.last_change" class="change-content">
+
+              <div class="score-change">
+
+                <span>{{ lastChange.before }}</span><i>→</i><strong>{{ lastChange.after }}</strong>
+
+              </div>
+
+              <div class="goal-scorer">
+
+                <span>КТО ЗАБИЛ</span>
+
+                <strong>{{ lastChange.scorer }}</strong>
+
+              </div>
+
+            </div>
+
+            <div v-else class="panel-empty">Изменений счёта пока нет</div>
+
+          </article>
+
+        </section>
+
+        <section class="match-stats-grid">
 
           <article class="panel match-panel">
 
@@ -1171,6 +1261,66 @@ onBeforeUnmount(() => {
             <div v-else class="panel-empty">Матч ещё не выбран</div>
 
           </article>
+
+          <section class="stats-section">
+
+            <div class="section-heading">
+
+              <span class="eyebrow">DEMO ANALYTICS</span>
+
+              <h2>Статистика стратегии</h2>
+
+            </div>
+
+            <div class="stats-grid">
+
+              <article><span>Матчей обработано</span><strong>{{ stats.matches_processed }}</strong></article>
+
+              <article><span>Ставок сделано</span><strong>{{ stats.bets }}</strong></article>
+
+              <article><span>WIN</span><strong class="green">{{ stats.wins }}</strong></article>
+
+              <article><span>LOSE</span><strong class="red">{{ stats.losses }}</strong></article>
+
+              <article><span>Сумма demo-ставок</span><strong>{{ formatNumber(stats.total_amount) }} ₽</strong></article>
+
+              <article><span>Средний КФ</span><strong>{{ formatNumber(stats.average_odds, 3) }}</strong></article>
+
+              <article><span>Макс. шаг</span><strong>{{ stats.max_step }}</strong></article>
+
+              <article><span>Шагов до WIN</span><strong>{{ formatNumber(stats.average_steps_to_win) }}</strong></article>
+
+            </div>
+
+            <div class="table-wrap strategy-stats-table">
+
+              <table>
+
+                <thead><tr><th>Стратегия</th><th>Ставки</th><th>WIN</th><th>LOSE</th><th>Макс. шаг</th><th>P&amp;L</th><th>MARKET_LOCKED</th><th>Средняя блокировка</th></tr></thead>
+
+                <tbody>
+
+                  <tr v-for="([name, item]) in strategyComparison" :key="name">
+
+                    <td>{{ name }}</td><td>{{ item.bets || 0 }}</td><td class="green">{{ item.wins || 0 }}</td><td class="red">{{ item.losses || 0 }}</td><td>{{ item.max_step || 0 }}</td>
+
+                    <td :class="Number(item.profit_loss || 0) >= 0 ? 'green' : 'red'">{{ Number(item.profit_loss || 0) >= 0 ? '+' : '' }}{{ formatNumber(item.profit_loss || 0) }} ₽</td>
+
+                    <td>{{ item.market_locked_count || 0 }}</td><td>{{ item.average_market_locked_seconds == null ? '—' : `${formatNumber(item.average_market_locked_seconds, 3)} с` }}</td>
+
+                  </tr>
+
+                </tbody>
+
+              </table>
+
+            </div>
+
+          </section>
+
+        </section>
+
+        <section class="selection-row">
 
           <article class="panel selection-panel">
 
@@ -1320,95 +1470,6 @@ onBeforeUnmount(() => {
 
           </article>
 
-        </section>
-
-        <section class="secondary-grid">
-
-          <article class="panel bet-panel">
-
-            <header class="panel-header compact">
-
-              <div>
-
-                <span class="eyebrow">VIRTUAL BET</span>
-
-                <h2>Текущая ставка</h2>
-
-              </div>
-
-              <span class="step-badge">{{ bet.step || 0 }} / {{ bet.max_steps || 7 }}</span>
-
-            </header>
-
-            <div class="bet-grid">
-
-              <div><span>СУММА</span><strong>{{ show(bet.amount) }} <small>RUB</small></strong></div>
-
-              <div><span>МАТЧ</span><strong>{{ show(bet.match, state.match ? `${match.team1} — ${match.team2}` : null) }}</strong></div>
-
-              <div><span>РЫНОК</span><strong>{{ show(bet.market, 'Следующий гол') }}</strong></div>
-
-              <div><span>{{ isFirstHalfDraw ? 'ВЫБОР' : 'КОМАНДА' }}</span><strong>{{ show(state.selected_team) }}</strong></div>
-
-              <div><span>СТОРОНА</span><strong>{{ show(bet.side_label) }}</strong></div>
-
-              <div><span>КОЭФФИЦИЕНТ</span><strong class="green">{{ show(bet.odds) }}</strong></div>
-
-              <div><span>СЧЁТ ПЕРЕД СТАВКОЙ</span><strong>{{ show(bet.score_before) }}</strong></div>
-
-              <div v-if="!isFirstHalfDraw"><span>НОМЕР СЛЕДУЮЩЕГО ГОЛА</span><strong>{{ show(bet.next_goal_number) }}</strong></div>
-
-              <div><span>STATUS</span><strong>{{ show(bet.status, state.status) }}</strong></div>
-
-              <div><span>ПОСЛЕДНИЙ РЕЗУЛЬТАТ</span><strong>{{ show(state.last_result, lastChange.result) }}</strong></div>
-
-            </div>
-
-          </article>
-
-          <article class="panel change-panel">
-
-            <header class="panel-header compact">
-
-              <div>
-
-                <span class="eyebrow">LAST EVENT</span>
-
-                <h2>Последнее изменение</h2>
-
-              </div>
-
-              <span
-
-                v-if="lastChange.result"
-
-                :class="['result-badge', String(lastChange.result).toLowerCase()]"
-
-              >{{ lastChange.result }}</span>
-
-            </header>
-
-            <div v-if="state.last_change" class="change-content">
-
-              <div class="score-change">
-
-                <span>{{ lastChange.before }}</span><i>→</i><strong>{{ lastChange.after }}</strong>
-
-              </div>
-
-              <div class="goal-scorer">
-
-                <span>КТО ЗАБИЛ</span>
-
-                <strong>{{ lastChange.scorer }}</strong>
-
-              </div>
-
-            </div>
-
-            <div v-else class="panel-empty">Изменений счёта пока нет</div>
-
-          </article>
 
         </section>
 
@@ -1456,63 +1517,7 @@ onBeforeUnmount(() => {
 
         </section>
 
-        <section class="stats-section">
-
-          <div class="section-heading">
-
-            <span class="eyebrow">DEMO ANALYTICS</span>
-
-            <h2>Статистика стратегии</h2>
-
-          </div>
-
-          <div class="stats-grid">
-
-            <article><span>Матчей обработано</span><strong>{{ stats.matches_processed }}</strong></article>
-
-            <article><span>Ставок сделано</span><strong>{{ stats.bets }}</strong></article>
-
-            <article><span>WIN</span><strong class="green">{{ stats.wins }}</strong></article>
-
-            <article><span>LOSE</span><strong class="red">{{ stats.losses }}</strong></article>
-
-            <article><span>Сумма demo-ставок</span><strong>{{ formatNumber(stats.total_amount) }} ₽</strong></article>
-
-            <article><span>Средний КФ</span><strong>{{ formatNumber(stats.average_odds, 3) }}</strong></article>
-
-            <article><span>Макс. шаг</span><strong>{{ stats.max_step }}</strong></article>
-
-            <article><span>Шагов до WIN</span><strong>{{ formatNumber(stats.average_steps_to_win) }}</strong></article>
-
-          </div>
-
-          <div class="table-wrap strategy-stats-table">
-
-            <table>
-
-              <thead><tr><th>Стратегия</th><th>Ставки</th><th>WIN</th><th>LOSE</th><th>Макс. шаг</th><th>P&amp;L</th><th>MARKET_LOCKED</th><th>Средняя блокировка</th></tr></thead>
-
-              <tbody>
-
-                <tr v-for="([name, item]) in strategyComparison" :key="name">
-
-                  <td>{{ name }}</td><td>{{ item.bets || 0 }}</td><td class="green">{{ item.wins || 0 }}</td><td class="red">{{ item.losses || 0 }}</td><td>{{ item.max_step || 0 }}</td>
-
-                  <td :class="Number(item.profit_loss || 0) >= 0 ? 'green' : 'red'">{{ Number(item.profit_loss || 0) >= 0 ? '+' : '' }}{{ formatNumber(item.profit_loss || 0) }} ₽</td>
-
-                  <td>{{ item.market_locked_count || 0 }}</td><td>{{ item.average_market_locked_seconds == null ? '—' : `${formatNumber(item.average_market_locked_seconds, 3)} с` }}</td>
-
-                </tr>
-
-              </tbody>
-
-            </table>
-
-          </div>
-
-        </section>
-
-        <section class="data-grid">
+        <section class="full-width-section history-section">
 
           <article class="panel history-panel">
 
@@ -1605,6 +1610,10 @@ onBeforeUnmount(() => {
             </div>
 
           </article>
+
+        </section>
+
+        <section class="full-width-section live-log-section">
 
           <article class="panel log-panel">
 
