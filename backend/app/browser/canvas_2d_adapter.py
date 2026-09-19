@@ -27,12 +27,12 @@ HOOKED_PAGE_IDS: set[int] = set()
 
 CANVAS_2D_HOOK_SCRIPT = r"""
 (() => {
-    if (window.__autobetCanvas2D && window.__autobetCanvas2D.version === 2) {
+    if (window.__autobetCanvas2D && window.__autobetCanvas2D.version === 3) {
         return;
     }
 
     const state = {
-        version: 2,
+        version: 3,
         seq: 0,
         nextCanvasId: 1,
         canvases: new Map(),
@@ -95,6 +95,8 @@ CANVAS_2D_HOOK_SCRIPT = r"""
                 texts: [],
                 rects: [],
                 images: [],
+                paths: [],
+                events: [],
                 width: canvas.width || 0,
                 height: canvas.height || 0,
             };
@@ -105,6 +107,7 @@ CANVAS_2D_HOOK_SCRIPT = r"""
             item.texts = [];
             item.rects = [];
             item.images = [];
+            item.paths = [];
             item.width = canvas.width || 0;
             item.height = canvas.height || 0;
         }
@@ -174,6 +177,114 @@ CANVAS_2D_HOOK_SCRIPT = r"""
         return point(matrix, Number(x) || 0, Number(y) || 0);
     };
 
+    const eventMeta = (item, kind) => ({
+        seq: ++state.seq,
+        timestamp_ms: Date.now(),
+        perf_ms: typeof performance !== "undefined" ? Number(performance.now()) : null,
+        canvas_id: item.id,
+        generation: item.generation,
+        kind,
+    });
+
+    const rememberEvent = (item, event) => {
+        item.events.push(event);
+        trim(item.events);
+        return event;
+    };
+
+    const pathStates = new WeakMap();
+
+    const resetTrackedPath = (ctx) => {
+        pathStates.set(ctx, {
+            points: [],
+            op_count: 0,
+            commands: [],
+        });
+    };
+
+    const trackedPath = (ctx) => {
+        let tracked = pathStates.get(ctx);
+        if (!tracked) {
+            tracked = { points: [], op_count: 0, commands: [] };
+            pathStates.set(ctx, tracked);
+        }
+        return tracked;
+    };
+
+    const addTrackedPoints = (ctx, command, points) => {
+        const tracked = trackedPath(ctx);
+        const matrix = ctx.getTransform();
+        for (const [x, y] of points) {
+            tracked.points.push(point(matrix, Number(x) || 0, Number(y) || 0));
+        }
+        tracked.op_count += 1;
+        tracked.commands.push(command);
+        if (tracked.commands.length > 32) {
+            tracked.commands.splice(0, tracked.commands.length - 32);
+        }
+    };
+
+    const addTrackedRect = (ctx, command, x, y, width, height) => {
+        addTrackedPoints(ctx, command, [
+            [x, y],
+            [Number(x) + Number(width), y],
+            [Number(x) + Number(width), Number(y) + Number(height)],
+            [x, Number(y) + Number(height)],
+        ]);
+    };
+
+    const addTrackedArc = (ctx, command, x, y, radiusX, radiusY = radiusX) => {
+        const rx = Math.abs(Number(radiusX) || 0);
+        const ry = Math.abs(Number(radiusY) || 0);
+        addTrackedPoints(ctx, command, [
+            [Number(x) - rx, Number(y) - ry],
+            [Number(x) + rx, Number(y) - ry],
+            [Number(x) + rx, Number(y) + ry],
+            [Number(x) - rx, Number(y) + ry],
+        ]);
+    };
+
+    const trackedPathBounds = (tracked) => {
+        if (!tracked || !tracked.points.length) return null;
+        const xs = tracked.points.map((p) => p.x);
+        const ys = tracked.points.map((p) => p.y);
+        const left = Math.min(...xs);
+        const top = Math.min(...ys);
+        const right = Math.max(...xs);
+        const bottom = Math.max(...ys);
+        return {
+            x: left,
+            y: top,
+            width: Math.max(1, right - left),
+            height: Math.max(1, bottom - top),
+        };
+    };
+
+    const recordPathPaint = (ctx, kind) => {
+        bump(kind);
+        const item = canvasState(ctx.canvas);
+        const tracked = trackedPath(ctx);
+        const box = trackedPathBounds(tracked);
+        if (!item || !box || tracked.op_count <= 0) return;
+        const event = {
+            ...eventMeta(item, kind),
+            event_type: "path",
+            x: box.x,
+            y: box.y,
+            width: box.width,
+            height: box.height,
+            path_op_count: tracked.op_count,
+            commands: tracked.commands.slice(-24),
+            fill_style: String(ctx.fillStyle ?? ""),
+            stroke_style: String(ctx.strokeStyle ?? ""),
+            alpha: Number(ctx.globalAlpha ?? 1),
+            line_width: Number(ctx.lineWidth ?? 1),
+        };
+        item.paths.push(event);
+        trim(item.paths);
+        rememberEvent(item, { ...event });
+    };
+
     const recordText = (ctx, text, x, y, kind) => {
         bump(kind);
         rememberCall(kind, {
@@ -186,10 +297,9 @@ CANVAS_2D_HOOK_SCRIPT = r"""
         if (!item) return;
         const box = textBounds(ctx, text, x, y);
         const anchor = anchorPoint(ctx, x, y);
-        item.texts.push({
-            seq: ++state.seq,
-            generation: item.generation,
-            kind,
+        const event = {
+            ...eventMeta(item, kind),
+            event_type: "text",
             text: String(text),
             x: box.x,
             y: box.y,
@@ -201,8 +311,10 @@ CANVAS_2D_HOOK_SCRIPT = r"""
             fill_style: String(ctx.fillStyle ?? ""),
             stroke_style: String(ctx.strokeStyle ?? ""),
             alpha: Number(ctx.globalAlpha ?? 1),
-        });
+        };
+        item.texts.push(event);
         trim(item.texts);
+        rememberEvent(item, { ...event });
     };
 
     const recordRect = (ctx, x, y, width, height, kind) => {
@@ -210,10 +322,9 @@ CANVAS_2D_HOOK_SCRIPT = r"""
         const item = canvasState(ctx.canvas);
         if (!item) return;
         const box = rectBounds(ctx, Number(x) || 0, Number(y) || 0, Number(width) || 0, Number(height) || 0);
-        item.rects.push({
-            seq: ++state.seq,
-            generation: item.generation,
-            kind,
+        const event = {
+            ...eventMeta(item, kind),
+            event_type: "rect",
             x: box.x,
             y: box.y,
             width: box.width,
@@ -221,8 +332,10 @@ CANVAS_2D_HOOK_SCRIPT = r"""
             fill_style: String(ctx.fillStyle ?? ""),
             stroke_style: String(ctx.strokeStyle ?? ""),
             alpha: Number(ctx.globalAlpha ?? 1),
-        });
+        };
+        item.rects.push(event);
         trim(item.rects);
+        rememberEvent(item, { ...event });
     };
 
     const sourceMeta = (image) => {
@@ -325,10 +438,9 @@ CANVAS_2D_HOOK_SCRIPT = r"""
             context: ctx && ctx.constructor ? ctx.constructor.name : "unknown",
         });
         const box = rectBounds(ctx, dx, dy, dw, dh);
-        item.images.push({
-            seq: ++state.seq,
-            generation: item.generation,
-            kind: "drawImage",
+        const event = {
+            ...eventMeta(item, "drawImage"),
+            event_type: "image",
             x: box.x,
             y: box.y,
             width: box.width,
@@ -341,8 +453,10 @@ CANVAS_2D_HOOK_SCRIPT = r"""
             source_width: sw,
             source_height: sh,
             alpha: Number(ctx.globalAlpha ?? 1),
-        });
+        };
+        item.images.push(event);
         trim(item.images);
+        rememberEvent(item, { ...event });
     };
 
     const patchMethod = (proto, name, wrapper) => {
@@ -385,12 +499,18 @@ CANVAS_2D_HOOK_SCRIPT = r"""
     });
 
         patchMethod(proto, "rect", function(original, args) {
-        try { recordRect(this, args[0], args[1], args[2], args[3], "rect"); } catch (_) {}
+        try {
+            recordRect(this, args[0], args[1], args[2], args[3], "rect");
+            addTrackedRect(this, "rect", args[0], args[1], args[2], args[3]);
+        } catch (_) {}
         return original.apply(this, args);
     });
 
         patchMethod(proto, "roundRect", function(original, args) {
-        try { recordRect(this, args[0], args[1], args[2], args[3], "roundRect"); } catch (_) {}
+        try {
+            recordRect(this, args[0], args[1], args[2], args[3], "roundRect");
+            addTrackedRect(this, "roundRect", args[0], args[1], args[2], args[3]);
+        } catch (_) {}
         return original.apply(this, args);
     });
 
@@ -406,11 +526,21 @@ CANVAS_2D_HOOK_SCRIPT = r"""
                 const box = rectBounds(this, Number(args[0]) || 0, Number(args[1]) || 0, Number(args[2]) || 0, Number(args[3]) || 0);
                 const canvasArea = Math.max(1, Number(this.canvas.width || 0) * Number(this.canvas.height || 0));
                 const clearArea = Math.max(0, box.width * box.height);
+                rememberEvent(item, {
+                    ...eventMeta(item, "clearRect"),
+                    event_type: "clear",
+                    x: box.x,
+                    y: box.y,
+                    width: box.width,
+                    height: box.height,
+                    alpha: Number(this.globalAlpha ?? 1),
+                });
                 if (clearArea / canvasArea >= 0.35) {
                     item.generation += 1;
                     item.texts = [];
                     item.rects = [];
                     item.images = [];
+                    item.paths = [];
                 }
             }
         } catch (_) {}
@@ -430,15 +560,97 @@ CANVAS_2D_HOOK_SCRIPT = r"""
             return original.apply(this, args);
         });
 
-        for (const method of [
-            "beginPath", "moveTo", "lineTo", "bezierCurveTo", "quadraticCurveTo",
-            "arc", "arcTo", "ellipse", "fill", "stroke", "clip",
-        ]) {
-            patchMethod(proto, method, function(original, args) {
-                bump(method);
-                return original.apply(this, args);
-            });
-        }
+        patchMethod(proto, "beginPath", function(original, args) {
+            bump("beginPath");
+            try { resetTrackedPath(this); } catch (_) {}
+            return original.apply(this, args);
+        });
+
+        patchMethod(proto, "moveTo", function(original, args) {
+            bump("moveTo");
+            try { addTrackedPoints(this, "moveTo", [[args[0], args[1]]]); } catch (_) {}
+            return original.apply(this, args);
+        });
+
+        patchMethod(proto, "lineTo", function(original, args) {
+            bump("lineTo");
+            try { addTrackedPoints(this, "lineTo", [[args[0], args[1]]]); } catch (_) {}
+            return original.apply(this, args);
+        });
+
+        patchMethod(proto, "bezierCurveTo", function(original, args) {
+            bump("bezierCurveTo");
+            try {
+                addTrackedPoints(this, "bezierCurveTo", [
+                    [args[0], args[1]],
+                    [args[2], args[3]],
+                    [args[4], args[5]],
+                ]);
+            } catch (_) {}
+            return original.apply(this, args);
+        });
+
+        patchMethod(proto, "quadraticCurveTo", function(original, args) {
+            bump("quadraticCurveTo");
+            try {
+                addTrackedPoints(this, "quadraticCurveTo", [
+                    [args[0], args[1]],
+                    [args[2], args[3]],
+                ]);
+            } catch (_) {}
+            return original.apply(this, args);
+        });
+
+        patchMethod(proto, "arc", function(original, args) {
+            bump("arc");
+            try { addTrackedArc(this, "arc", args[0], args[1], args[2]); } catch (_) {}
+            return original.apply(this, args);
+        });
+
+        patchMethod(proto, "arcTo", function(original, args) {
+            bump("arcTo");
+            try {
+                const radius = Math.abs(Number(args[4]) || 0);
+                addTrackedPoints(this, "arcTo", [
+                    [Number(args[0]) - radius, Number(args[1]) - radius],
+                    [Number(args[0]) + radius, Number(args[1]) + radius],
+                    [Number(args[2]) - radius, Number(args[3]) - radius],
+                    [Number(args[2]) + radius, Number(args[3]) + radius],
+                ]);
+            } catch (_) {}
+            return original.apply(this, args);
+        });
+
+        patchMethod(proto, "ellipse", function(original, args) {
+            bump("ellipse");
+            try { addTrackedArc(this, "ellipse", args[0], args[1], args[2], args[3]); } catch (_) {}
+            return original.apply(this, args);
+        });
+
+        patchMethod(proto, "closePath", function(original, args) {
+            bump("closePath");
+            try {
+                const tracked = trackedPath(this);
+                tracked.op_count += 1;
+                tracked.commands.push("closePath");
+            } catch (_) {}
+            return original.apply(this, args);
+        });
+
+        patchMethod(proto, "fill", function(original, args) {
+            try { recordPathPaint(this, "fill"); } catch (_) {}
+            return original.apply(this, args);
+        });
+
+        patchMethod(proto, "stroke", function(original, args) {
+            try { recordPathPaint(this, "stroke"); } catch (_) {}
+            return original.apply(this, args);
+        });
+
+        patchMethod(proto, "clip", function(original, args) {
+            bump("clip");
+            return original.apply(this, args);
+        });
     };
 
     patch2DPrototype(
@@ -564,6 +776,9 @@ CANVAS_2D_HOOK_SCRIPT = r"""
             ),
             rects: canvasItem.rects.filter(sameGeneration).slice(-1200),
             images: canvasItem.images.filter(sameGeneration).slice(-600),
+            paths: canvasItem.paths.filter(sameGeneration).slice(-800),
+            events: canvasItem.events.slice(-1600),
+            snapshot_at_ms: Date.now(),
         };
     };
 
@@ -588,6 +803,9 @@ CANVAS_2D_HOOK_SCRIPT = r"""
                 texts: [],
                 rects: [],
                 images: [],
+                paths: [],
+                events: [],
+                snapshot_at_ms: Date.now(),
             };
         }
 
@@ -612,6 +830,9 @@ CANVAS_2D_HOOK_SCRIPT = r"""
             texts: item ? latestTextByAnchor(item.texts.filter(sameGeneration)) : [],
             rects: item ? item.rects.filter(sameGeneration).slice(-1200) : [],
             images: item ? item.images.filter(sameGeneration).slice(-600) : [],
+            paths: item ? item.paths.filter(sameGeneration).slice(-800) : [],
+            events: item ? item.events.slice(-1600) : [],
+            snapshot_at_ms: Date.now(),
             canvases: Array.from(state.canvases.values())
                 .map(serializeCanvas)
                 .filter(Boolean),
@@ -662,6 +883,7 @@ class _CachedMarket:
 
 _LAST_MARKETS: dict[int, _CachedMarket] = {}
 _LAST_DIAGNOSTIC_SIGNATURES: dict[int, str] = {}
+_LAST_REPORTED_LOCK_SEQ: dict[tuple[int, int], int] = {}
 
 
 async def _log(logger: Logger | None, event: str, message: str) -> None:
@@ -1033,6 +1255,39 @@ def map_next_goal_snapshot(
     return None
 
 
+def _consume_recent_lock_sides(
+    page: Page,
+    lock_state: dict[str, Any],
+) -> tuple[tuple[int, ...], dict[str, Any]]:
+    current = {int(side) for side in lock_state.get("locked_sides") or ()}
+    recent = {int(side) for side in lock_state.get("recent_locked_sides") or ()}
+    recent_markers = lock_state.get("recent_markers") or {}
+    emitted: list[int] = []
+    emitted_markers: dict[str, Any] = {}
+
+    for side in sorted(current):
+        marker = (lock_state.get("markers") or {}).get(str(side)) or {}
+        seq = int(marker.get("seq") or 0)
+        if seq > 0:
+            key = (id(page), side)
+            _LAST_REPORTED_LOCK_SEQ[key] = max(
+                seq,
+                _LAST_REPORTED_LOCK_SEQ.get(key, 0),
+            )
+
+    for side in sorted(recent):
+        marker = recent_markers.get(str(side)) or {}
+        seq = int(marker.get("seq") or 0)
+        key = (id(page), side)
+        if seq <= _LAST_REPORTED_LOCK_SEQ.get(key, 0):
+            continue
+        _LAST_REPORTED_LOCK_SEQ[key] = seq
+        emitted.append(side)
+        emitted_markers[str(side)] = marker
+
+    return tuple(emitted), emitted_markers
+
+
 def _mapping_source_layer(
     snapshot: dict[str, Any],
     source_canvas_id: int | None,
@@ -1044,6 +1299,9 @@ def _mapping_source_layer(
         "texts": snapshot.get("texts") or [],
         "rects": snapshot.get("rects") or [],
         "images": snapshot.get("images") or [],
+        "paths": snapshot.get("paths") or [],
+        "events": snapshot.get("events") or [],
+        "snapshot_at_ms": snapshot.get("snapshot_at_ms"),
     }
 
 
@@ -1078,45 +1336,218 @@ def _rect_intersects_marker(
     )
 
 
+LOCK_EVENT_MAX_AGE_MS = 2500.0
+
+
+def _overlap_ratio(
+    region: dict[str, float],
+    marker: dict[str, Any],
+) -> float:
+    rx = float(region.get("x") or 0.0)
+    ry = float(region.get("y") or 0.0)
+    rw = max(0.0, float(region.get("width") or 0.0))
+    rh = max(0.0, float(region.get("height") or 0.0))
+    mx = float(marker.get("x") or 0.0)
+    my = float(marker.get("y") or 0.0)
+    mw = max(0.0, float(marker.get("width") or 0.0))
+    mh = max(0.0, float(marker.get("height") or 0.0))
+    if rw <= 0 or rh <= 0 or mw <= 0 or mh <= 0:
+        return 0.0
+    left = max(rx, mx)
+    top = max(ry, my)
+    right = min(rx + rw, mx + mw)
+    bottom = min(ry + rh, my + mh)
+    if right <= left or bottom <= top:
+        return 0.0
+    return ((right - left) * (bottom - top)) / (rw * rh)
+
+
+def _small_icon_in_region(
+    region: dict[str, float],
+    marker: dict[str, Any],
+) -> bool:
+    rw = max(1.0, float(region.get("width") or 1.0))
+    rh = max(1.0, float(region.get("height") or 1.0))
+    mw = float(marker.get("width") or 0.0)
+    mh = float(marker.get("height") or 0.0)
+    if mw <= 0 or mh <= 0:
+        return False
+    if not _rect_intersects_marker(region, marker):
+        return False
+    aspect = mw / mh
+    return (
+        max(4.0, rw * 0.035) <= mw <= min(34.0, rw * 0.38)
+        and max(6.0, rh * 0.18) <= mh <= min(34.0, rh * 0.95)
+        and 0.35 <= aspect <= 1.45
+    )
+
+
+def _lock_reason_for_marker(
+    region: dict[str, float],
+    item: dict[str, Any],
+) -> str | None:
+    kind = str(item.get("kind") or "")
+    event_type = str(item.get("event_type") or "")
+
+    if event_type == "text" or kind in {"fillText", "strokeText"}:
+        return _lock_text_reason(str(item.get("text") or ""))
+
+    if event_type == "image" or kind == "drawImage":
+        source = str(item.get("source") or "")
+        if LOCK_WORD_RE.search(source):
+            return "lock-image"
+        if _small_icon_in_region(region, item):
+            return "canvas-image-icon"
+        return None
+
+    if event_type == "path" or kind in {"fill", "stroke"}:
+        if (
+            int(item.get("path_op_count") or 0) >= 3
+            and _small_icon_in_region(region, item)
+        ):
+            return "canvas-vector-icon"
+        return None
+
+    if event_type == "rect" or kind in {"fillRect", "strokeRect", "rect", "roundRect"}:
+        alpha = float(item.get("alpha") if item.get("alpha") is not None else 1.0)
+        if (
+            kind == "fillRect"
+            and 0.05 <= alpha < 0.98
+            and _overlap_ratio(region, item) >= 0.70
+        ):
+            return "canvas-dim-overlay"
+    return None
+
+
+def _marker_payload(item: dict[str, Any], reason: str) -> dict[str, Any]:
+    return {
+        "seq": int(item.get("seq") or 0),
+        "timestamp_ms": item.get("timestamp_ms"),
+        "canvas_id": item.get("canvas_id"),
+        "generation": item.get("generation"),
+        "x": float(item.get("x") or 0.0),
+        "y": float(item.get("y") or 0.0),
+        "width": float(item.get("width") or 0.0),
+        "height": float(item.get("height") or 0.0),
+        "reason": reason,
+        "kind": item.get("kind"),
+        "event_type": item.get("event_type"),
+        "text": item.get("text"),
+        "source": item.get("source"),
+        "alpha": item.get("alpha"),
+        "fill_style": item.get("fill_style"),
+        "stroke_style": item.get("stroke_style"),
+        "path_op_count": item.get("path_op_count"),
+    }
+
+
+def _odds_event_sequences(
+    snapshot: dict[str, Any],
+    region: dict[str, float],
+) -> list[int]:
+    sequences: set[int] = set()
+    items = list(snapshot.get("texts") or [])
+    items.extend(
+        item
+        for item in (snapshot.get("events") or [])
+        if str(item.get("event_type") or "") == "text"
+    )
+    for item in items:
+        if not _rect_intersects_marker(region, item):
+            continue
+        if _parse_odds(str(item.get("text") or "")) is None:
+            continue
+        seq = int(item.get("seq") or 0)
+        if seq > 0:
+            sequences.add(seq)
+    return sorted(sequences)
+
+
 def detect_lock_state(
     snapshot: dict[str, Any],
     *,
     team1_region: dict[str, float],
     team2_region: dict[str, float],
 ) -> dict[str, Any]:
-    markers: list[dict[str, Any]] = []
-    for item in snapshot.get("texts") or []:
-        reason = _lock_text_reason(str(item.get("text") or ""))
-        if reason is not None:
-            markers.append({**item, "reason": reason, "source": "text"})
+    current_items = [
+        *(snapshot.get("texts") or []),
+        *(snapshot.get("images") or []),
+        *(snapshot.get("paths") or []),
+        *(snapshot.get("rects") or []),
+    ]
+    events = list(snapshot.get("events") or [])
+    snapshot_at_ms = float(snapshot.get("snapshot_at_ms") or 0.0)
 
-    for item in snapshot.get("images") or []:
-        source = str(item.get("source") or "")
-        if LOCK_WORD_RE.search(source):
-            markers.append({**item, "reason": "lock-image", "source": source})
+    current_result: dict[str, Any] = {}
+    recent_result: dict[str, Any] = {}
 
-    result: dict[str, Any] = {}
     for side, region in ((1, team1_region), (2, team2_region)):
-        candidates = [
-            marker
-            for marker in markers
-            if _rect_intersects_marker(region, marker)
-        ]
-        if candidates:
-            selected = max(candidates, key=lambda marker: int(marker.get("seq") or 0))
-            result[str(side)] = {
-                "x": float(selected.get("x") or 0.0),
-                "y": float(selected.get("y") or 0.0),
-                "width": float(selected.get("width") or 0.0),
-                "height": float(selected.get("height") or 0.0),
-                "reason": selected.get("reason"),
-                "text": selected.get("text"),
-                "source": selected.get("source"),
-            }
+        odds_sequences = _odds_event_sequences(snapshot, region)
+        latest_odds_seq = odds_sequences[-1] if odds_sequences else 0
 
+        current_candidates: list[dict[str, Any]] = []
+        for item in current_items:
+            if not _rect_intersects_marker(region, item):
+                continue
+            reason = _lock_reason_for_marker(region, item)
+            if reason is None:
+                continue
+            if int(item.get("seq") or 0) < latest_odds_seq:
+                continue
+            current_candidates.append(_marker_payload(item, reason))
+
+        if current_candidates:
+            current_result[str(side)] = max(
+                current_candidates,
+                key=lambda marker: int(marker.get("seq") or 0),
+            )
+
+        recent_candidates: list[dict[str, Any]] = []
+        for item in events:
+            if not _rect_intersects_marker(region, item):
+                continue
+            reason = _lock_reason_for_marker(region, item)
+            if reason is None:
+                continue
+            timestamp_ms = item.get("timestamp_ms")
+            if timestamp_ms is None or snapshot_at_ms <= 0:
+                continue
+            age_ms = snapshot_at_ms - float(timestamp_ms)
+            if age_ms < 0 or age_ms > LOCK_EVENT_MAX_AGE_MS:
+                continue
+
+            marker_seq = int(item.get("seq") or 0)
+            explicit_lock = reason in {
+                "lock-symbol",
+                "lock-text",
+                "private-icon-glyph",
+                "lock-image",
+            }
+            if not explicit_lock:
+                had_odds_before = any(seq < marker_seq for seq in odds_sequences)
+                redrawn_odds_after = any(seq > marker_seq for seq in odds_sequences)
+                if not (had_odds_before and redrawn_odds_after):
+                    continue
+
+            payload = _marker_payload(item, reason)
+            payload["age_ms"] = round(age_ms, 1)
+            recent_candidates.append(payload)
+
+        if recent_candidates:
+            recent_result[str(side)] = max(
+                recent_candidates,
+                key=lambda marker: int(marker.get("seq") or 0),
+            )
+
+    locked_sides = tuple(sorted(int(side) for side in current_result))
+    recent_locked_sides = tuple(
+        sorted(int(side) for side in recent_result if int(side) not in locked_sides)
+    )
     return {
-        "locked_sides": tuple(sorted(int(side) for side in result)),
-        "markers": result,
+        "locked_sides": locked_sides,
+        "recent_locked_sides": recent_locked_sides,
+        "markers": current_result,
+        "recent_markers": recent_result,
     }
 
 
@@ -1285,7 +1716,7 @@ def _diagnostic_message(snapshot: dict[str, Any]) -> str:
             sample_parts.append(f"{method}({item})")
 
     return (
-        f"hook_v={snapshot.get('hook_version') or diagnostics.get('version') or 2}; "
+        f"hook_v={snapshot.get('hook_version') or diagnostics.get('version') or 3}; "
         f"status={snapshot.get('status')}; "
         f"contexts={contexts}; calls={calls}; "
         f"offscreen_available={diagnostics.get('offscreen_canvas_available')}; "
@@ -1406,7 +1837,11 @@ async def read_next_goal_odds(
                 team1_region=cached.team1_region,
                 team2_region=cached.team2_region,
             )
-            if lock_state["locked_sides"]:
+            recent_locked_sides, recent_lock_markers = _consume_recent_lock_sides(
+                page,
+                lock_state,
+            )
+            if lock_state["locked_sides"] or recent_locked_sides:
                 await _log(
                     logger,
                     "CANVAS_2D_LOCKED_USING_LAST_ODDS",
@@ -1435,6 +1870,8 @@ async def read_next_goal_odds(
                     ),
                     locked_sides=lock_state["locked_sides"],
                     lock_markers=lock_state["markers"],
+                    recent_locked_sides=recent_locked_sides,
+                    recent_lock_markers=recent_lock_markers,
                 )
 
         raise hybrid_market.MarketNotAvailable(
@@ -1460,6 +1897,10 @@ async def read_next_goal_odds(
         team1_region=mapping.team1_region,
         team2_region=mapping.team2_region,
     )
+    recent_locked_sides, recent_lock_markers = _consume_recent_lock_sides(
+        page,
+        lock_state,
+    )
 
     _LAST_MARKETS[cache_key] = _CachedMarket(
         url=page.url,
@@ -1481,6 +1922,7 @@ async def read_next_goal_odds(
         (
             f"goal={next_goal_number}; odds={mapping.team1_odds}/{mapping.team2_odds}; "
             f"locked_sides={list(lock_state['locked_sides'])}; "
+            f"recent_locked_sides={list(recent_locked_sides)}; "
             f"source_canvas_id={mapping.source_canvas_id}; "
             f"source_class={mapping.source_canvas.get('class_name')}; "
             f"team1_source_button={mapping.team1_region}; "
@@ -1531,4 +1973,6 @@ async def read_next_goal_odds(
         ),
         locked_sides=lock_state["locked_sides"],
         lock_markers=lock_state["markers"],
+        recent_locked_sides=recent_locked_sides,
+        recent_lock_markers=recent_lock_markers,
     )

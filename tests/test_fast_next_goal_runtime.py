@@ -2,11 +2,14 @@ import unittest
 from types import SimpleNamespace
 
 from backend.app.demo.fast_next_goal_runtime import (
+    CANVAS_2D_RETRY_SECONDS,
     FAST_PREBET_CACHE_USES,
     _cache_fast_snapshot,
+    _canvas_retry_delay,
     _consume_fast_snapshot,
     _selected_and_opponent_odds,
     _selected_side_is_locked,
+    _selected_side_was_recently_locked,
     _side_number,
 )
 from backend.app.demo.engine import selected_team_scored_between
@@ -45,6 +48,23 @@ class FastNextGoalRuntimeTests(unittest.TestCase):
         )
         self.assertFalse(_selected_side_is_locked(Scorer.TEAM_1, odds))
         self.assertTrue(_selected_side_is_locked(Scorer.TEAM_2, odds))
+
+    def test_transient_selected_side_lock_is_distinct_from_current_lock(self):
+        odds = NextGoalOdds(
+            team1=2.11,
+            team2=1.77,
+            recent_locked_sides=(1,),
+        )
+        self.assertFalse(_selected_side_is_locked(Scorer.TEAM_1, odds))
+        self.assertTrue(_selected_side_was_recently_locked(Scorer.TEAM_1, odds))
+
+    def test_canvas_2d_retry_is_fast_without_changing_other_retry_paths(self):
+        module = SimpleNamespace(CONFIG=SimpleNamespace(ocr_retry_delay=0.7))
+        self.assertEqual(
+            _canvas_retry_delay(module, source="CANVAS_2D"),
+            CANVAS_2D_RETRY_SECONDS,
+        )
+        self.assertEqual(_canvas_retry_delay(module, source="DOM_PLAYWRIGHT"), 0.7)
 
     def test_selected_and_opponent_odds_follow_fixed_side(self):
         odds = NextGoalOdds(team1=1.82, team2=2.07)

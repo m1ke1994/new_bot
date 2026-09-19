@@ -6,6 +6,7 @@ from typing import Any
 
 FAST_PREBET_CACHE_USES = 2
 NEW_MATCH_DELAY_SECONDS = 10.0
+CANVAS_2D_RETRY_SECONDS = 0.08
 
 
 def _same_snapshot(left: Any, right: Any) -> bool:
@@ -85,12 +86,30 @@ def _selected_side_is_locked(side: Any, odds: Any) -> bool:
     return side_number is not None and side_number in locked
 
 
+def _selected_side_was_recently_locked(side: Any, odds: Any) -> bool:
+    side_number = _side_number(side)
+    recent = {
+        int(value)
+        for value in (getattr(odds, "recent_locked_sides", ()) or ())
+    }
+    return side_number is not None and side_number in recent
+
+
+def _canvas_retry_delay(engine_module: Any, *, source: str = "") -> float:
+    if "CANVAS_2D" in str(source or "").upper():
+        return min(
+            float(engine_module.CONFIG.ocr_retry_delay),
+            CANVAS_2D_RETRY_SECONDS,
+        )
+    return float(engine_module.CONFIG.ocr_retry_delay)
+
+
 def _reader_source_label(odds: Any) -> str:
     source = str(getattr(odds, "source", "") or "")
     if source == "CANVAS_2D":
-        return "Canvas 2D / fillText"
+        return "Canvas 2D / draw calls"
     if source == "CANVAS_VISION":
-        return f"Canvas Vision / {getattr(odds, 'ocr_backend', None) or 'OCR'}"
+        return "Legacy Canvas Vision"
     return "DOM / Playwright"
 
 
@@ -250,6 +269,15 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
                     self._config.blocked_events_switch_enabled
                     and _selected_side_is_locked(selected_side, odds)
                 )
+                selected_recent_lock = bool(
+                    self._config.blocked_events_switch_enabled
+                    and not selected_locked
+                    and _selected_side_was_recently_locked(selected_side, odds)
+                )
+                recent_locked_sides = tuple(
+                    int(value)
+                    for value in (getattr(odds, "recent_locked_sides", ()) or ())
+                )
 
                 reaction_started = getattr(
                     engine_module.REPOSITORY,
@@ -266,7 +294,8 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
                             (
                                 f"Новый КФ прочитан через {elapsed_to_odds:.3f} с "
                                 f"после изменения счёта; odds={odds.team1}/{odds.team2}; "
-                                f"locked={str(selected_locked).lower()}"
+                                f"locked={str(selected_locked).lower()}; "
+                                f"recent_lock={str(selected_recent_lock).lower()}"
                             ),
                         )
 
@@ -276,7 +305,11 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
                 await engine_module.STATE.update(
                     market_reader={
                         "source": _reader_source_label(odds),
-                        "status": "MARKET_LOCKED" if selected_locked else "READY",
+                        "status": (
+                            "MARKET_LOCKED"
+                            if selected_locked
+                            else "RECENT_LOCK" if selected_recent_lock else "READY"
+                        ),
                         "attempt": attempt,
                         "next_goal_number": odds.next_goal_number,
                     },
@@ -289,8 +322,13 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
                         "source": odds.source,
                         "backend": odds.ocr_backend,
                         "confidence": odds.confidence,
-                        "status": "MARKET_LOCKED" if selected_locked else "READY",
+                        "status": (
+                            "MARKET_LOCKED"
+                            if selected_locked
+                            else "RECENT_LOCK" if selected_recent_lock else "READY"
+                        ),
                         "locked_sides": list(locked_sides),
+                        "recent_locked_sides": list(recent_locked_sides),
                     },
                     market_available=True,
                     market_locked=selected_locked,
@@ -336,9 +374,57 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
                     )
                     await original_sleep_or_stop(
                         self,
-                        engine_module.CONFIG.ocr_retry_delay,
+                        _canvas_retry_delay(engine_module, source=odds.source),
                     )
                     continue
+
+                if selected_recent_lock and demo_blocked_window is not None:
+                    if not demo_blocked_window.blocked_window_active:
+                        demo_blocked_window.blocked_window_active = True
+                        await engine_module.REPOSITORY.log(
+                            "DEMO_TRANSIENT_CANVAS_LOCK_DETECTED",
+                            (
+                                "[NEXT_GOAL][DEMO][BLOCKED] transient Canvas 2D lock "
+                                "was captured between Python polls; "
+                                f"match_id={demo_blocked_window.match_id}; "
+                                f"selected_team={demo_blocked_window.selected_team}; "
+                                f"step={demo_blocked_window.step}; "
+                                f"stake={demo_blocked_window.stake:g}; "
+                                f"baseline={demo_blocked_window.blocked_score_before.text()}; "
+                                f"recent_locked_sides={list(recent_locked_sides)}"
+                            ),
+                        )
+
+                    after_lock = await browser.snapshot()
+                    if (
+                        after_lock.team1 != snapshot.team1
+                        or after_lock.team2 != snapshot.team2
+                    ):
+                        raise engine_module.RecoverableDemoError(
+                            "SCOREBOARD_TEAMS_CHANGED",
+                            "Порядок или названия команд в scoreboard изменились.",
+                        )
+                    await self._publish_snapshot(
+                        after_lock,
+                        selected_match,
+                        state="LIVE" if after_lock.period else "UPCOMING",
+                    )
+                    await self._observe_demo_blocked_score(
+                        demo_blocked_window,
+                        after_lock,
+                    )
+                    demo_blocked_window.blocked_window_active = False
+                    await engine_module.REPOSITORY.log(
+                        "DEMO_TRANSIENT_CANVAS_LOCK_RESOLVED",
+                        (
+                            "[NEXT_GOAL][DEMO][BLOCKED] transient lock checked; "
+                            f"score={after_lock.score.text()}; "
+                            "selected team did not score"
+                        ),
+                    )
+                    if after_lock.score != snapshot.score:
+                        snapshot = after_lock
+                        continue
 
                 if locked_sides and self._config.blocked_events_switch_enabled:
                     await engine_module.REPOSITORY.log(
@@ -416,9 +502,12 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
                 )
                 if attempt == 1 or attempt % 10 == 0:
                     await engine_module.REPOSITORY.log(error.status, str(error))
+                error_source = str(
+                    (getattr(error, "details", {}) or {}).get("source") or ""
+                )
                 await original_sleep_or_stop(
                     self,
-                    engine_module.CONFIG.ocr_retry_delay,
+                    _canvas_retry_delay(engine_module, source=error_source),
                 )
 
         return None
