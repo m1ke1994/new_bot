@@ -666,6 +666,27 @@ const reversedHistory = computed(() => [...history.value].reverse())
 
 const recentLogs = computed(() => logs.value.slice(-250))
 
+const bookmakerLockEvents = new Set([
+  'DEMO_PREBET_CANVAS_LOCK_CHECK',
+  'DEMO_PREBET_CANVAS_LOCKED',
+  'DEMO_PREBET_CANVAS_LOCK_STATE_UNAVAILABLE',
+  'CANVAS_2D_LOCKED_USING_LAST_ODDS',
+])
+
+function isBookmakerLockLog(item) {
+  const event = String(item?.event || '')
+  return bookmakerLockEvents.has(event)
+}
+
+function bookmakerLogLabel(item) {
+  const event = String(item?.event || '')
+  if (event === 'DEMO_PREBET_CANVAS_LOCKED') return 'БЛОКИРОВКА БК'
+  if (event === 'DEMO_PREBET_CANVAS_LOCK_CHECK') return 'ПРОВЕРКА ЗАМКА'
+  if (event === 'DEMO_PREBET_CANVAS_LOCK_STATE_UNAVAILABLE') return 'ЗАМОК: НЕТ ДАННЫХ'
+  if (event === 'CANVAS_2D_LOCKED_USING_LAST_ODDS') return 'ЗАМОК CANVAS'
+  return event
+}
+
 const profitTone = computed(() => Number(budget.value.session_profit || 0) >= 0 ? 'green' : 'red')
 
 const signedProfit = computed(() => {
@@ -1633,11 +1654,15 @@ onBeforeUnmount(() => {
 
             <div class="logs">
 
-              <div v-for="(item, index) in recentLogs" :key="`${item.timestamp}-${index}`" class="log-row">
+              <div
+                v-for="(item, index) in recentLogs"
+                :key="`${item.timestamp}-${index}`"
+                :class="['log-row', { 'log-row-bookmaker-lock': isBookmakerLockLog(item) }]"
+              >
 
                 <time>{{ item.time }}</time>
 
-                <span class="log-event">{{ item.event }}</span>
+                <span class="log-event">{{ bookmakerLogLabel(item) }}</span>
 
                 <p>{{ item.message }}</p>
 
