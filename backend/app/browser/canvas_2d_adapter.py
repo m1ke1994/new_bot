@@ -1019,6 +1019,77 @@ def _button_region(
     }
 
 
+def _lock_region_for_outcome(
+    layer: dict[str, Any],
+    odds_region: dict[str, float],
+    *,
+    side: int,
+) -> dict[str, float]:
+    """Cover the full outcome cell: lock icon + label + odds.
+
+    The bookmaker renders the lock at the left edge of the selection while the
+    odds text sits at the right edge. Click coordinates must stay narrow, but
+    lock detection must inspect the whole selection row.
+    """
+    canvas_width = max(1.0, float(layer.get("width") or 1.0))
+    canvas_height = max(1.0, float(layer.get("height") or 1.0))
+    center_y = float(odds_region["y"]) + float(odds_region["height"]) / 2.0
+    row_tolerance = max(14.0, min(30.0, canvas_height * 0.03))
+
+    if side == 1:
+        min_x = 0.0
+        max_x = min(float(odds_region["x"]), canvas_width * 0.36)
+    else:
+        min_x = canvas_width * 0.30
+        max_x = float(odds_region["x"])
+
+    labels: list[dict[str, Any]] = []
+    for item in layer.get("texts") or []:
+        text_value = str(item.get("text") or "")
+        if not text_value or _parse_odds(text_value) is not None:
+            continue
+        if abs(_center_y(item) - center_y) > row_tolerance:
+            continue
+        item_x = float(item.get("x") or 0.0)
+        if not (min_x <= item_x < max_x):
+            continue
+        cleaned = _clean_text(text_value)
+        if "гол" not in cleaned and PRIVATE_GLYPH_RE.search(text_value) is None:
+            continue
+        labels.append(item)
+
+    left = float(odds_region["x"])
+    top = float(odds_region["y"])
+    bottom = top + float(odds_region["height"])
+    if labels:
+        left = min(left, *(float(item.get("x") or 0.0) for item in labels))
+        top = min(top, *(
+            float(item.get("y") or 0.0)
+            for item in labels
+        ))
+        bottom = max(bottom, *(
+            float(item.get("y") or 0.0) + float(item.get("height") or 0.0)
+            for item in labels
+        ))
+
+    # The real lock is drawn just before "Команда N - X-й гол".
+    left_pad = max(24.0, float(odds_region["height"]) * 0.85)
+    left = max(min_x, left - left_pad)
+    right = min(
+        canvas_width if side == 2 else canvas_width * 0.36,
+        float(odds_region["x"]) + float(odds_region["width"]) + 10.0,
+    )
+    top = max(0.0, top - 7.0)
+    bottom = min(canvas_height, bottom + 7.0)
+
+    return {
+        "x": left,
+        "y": top,
+        "width": max(1.0, right - left),
+        "height": max(1.0, bottom - top),
+    }
+
+
 def _map_next_goal_layer(
     layer: dict[str, Any],
     expected_goal_number: int,
@@ -1460,8 +1531,8 @@ def _small_icon_in_region(
         return False
     aspect = mw / mh
     return (
-        max(4.0, rw * 0.035) <= mw <= min(34.0, rw * 0.38)
-        and max(6.0, rh * 0.18) <= mh <= min(34.0, rh * 0.95)
+        4.0 <= mw <= 34.0
+        and max(6.0, rh * 0.14) <= mh <= 34.0
         and 0.35 <= aspect <= 1.45
     )
 
@@ -1732,6 +1803,36 @@ def _detect_multilayer_lock_state(
 
     source_layer = _canvas_layer_by_id(snapshot, source_canvas_id)
     selected_id = snapshot.get("selected_canvas_id")
+
+    source_lock_region1 = (
+        _lock_region_for_outcome(source_layer, team1_region, side=1)
+        if source_layer is not None
+        else dict(team1_region)
+    )
+    source_lock_region2 = (
+        _lock_region_for_outcome(source_layer, team2_region, side=2)
+        if source_layer is not None
+        else dict(team2_region)
+    )
+    visible_lock_region1 = (
+        _project_region_to_visible_canvas(
+            source_lock_region1,
+            source_layer=source_layer,
+            snapshot=snapshot,
+        )
+        if source_layer is not None
+        else dict(team1_click_region)
+    )
+    visible_lock_region2 = (
+        _project_region_to_visible_canvas(
+            source_lock_region2,
+            source_layer=source_layer,
+            snapshot=snapshot,
+        )
+        if source_layer is not None
+        else dict(team2_click_region)
+    )
+
     current_markers: dict[str, Any] = {}
     recent_markers: dict[str, Any] = {}
     checked_layers: list[int] = []
@@ -1746,34 +1847,34 @@ def _detect_multilayer_lock_state(
             and layer_id is not None
             and int(layer_id) == int(source_canvas_id)
         ):
-            region1 = dict(team1_region)
-            region2 = dict(team2_region)
+            region1 = dict(source_lock_region1)
+            region2 = dict(source_lock_region2)
         elif (
             selected_id is not None
             and layer_id is not None
             and int(layer_id) == int(selected_id)
         ):
-            region1 = dict(team1_click_region)
-            region2 = dict(team2_click_region)
+            region1 = dict(visible_lock_region1)
+            region2 = dict(visible_lock_region2)
         else:
             region1 = _project_visible_region_to_layer(
-                team1_click_region,
+                visible_lock_region1,
                 target_layer=layer,
                 snapshot=snapshot,
             )
             region2 = _project_visible_region_to_layer(
-                team2_click_region,
+                visible_lock_region2,
                 target_layer=layer,
                 snapshot=snapshot,
             )
             if (region1 is None or region2 is None) and source_layer is not None:
                 region1 = _scale_region_between_layers(
-                    team1_region,
+                    source_lock_region1,
                     source_layer=source_layer,
                     target_layer=layer,
                 )
                 region2 = _scale_region_between_layers(
-                    team2_region,
+                    source_lock_region2,
                     source_layer=source_layer,
                     target_layer=layer,
                 )
