@@ -11,6 +11,7 @@ from uuid import uuid4
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from auth import authorize
+from backend.app.browser.canvas_2d_adapter import read_next_goal_lock_state
 from backend.app.browser.canvas_vision import load_latest_analysis
 from backend.app.browser.first_half import (
     FirstHalfNotReady,
@@ -921,7 +922,8 @@ class DemoEngine:
                 if odds_result is None:
                     return
                 snapshot, current_odds = odds_result
-            browser = MatchBrowser(await self.browser_manager.ensure_page())
+            page = await self.browser_manager.ensure_page()
+            browser = MatchBrowser(page)
             try:
                 snapshot = await self._read_fresh_score(
                     browser,
@@ -1004,6 +1006,33 @@ class DemoEngine:
                 snapshot = pre_active
                 expected_goal = snapshot.score.team1 + snapshot.score.team2 + 1
                 if current_odds.next_goal_number == expected_goal:
+                    if (
+                        snapshot.period
+                        and await self._demo_prebet_canvas_is_blocked(
+                            page,
+                            current_odds,
+                            demo_blocked_window,
+                        )
+                    ):
+                        try:
+                            odds_result = await self._wait_for_odds(
+                                snapshot,
+                                selected_match,
+                                demo_blocked_window=demo_blocked_window,
+                            )
+                        except MissedSelectedTeamGoal as missed:
+                            await self._finish_demo_missed_selected_team_goal(
+                                window=demo_blocked_window,
+                                selected_match=selected_match,
+                                cycle_id=cycle_id,
+                                snapshot=missed.snapshot,
+                            )
+                            self._current_series = None
+                            return
+                        if odds_result is None:
+                            return
+                        snapshot, current_odds = odds_result
+                        continue
                     break
                 await REPOSITORY.log(
                     "DEMO_PRE_ACTIVE_SCORE_RECHECK",
@@ -2160,6 +2189,65 @@ class DemoEngine:
             ),
             f"[NEXT_GOAL][DEMO][BLOCKED] selected team did not score; baseline updated to {after.text()}",
         )
+
+    async def _demo_prebet_canvas_is_blocked(
+        self,
+        page: Page,
+        current_odds: Any,
+        window: DemoBlockedWindow,
+    ) -> bool:
+        """Final lock gate before DEMO_BET_CREATED for a live Canvas market."""
+        if str(getattr(current_odds, "source", "") or "") != "CANVAS_2D":
+            return False
+        next_goal_number = getattr(current_odds, "next_goal_number", None)
+        if next_goal_number is None:
+            await REPOSITORY.log(
+                "DEMO_PREBET_CANVAS_LOCK_STATE_UNAVAILABLE",
+                "[NEXT_GOAL][DEMO][PREBET] Canvas odds have no next_goal_number; fail closed",
+            )
+            return True
+
+        state = await read_next_goal_lock_state(page, int(next_goal_number))
+        if not state.get("available"):
+            await REPOSITORY.log(
+                "DEMO_PREBET_CANVAS_LOCK_STATE_UNAVAILABLE",
+                (
+                    "[NEXT_GOAL][DEMO][PREBET] cached Canvas button mapping unavailable; "
+                    f"goal={next_goal_number}; reason={state.get('reason')}"
+                ),
+            )
+            return True
+
+        selected_side = 1 if window.selected_side == Scorer.TEAM_1 else 2
+        locked = {int(side) for side in (state.get("locked_sides") or ())}
+        recent = {
+            int(side)
+            for side in (state.get("recent_locked_sides") or ())
+        }
+        if selected_side not in locked and selected_side not in recent:
+            return False
+
+        window.blocked_window_active = True
+        marker = (
+            (state.get("markers") or {}).get(str(selected_side))
+            or (state.get("recent_markers") or {}).get(str(selected_side))
+            or {}
+        )
+        await REPOSITORY.log(
+            "DEMO_PREBET_CANVAS_LOCKED",
+            (
+                "[NEXT_GOAL][DEMO][PREBET] virtual bet blocked before creation; "
+                f"step={window.step}; stake={window.stake:g}; "
+                f"selected_team={window.selected_team}; "
+                f"goal={next_goal_number}; "
+                f"locked_sides={sorted(locked)}; "
+                f"recent_locked_sides={sorted(recent)}; "
+                f"reason={marker.get('reason')}; "
+                f"canvas_id={marker.get('detected_canvas_id')}; "
+                f"checked_canvas_ids={list(state.get('checked_canvas_ids') or ())}"
+            ),
+        )
+        return True
 
     async def _finish_demo_missed_selected_team_goal(
         self,
