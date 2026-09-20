@@ -2294,6 +2294,17 @@ class DemoEngine:
             int(side)
             for side in (state.get("recent_locked_sides") or ())
         }
+        await REPOSITORY.log(
+            "DEMO_PREBET_CANVAS_LOCK_CHECK",
+            (
+                "[NEXT_GOAL][DEMO][PREBET] bookmaker lock check; "
+                f"step={window.step}; selected_side={selected_side}; "
+                f"goal={next_goal_number}; "
+                f"locked_sides={sorted(locked)}; "
+                f"recent_locked_sides={sorted(recent)}; "
+                f"checked_canvas_ids={list(state.get('checked_canvas_ids') or ())}"
+            ),
+        )
         if selected_side not in locked and selected_side not in recent:
             return False
 
