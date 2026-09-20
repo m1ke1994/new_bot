@@ -472,6 +472,254 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sequence["blocked_match_ids"], [])
         engine.live_executor.prepare.assert_not_awaited()
 
+    async def test_next_step_protection_starts_before_first_post_settlement_read(self):
+        zero = snapshot(0, 0)
+        lost_score = snapshot(1, 0)
+        missed_score = snapshot(1, 1)
+        odds = NextGoalOdds(1.8, 2.1, next_goal_number=1)
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = DemoRepository(Path(directory))
+            with (
+                patch("backend.app.demo.engine.REPOSITORY", repository),
+                patch("backend.app.demo.engine.LeagueBrowser", OneMatchLeagueBrowser),
+            ):
+                engine = DemoEngine(FakeManager())
+                engine._mode = "DEMO"
+                engine._config = StrategyConfig.from_payload(
+                    {
+                        "stakes": [20, 45, 102],
+                        "max_steps": 3,
+                        "blocked_events_switch_enabled": True,
+                    }
+                )
+                engine._sleep_or_stop = AsyncMock()
+                engine._wait_for_initial_zero_score = AsyncMock(return_value=zero)
+                engine._wait_for_odds = AsyncMock(return_value=(zero, odds))
+                engine._read_fresh_score = AsyncMock(
+                    side_effect=[zero, zero, missed_score]
+                )
+                engine._wait_for_goal = AsyncMock(
+                    return_value=(lost_score, Scorer.TEAM_1)
+                )
+
+                await engine._process_next_match(object())
+                history = await repository.history(mode="DEMO")
+                logs = await repository.logs()
+                sequence = await repository.get_sequence()
+
+        self.assertEqual(
+            [item["result"] for item in history],
+            ["LOSE", "MISSED_SELECTED_TEAM_GOAL"],
+        )
+        self.assertEqual([item["step"] for item in history], [1, 2])
+        self.assertEqual(engine._wait_for_odds.await_count, 1)
+        self.assertEqual(sequence["current_step"], 2)
+        self.assertEqual(sequence["status"], "WAITING_NEXT_MATCH")
+        events = [item["event"] for item in logs]
+        started = events.index("NEXT_STEP_PROTECTION_STARTED")
+        changed = events.index("NEXT_STEP_SCORE_CHANGED_NO_ACTIVE_BET")
+        missed = events.index("NEXT_STEP_SELECTED_TEAM_GOAL_MISSED")
+        self.assertLess(started, changed)
+        self.assertLess(changed, missed)
+        self.assertEqual(events.count("DEMO_BET_CREATED"), 1)
+
+    async def test_opponent_goal_updates_transition_baseline_without_advancing_step(self):
+        zero = snapshot(0, 0)
+        lost_score = snapshot(1, 0)
+        opponent_again = snapshot(2, 0)
+        first_odds = NextGoalOdds(1.8, 2.1, next_goal_number=1)
+        second_odds = NextGoalOdds(1.7, 2.2, next_goal_number=3)
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = DemoRepository(Path(directory))
+            with (
+                patch("backend.app.demo.engine.REPOSITORY", repository),
+                patch("backend.app.demo.engine.LeagueBrowser", OneMatchLeagueBrowser),
+            ):
+                engine = DemoEngine(FakeManager())
+                engine._mode = "DEMO"
+                engine._config = StrategyConfig.from_payload(
+                    {
+                        "stakes": [20, 45, 102],
+                        "max_steps": 3,
+                        "blocked_events_switch_enabled": True,
+                    }
+                )
+                engine._sleep_or_stop = AsyncMock()
+                engine._wait_for_initial_zero_score = AsyncMock(return_value=zero)
+                engine._wait_for_odds = AsyncMock(
+                    side_effect=[(zero, first_odds), (opponent_again, second_odds)]
+                )
+                engine._read_fresh_score = AsyncMock(
+                    side_effect=[
+                        zero,
+                        zero,
+                        opponent_again,
+                        opponent_again,
+                        opponent_again,
+                    ]
+                )
+                engine._wait_for_goal = AsyncMock(
+                    side_effect=[(lost_score, Scorer.TEAM_1), None]
+                )
+
+                await engine._process_next_match(object())
+                history = await repository.history(mode="DEMO")
+                logs = await repository.logs()
+                sequence = await repository.get_sequence()
+
+        self.assertEqual([item["result"] for item in history], ["LOSE", "ACTIVE"])
+        self.assertEqual(history[-1]["step"], 2)
+        self.assertEqual(history[-1]["amount"], 45)
+        self.assertEqual(history[-1]["score_before"], "2:0")
+        self.assertEqual(history[-1]["selected_team"], "TEAM 2")
+        self.assertEqual(sequence["current_step"], 2)
+        events = [item["event"] for item in logs]
+        self.assertIn("NEXT_STEP_OPPONENT_GOAL_BASELINE_UPDATED", events)
+        completed = events.index("NEXT_STEP_PROTECTION_COMPLETED")
+        step_two_created = max(
+            index
+            for index, item in enumerate(logs)
+            if item["event"] == "DEMO_BET_CREATED" and "#2:" in item["message"]
+        )
+        self.assertLess(step_two_created, completed)
+
+    async def test_ready_odds_do_not_close_protection_before_bet_created(self):
+        zero = snapshot(0, 0)
+        lost_score = snapshot(1, 0)
+        missed_score = snapshot(1, 1)
+        first_odds = NextGoalOdds(1.8, 2.1, next_goal_number=1)
+        ready_step_two_odds = NextGoalOdds(1.7, 2.2, next_goal_number=2)
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = DemoRepository(Path(directory))
+            with (
+                patch("backend.app.demo.engine.REPOSITORY", repository),
+                patch("backend.app.demo.engine.LeagueBrowser", OneMatchLeagueBrowser),
+            ):
+                engine = DemoEngine(FakeManager())
+                engine._mode = "DEMO"
+                engine._config = StrategyConfig.from_payload(
+                    {
+                        "stakes": [20, 45, 102],
+                        "max_steps": 3,
+                        "blocked_events_switch_enabled": True,
+                    }
+                )
+                engine._sleep_or_stop = AsyncMock()
+                engine._wait_for_initial_zero_score = AsyncMock(return_value=zero)
+                engine._wait_for_odds = AsyncMock(
+                    side_effect=[
+                        (zero, first_odds),
+                        (lost_score, ready_step_two_odds),
+                    ]
+                )
+                engine._read_fresh_score = AsyncMock(
+                    side_effect=[zero, zero, lost_score, missed_score]
+                )
+                engine._wait_for_goal = AsyncMock(
+                    return_value=(lost_score, Scorer.TEAM_1)
+                )
+
+                await engine._process_next_match(object())
+                history = await repository.history(mode="DEMO")
+                logs = await repository.logs()
+
+        self.assertEqual(
+            [item["result"] for item in history],
+            ["LOSE", "MISSED_SELECTED_TEAM_GOAL"],
+        )
+        self.assertEqual([item["step"] for item in history], [1, 2])
+        self.assertEqual(
+            sum(
+                1
+                for item in logs
+                if item["event"] == "DEMO_BET_CREATED" and "#2:" in item["message"]
+            ),
+            0,
+        )
+        self.assertNotIn(
+            "NEXT_STEP_PROTECTION_COMPLETED",
+            [item["event"] for item in logs],
+        )
+
+    async def test_step_two_loss_protects_step_three_immediately(self):
+        zero = snapshot(0, 0)
+        first_loss = snapshot(1, 0)
+        second_loss = snapshot(2, 0)
+        missed_step_three = snapshot(2, 1)
+        first_odds = NextGoalOdds(1.8, 2.1, next_goal_number=1)
+        second_odds = NextGoalOdds(1.7, 2.2, next_goal_number=2)
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = DemoRepository(Path(directory))
+            with (
+                patch("backend.app.demo.engine.REPOSITORY", repository),
+                patch("backend.app.demo.engine.LeagueBrowser", OneMatchLeagueBrowser),
+            ):
+                engine = DemoEngine(FakeManager())
+                engine._mode = "DEMO"
+                engine._config = StrategyConfig.from_payload(
+                    {
+                        "stakes": [20, 45, 102],
+                        "max_steps": 3,
+                        "blocked_events_switch_enabled": True,
+                    }
+                )
+                engine._sleep_or_stop = AsyncMock()
+                engine._wait_for_initial_zero_score = AsyncMock(return_value=zero)
+                engine._wait_for_odds = AsyncMock(
+                    side_effect=[(zero, first_odds), (first_loss, second_odds)]
+                )
+                engine._read_fresh_score = AsyncMock(
+                    side_effect=[
+                        zero,
+                        zero,
+                        first_loss,
+                        first_loss,
+                        first_loss,
+                        missed_step_three,
+                    ]
+                )
+                engine._wait_for_goal = AsyncMock(
+                    side_effect=[
+                        (first_loss, Scorer.TEAM_1),
+                        (second_loss, Scorer.TEAM_1),
+                    ]
+                )
+
+                await engine._process_next_match(object())
+                history = await repository.history(mode="DEMO")
+                sequence = await repository.get_sequence()
+
+        self.assertEqual(
+            [item["result"] for item in history],
+            ["LOSE", "LOSE", "MISSED_SELECTED_TEAM_GOAL"],
+        )
+        self.assertEqual([item["step"] for item in history], [1, 2, 3])
+        self.assertEqual(sequence["current_step"], 3)
+        self.assertEqual(sequence["status"], "WAITING_NEXT_MATCH")
+
+    async def test_multi_goal_delta_uses_selected_side_total(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = DemoRepository(Path(directory))
+            with patch("backend.app.demo.engine.REPOSITORY", repository):
+                engine = DemoEngine(FakeManager())
+                window = self.window()
+                window.blocked_score_before = Score(1, 0)
+                with self.assertRaises(MissedSelectedTeamGoal):
+                    await engine._observe_demo_blocked_score(window, snapshot(2, 1))
+
+                opponent_only = self.window()
+                opponent_only.blocked_score_before = Score(1, 0)
+                await engine._observe_demo_blocked_score(
+                    opponent_only,
+                    snapshot(3, 0),
+                )
+
+        self.assertEqual(opponent_only.blocked_score_before, Score(3, 0))
+
     async def test_read_only_market_reader_prepares_filter_without_betting(self):
         page = ReadOnlyPage()
         with patch(

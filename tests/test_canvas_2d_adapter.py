@@ -1,6 +1,8 @@
 import unittest
 
 from backend.app.browser.canvas_2d_adapter import (
+    _LAST_REPORTED_LOCK_SEQ,
+    _consume_recent_lock_sides,
     detect_lock_state,
     map_next_goal_snapshot,
 )
@@ -172,6 +174,118 @@ class Canvas2DAdapterTests(unittest.TestCase):
             lock_state["recent_markers"]["2"]["reason"],
             "canvas-vector-icon",
         )
+
+    def test_transient_lock_is_seq_consumed_without_age_expiry(self):
+        snapshot = self.snapshot()
+        snapshot["generation"] = 7
+        snapshot["texts"][-1]["seq"] = 30
+        snapshot["texts"][-1]["generation"] = 7
+        mapping = map_next_goal_snapshot(snapshot, 3)
+        assert mapping is not None
+        before_odds = dict(snapshot["texts"][-1])
+        before_odds.update(
+            seq=10,
+            timestamp_ms=100,
+            event_type="text",
+            generation=7,
+        )
+        vector_lock = {
+            "seq": 20,
+            "timestamp_ms": 200,
+            "canvas_id": 4,
+            "generation": 7,
+            "kind": "stroke",
+            "event_type": "path",
+            "x": 575,
+            "y": 99,
+            "width": 13,
+            "height": 19,
+            "path_op_count": 6,
+            "alpha": 1.0,
+        }
+        after_odds = dict(snapshot["texts"][-1])
+        after_odds.update(
+            seq=30,
+            timestamp_ms=300,
+            event_type="text",
+            generation=7,
+        )
+        snapshot["paths"] = []
+        snapshot["events"] = [before_odds, vector_lock, after_odds]
+        snapshot["snapshot_at_ms"] = 30_000
+
+        lock_state = detect_lock_state(
+            snapshot,
+            team1_region=mapping.team1_region,
+            team2_region=mapping.team2_region,
+        )
+        page = type("Page", (), {"url": "https://example.test/match-1"})()
+        _LAST_REPORTED_LOCK_SEQ.clear()
+
+        first_sides, _ = _consume_recent_lock_sides(
+            page,
+            lock_state,
+            market_context=3,
+        )
+        second_sides, _ = _consume_recent_lock_sides(
+            page,
+            lock_state,
+            market_context=3,
+        )
+
+        self.assertEqual(lock_state["recent_locked_sides"], (2,))
+        self.assertEqual(first_sides, (2,))
+        self.assertEqual(second_sides, ())
+
+    def test_lock_cursor_resets_for_generation_match_and_browser_context(self):
+        page = type("Page", (), {"url": "https://example.test/match-1"})()
+        marker = {
+            "seq": 50,
+            "canvas_id": 4,
+            "generation": 1,
+        }
+        lock_state = {
+            "locked_sides": (),
+            "recent_locked_sides": (2,),
+            "markers": {},
+            "recent_markers": {"2": marker},
+        }
+        _LAST_REPORTED_LOCK_SEQ.clear()
+
+        first, _ = _consume_recent_lock_sides(
+            page,
+            lock_state,
+            market_context=3,
+        )
+        marker["generation"] = 2
+        next_generation, _ = _consume_recent_lock_sides(
+            page,
+            lock_state,
+            market_context=3,
+        )
+        page.url = "https://example.test/match-2"
+        next_match, _ = _consume_recent_lock_sides(
+            page,
+            lock_state,
+            market_context=3,
+        )
+        marker["hook_installed_at"] = 1000
+        new_browser_context, _ = _consume_recent_lock_sides(
+            page,
+            lock_state,
+            market_context=3,
+        )
+        next_market, _ = _consume_recent_lock_sides(
+            page,
+            lock_state,
+            market_context=4,
+        )
+
+        self.assertEqual(first, (2,))
+        self.assertEqual(next_generation, (2,))
+        self.assertEqual(next_match, (2,))
+        self.assertEqual(new_browser_context, (2,))
+        self.assertEqual(next_market, (2,))
 
     def test_reads_internal_canvas_and_projects_to_visible_canvas(self):
         source = self.snapshot()

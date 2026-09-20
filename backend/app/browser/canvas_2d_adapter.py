@@ -883,7 +883,7 @@ class _CachedMarket:
 
 _LAST_MARKETS: dict[int, _CachedMarket] = {}
 _LAST_DIAGNOSTIC_SIGNATURES: dict[int, str] = {}
-_LAST_REPORTED_LOCK_SEQ: dict[tuple[int, int], int] = {}
+_LAST_REPORTED_LOCK_SEQ: dict[tuple[int, str, int, int, int, int, int], int] = {}
 
 
 async def _log(logger: Logger | None, event: str, message: str) -> None:
@@ -1258,18 +1258,35 @@ def map_next_goal_snapshot(
 def _consume_recent_lock_sides(
     page: Page,
     lock_state: dict[str, Any],
+    *,
+    market_context: int,
 ) -> tuple[tuple[int, ...], dict[str, Any]]:
+    """Emit each transient lock once within its page/generation/market context."""
     current = {int(side) for side in lock_state.get("locked_sides") or ()}
     recent = {int(side) for side in lock_state.get("recent_locked_sides") or ()}
     recent_markers = lock_state.get("recent_markers") or {}
     emitted: list[int] = []
     emitted_markers: dict[str, Any] = {}
 
+    def cursor_key(
+        side: int,
+        marker: dict[str, Any],
+    ) -> tuple[int, str, int, int, int, int, int]:
+        return (
+            id(page),
+            str(getattr(page, "url", "") or ""),
+            int(marker.get("hook_installed_at") or 0),
+            int(marker.get("canvas_id") or -1),
+            int(marker.get("generation") or 0),
+            int(market_context),
+            side,
+        )
+
     for side in sorted(current):
         marker = (lock_state.get("markers") or {}).get(str(side)) or {}
         seq = int(marker.get("seq") or 0)
         if seq > 0:
-            key = (id(page), side)
+            key = cursor_key(side, marker)
             _LAST_REPORTED_LOCK_SEQ[key] = max(
                 seq,
                 _LAST_REPORTED_LOCK_SEQ.get(key, 0),
@@ -1278,7 +1295,7 @@ def _consume_recent_lock_sides(
     for side in sorted(recent):
         marker = recent_markers.get(str(side)) or {}
         seq = int(marker.get("seq") or 0)
-        key = (id(page), side)
+        key = cursor_key(side, marker)
         if seq <= _LAST_REPORTED_LOCK_SEQ.get(key, 0):
             continue
         _LAST_REPORTED_LOCK_SEQ[key] = seq
@@ -1294,8 +1311,17 @@ def _mapping_source_layer(
 ) -> dict[str, Any]:
     layer = _canvas_layer_by_id(snapshot, source_canvas_id)
     if layer is not None:
-        return layer
+        return {
+            **layer,
+            "hook_installed_at": (snapshot.get("diagnostics") or {}).get(
+                "installed_at"
+            ),
+        }
     return {
+        "generation": snapshot.get("generation"),
+        "hook_installed_at": (snapshot.get("diagnostics") or {}).get(
+            "installed_at"
+        ),
         "texts": snapshot.get("texts") or [],
         "rects": snapshot.get("rects") or [],
         "images": snapshot.get("images") or [],
@@ -1334,9 +1360,6 @@ def _rect_intersects_marker(
         rx - pad_x <= mx <= rx + rw + pad_x
         and ry - pad_y <= my <= ry + rh + pad_y
     )
-
-
-LOCK_EVENT_MAX_AGE_MS = 2500.0
 
 
 def _overlap_ratio(
@@ -1446,11 +1469,16 @@ def _odds_event_sequences(
     region: dict[str, float],
 ) -> list[int]:
     sequences: set[int] = set()
+    generation = snapshot.get("generation")
     items = list(snapshot.get("texts") or [])
     items.extend(
         item
         for item in (snapshot.get("events") or [])
         if str(item.get("event_type") or "") == "text"
+        and (
+            generation is None
+            or int(item.get("generation") or 0) == int(generation)
+        )
     )
     for item in items:
         if not _rect_intersects_marker(region, item):
@@ -1476,10 +1504,17 @@ def detect_lock_state(
         *(snapshot.get("rects") or []),
     ]
     events = list(snapshot.get("events") or [])
-    snapshot_at_ms = float(snapshot.get("snapshot_at_ms") or 0.0)
+    generation = snapshot.get("generation")
+    if generation is not None:
+        events = [
+            item
+            for item in events
+            if int(item.get("generation") or 0) == int(generation)
+        ]
 
     current_result: dict[str, Any] = {}
     recent_result: dict[str, Any] = {}
+    hook_installed_at = snapshot.get("hook_installed_at")
 
     for side, region in ((1, team1_region), (2, team2_region)):
         odds_sequences = _odds_event_sequences(snapshot, region)
@@ -1494,7 +1529,9 @@ def detect_lock_state(
                 continue
             if int(item.get("seq") or 0) < latest_odds_seq:
                 continue
-            current_candidates.append(_marker_payload(item, reason))
+            payload = _marker_payload(item, reason)
+            payload["hook_installed_at"] = hook_installed_at
+            current_candidates.append(payload)
 
         if current_candidates:
             current_result[str(side)] = max(
@@ -1509,13 +1546,6 @@ def detect_lock_state(
             reason = _lock_reason_for_marker(region, item)
             if reason is None:
                 continue
-            timestamp_ms = item.get("timestamp_ms")
-            if timestamp_ms is None or snapshot_at_ms <= 0:
-                continue
-            age_ms = snapshot_at_ms - float(timestamp_ms)
-            if age_ms < 0 or age_ms > LOCK_EVENT_MAX_AGE_MS:
-                continue
-
             marker_seq = int(item.get("seq") or 0)
             explicit_lock = reason in {
                 "lock-symbol",
@@ -1530,7 +1560,7 @@ def detect_lock_state(
                     continue
 
             payload = _marker_payload(item, reason)
-            payload["age_ms"] = round(age_ms, 1)
+            payload["hook_installed_at"] = hook_installed_at
             recent_candidates.append(payload)
 
         if recent_candidates:
@@ -1840,6 +1870,7 @@ async def read_next_goal_odds(
             recent_locked_sides, recent_lock_markers = _consume_recent_lock_sides(
                 page,
                 lock_state,
+                market_context=next_goal_number,
             )
             if lock_state["locked_sides"] or recent_locked_sides:
                 await _log(
@@ -1900,6 +1931,7 @@ async def read_next_goal_odds(
     recent_locked_sides, recent_lock_markers = _consume_recent_lock_sides(
         page,
         lock_state,
+        market_context=next_goal_number,
     )
 
     _LAST_MARKETS[cache_key] = _CachedMarket(

@@ -110,6 +110,8 @@ class DemoBlockedWindow:
     match_id: str
     market_was_ready: bool = True
     blocked_window_active: bool = False
+    protection_active: bool = True
+    started_after_settlement: bool = False
 
 
 DEMO_BLOCKED_MARKET_STATUSES = frozenset(
@@ -180,6 +182,7 @@ class DemoEngine:
         self._active_live_bet: ActiveLiveBet | None = None
         self._live_attempt_counter = 0
         self._current_series: CurrentSeries | None = None
+        self._active_demo_protection: DemoBlockedWindow | None = None
 
     async def restore(self) -> None:
         """Hydrate the in-memory dashboard from durable storage after a restart."""
@@ -849,6 +852,7 @@ class DemoEngine:
         won = False
         ambiguous_cycle = False
         start_step = int(sequence["current_step"])
+        pending_demo_protection: DemoBlockedWindow | None = None
         self._current_series = CurrentSeries(
             cycle_id=cycle_id,
             match_id=selected_match.get("match_id"),
@@ -870,20 +874,27 @@ class DemoEngine:
             amount = float(self._config.stakes[step - 1])
             if self._stop_event.is_set():
                 return
-            demo_blocked_window = (
-                DemoBlockedWindow(
-                    initial_score=snapshot.score,
-                    blocked_score_before=snapshot.score,
-                    selected_side=selection.selected_side,
-                    selected_team=selection.selected_team,
-                    step=step,
-                    stake=amount,
-                    match_id=next_goal_match_identity(selected_match),
+            if pending_demo_protection is not None:
+                if pending_demo_protection.step != step:
+                    raise RuntimeError("DEMO_NEXT_STEP_PROTECTION_STEP_MISMATCH")
+                demo_blocked_window = pending_demo_protection
+                pending_demo_protection = None
+            else:
+                demo_blocked_window = (
+                    DemoBlockedWindow(
+                        initial_score=snapshot.score,
+                        blocked_score_before=snapshot.score,
+                        selected_side=selection.selected_side,
+                        selected_team=selection.selected_team,
+                        step=step,
+                        stake=amount,
+                        match_id=next_goal_match_identity(selected_match),
+                    )
+                    if self._mode == "DEMO"
+                    and self._config.blocked_events_switch_enabled
+                    else None
                 )
-                if self._mode == "DEMO"
-                and self._config.blocked_events_switch_enabled
-                else None
-            )
+            self._active_demo_protection = demo_blocked_window
             if self._mode == "LIVE":
                 self._pending_live_bet = PendingLiveBet(
                     decision_id=f"{selected_match.get('match_id')}_{selection.selected_side.value}_step{step}",
@@ -1134,6 +1145,15 @@ class DemoEngine:
                 f"{self._mode}_BET_CREATED",
                 f"#{step}: {selection.selected_team}, {amount} RUB @ {selected_odd}, score={score_before.text()}",
             )
+            if demo_blocked_window is not None:
+                demo_blocked_window.protection_active = False
+                self._active_demo_protection = None
+                if demo_blocked_window.started_after_settlement:
+                    await REPOSITORY.log(
+                        "NEXT_STEP_PROTECTION_COMPLETED",
+                        f"step={step} stake={amount:g} score={score_before.text()}; "
+                        f"boundary={self._mode}_BET_CREATED",
+                    )
 
             if waiting_for_match_start:
                 started_snapshot = await self._wait_for_match_start(selected_match)
@@ -1317,14 +1337,49 @@ class DemoEngine:
                     status="ACTIVE",
                     cumulative_pnl=str((await REPOSITORY.get_sequence())["cumulative_pnl"]),
                 )
-                # Read the scoreboard again before exposing/creating the next bet.
-                fresh_after_settlement = await self._read_fresh_score(browser, selected_match, new_snapshot)
-                if fresh_after_settlement.score != new_snapshot.score:
-                    await REPOSITORY.log(
-                        "SCORE_CHANGED_WITHOUT_ACTIVE_BET",
-                        f"{new_snapshot.score.text()} → {fresh_after_settlement.score.text()}; "
-                        f"match/team/step сохранены, следующий гол пересчитан",
+                if (
+                    self._mode == "DEMO"
+                    and self._config.blocked_events_switch_enabled
+                ):
+                    pending_demo_protection = DemoBlockedWindow(
+                        initial_score=new_snapshot.score,
+                        blocked_score_before=new_snapshot.score,
+                        selected_side=selection.selected_side,
+                        selected_team=selection.selected_team,
+                        step=next_step,
+                        stake=float(self._config.stakes[next_step - 1]),
+                        match_id=next_goal_match_identity(selected_match),
+                        started_after_settlement=True,
                     )
+                    await REPOSITORY.log(
+                        "NEXT_STEP_PROTECTION_STARTED",
+                        f"step={next_step} stake={pending_demo_protection.stake:g} "
+                        f"baseline={new_snapshot.score.text()} "
+                        f"selected_team={selection.selected_team}",
+                    )
+                    self._active_demo_protection = pending_demo_protection
+                try:
+                    fresh_after_settlement = await self._read_fresh_score(
+                        browser,
+                        selected_match,
+                        new_snapshot,
+                    )
+                    if pending_demo_protection is not None:
+                        await self._observe_demo_blocked_score(
+                            pending_demo_protection,
+                            fresh_after_settlement,
+                        )
+                except MissedSelectedTeamGoal as missed:
+                    if pending_demo_protection is None:
+                        raise
+                    await self._finish_demo_missed_selected_team_goal(
+                        window=pending_demo_protection,
+                        selected_match=selected_match,
+                        cycle_id=cycle_id,
+                        snapshot=missed.snapshot,
+                    )
+                    self._current_series = None
+                    return
                 snapshot = fresh_after_settlement
                 await self._status(
                     DemoStatus.NEXT_STEP, f"Переход к шагу {next_step}", "NEXT_STEP"
@@ -2132,15 +2187,26 @@ class DemoEngine:
         current: ScoreboardSnapshot,
     ) -> None:
         """Track score deltas while no DEMO bet exists; never infer goal order."""
+        if not window.protection_active:
+            return
         before = window.blocked_score_before
         after = current.score
         if after == before:
             return
         await REPOSITORY.log(
+            "NEXT_STEP_SCORE_CHANGED_NO_ACTIVE_BET",
+            f"step={window.step} {before.text()} -> {after.text()}",
+        )
+        await REPOSITORY.log(
             "DEMO_BLOCKED_SCORE_CHANGED",
             f"[NEXT_GOAL][DEMO][BLOCKED] score changed {before.text()} -> {after.text()}",
         )
         if selected_team_scored_between(before, after, window.selected_side):
+            await REPOSITORY.log(
+                "NEXT_STEP_SELECTED_TEAM_GOAL_MISSED",
+                f"step={window.step} selected_team={window.selected_team} "
+                f"{before.text()} -> {after.text()}",
+            )
             await REPOSITORY.log(
                 "DEMO_MISSED_SELECTED_TEAM_GOAL",
                 "[NEXT_GOAL][DEMO][BLOCKED] SELECTED TEAM SCORED WITHOUT ACTIVE BET",
@@ -2152,6 +2218,10 @@ class DemoEngine:
             else after.team1 > before.team1
         )
         window.blocked_score_before = after
+        await REPOSITORY.log(
+            "NEXT_STEP_OPPONENT_GOAL_BASELINE_UPDATED",
+            f"step={window.step} baseline={after.text()}",
+        )
         await REPOSITORY.log(
             (
                 "DEMO_BLOCKED_OPPONENT_SCORED"
@@ -2357,7 +2427,8 @@ class DemoEngine:
                     continue
 
                 if odds.source == "CANVAS_2D":
-                    reader_source = "Canvas 2D / fillText"
+                    # Canvas 2D / fillText is captured from the draw-call stream.
+                    reader_source = "Canvas 2D / draw calls"
                 elif odds.source == "CANVAS_VISION":
                     reader_source = f"Canvas Vision / {odds.ocr_backend or 'OCR'}"
                 else:
