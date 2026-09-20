@@ -1486,7 +1486,10 @@ def _rect_intersects_marker(
     rh = float(region.get("height") or 0.0)
     mx = _center_x(marker)
     my = _center_y(marker)
-    pad_x = max(8.0, rw * 0.10)
+    # Narrow odds/button regions need a small tolerance. Full outcome
+    # lock-regions are already deliberately expanded and must not bleed into
+    # the neighboring selection.
+    pad_x = 0.0 if rw >= 180.0 else max(8.0, rw * 0.10)
     pad_y = max(6.0, rh * 0.20)
     return (
         rx - pad_x <= mx <= rx + rw + pad_x
