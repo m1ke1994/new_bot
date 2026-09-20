@@ -1,6 +1,7 @@
 import unittest
 
 from backend.app.browser.canvas_2d_adapter import (
+    _detect_multilayer_lock_state,
     _LAST_REPORTED_LOCK_SEQ,
     _consume_recent_lock_sides,
     detect_lock_state,
@@ -286,6 +287,168 @@ class Canvas2DAdapterTests(unittest.TestCase):
         self.assertEqual(next_match, (2,))
         self.assertEqual(new_browser_context, (2,))
         self.assertEqual(next_market, (2,))
+
+
+    def test_lock_drawn_before_odds_in_same_render_burst_is_still_current(self):
+        snapshot = self.snapshot()
+        mapping = map_next_goal_snapshot(snapshot, 3)
+        assert mapping is not None
+
+        snapshot["texts"][-1]["seq"] = 21
+        snapshot["texts"][-1]["timestamp_ms"] = 1050
+        snapshot["texts"][-1]["generation"] = 0
+
+        lock = text(
+            "\ue91d",
+            575,
+            101,
+            width=16,
+            height=18,
+            seq=20,
+            font="16px icomoon",
+        )
+        lock["timestamp_ms"] = 1000
+        lock["generation"] = 0
+        lock["event_type"] = "text"
+
+        snapshot["texts"].append(lock)
+        snapshot["snapshot_at_ms"] = 1100
+
+        lock_state = detect_lock_state(
+            snapshot,
+            team1_region=mapping.team1_region,
+            team2_region=mapping.team2_region,
+        )
+
+        self.assertEqual(lock_state["locked_sides"], (2,))
+        self.assertEqual(
+            lock_state["markers"]["2"]["reason"],
+            "private-icon-glyph",
+        )
+
+    def test_multilayer_overlay_lock_is_detected_outside_odds_canvas(self):
+        source = self.snapshot()
+
+        source_layer = {
+            "id": 1,
+            "width": 1000,
+            "height": 500,
+            "class_name": "odds-layer",
+            "texts": source["texts"],
+            "rects": source["rects"],
+            "images": [],
+            "paths": [],
+            "events": [],
+            "snapshot_at_ms": 1200,
+        }
+
+        overlay_lock = {
+            "seq": 40,
+            "timestamp_ms": 1100,
+            "generation": 0,
+            "kind": "drawImage",
+            "event_type": "image",
+            "x": 650,
+            "y": 91,
+            "width": 12,
+            "height": 14,
+            "source": {"src": "sprite.png"},
+            "alpha": 1.0,
+        }
+
+        overlay_layer = {
+            "id": 3,
+            "width": 1000,
+            "height": 500,
+            "class_name": "overlay-layer",
+            "texts": [],
+            "rects": [],
+            "images": [overlay_lock],
+            "paths": [],
+            "events": [overlay_lock],
+            "snapshot_at_ms": 1200,
+        }
+
+        visible_layer = {
+            "id": 2,
+            "width": 500,
+            "height": 250,
+            "class_name": "market-grid-canvas__canvas",
+            "texts": [],
+            "rects": [],
+            "images": [
+                {
+                    "seq": 50,
+                    "source_canvas_id": 1,
+                    "source_x": 0,
+                    "source_y": 0,
+                    "source_width": 1000,
+                    "source_height": 500,
+                    "x": 0,
+                    "y": 0,
+                    "width": 500,
+                    "height": 250,
+                },
+                {
+                    "seq": 51,
+                    "source_canvas_id": 3,
+                    "source_x": 0,
+                    "source_y": 0,
+                    "source_width": 1000,
+                    "source_height": 500,
+                    "x": 0,
+                    "y": 0,
+                    "width": 500,
+                    "height": 250,
+                },
+            ],
+            "paths": [],
+            "events": [],
+            "snapshot_at_ms": 1200,
+        }
+
+        snapshot = {
+            "status": "READY",
+            "selected_canvas_id": 2,
+            "snapshot_at_ms": 1200,
+            "canvas": {
+                "id": 2,
+                "width": 500,
+                "height": 250,
+            },
+            "texts": [],
+            "rects": [],
+            "images": visible_layer["images"],
+            "paths": [],
+            "events": [],
+            "canvases": [
+                source_layer,
+                overlay_layer,
+                visible_layer,
+            ],
+        }
+
+        mapping = map_next_goal_snapshot(snapshot, 3)
+        assert mapping is not None
+
+        lock_state = _detect_multilayer_lock_state(
+            snapshot,
+            source_canvas_id=mapping.source_canvas_id,
+            team1_region=mapping.team1_region,
+            team2_region=mapping.team2_region,
+            team1_click_region=mapping.team1_click_region,
+            team2_click_region=mapping.team2_click_region,
+        )
+
+        self.assertEqual(lock_state["locked_sides"], (2,))
+        self.assertEqual(
+            lock_state["markers"]["2"]["reason"],
+            "canvas-image-icon",
+        )
+        self.assertEqual(
+            lock_state["markers"]["2"]["detected_canvas_id"],
+            3,
+        )
 
     def test_reads_internal_canvas_and_projects_to_visible_canvas(self):
         source = self.snapshot()

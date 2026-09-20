@@ -1174,6 +1174,67 @@ def _project_region_to_visible_canvas(
     }
 
 
+def _project_visible_region_to_layer(
+    region: dict[str, float],
+    *,
+    target_layer: dict[str, Any],
+    snapshot: dict[str, Any],
+) -> dict[str, float] | None:
+    target_id = target_layer.get("id")
+    selected_id = snapshot.get("selected_canvas_id")
+    if target_id is None:
+        return None
+    if selected_id is not None and int(target_id) == int(selected_id):
+        return dict(region)
+
+    visible_images = snapshot.get("images") or []
+    projections = [
+        image
+        for image in visible_images
+        if image.get("source_canvas_id") is not None
+        and int(image.get("source_canvas_id")) == int(target_id)
+    ]
+    if not projections:
+        return None
+
+    image = max(projections, key=lambda item: int(item.get("seq") or 0))
+    source_width = float(
+        image.get("source_width")
+        or target_layer.get("width")
+        or 0.0
+    )
+    source_height = float(
+        image.get("source_height")
+        or target_layer.get("height")
+        or 0.0
+    )
+    dest_width = float(image.get("width") or 0.0)
+    dest_height = float(image.get("height") or 0.0)
+    if (
+        source_width <= 0
+        or source_height <= 0
+        or dest_width <= 0
+        or dest_height <= 0
+    ):
+        return None
+
+    source_x = float(image.get("source_x") or 0.0)
+    source_y = float(image.get("source_y") or 0.0)
+    dest_x = float(image.get("x") or 0.0)
+    dest_y = float(image.get("y") or 0.0)
+    scale_x = dest_width / source_width
+    scale_y = dest_height / source_height
+    if scale_x <= 0 or scale_y <= 0:
+        return None
+
+    return {
+        "x": source_x + (float(region["x"]) - dest_x) / scale_x,
+        "y": source_y + (float(region["y"]) - dest_y) / scale_y,
+        "width": float(region["width"]) / scale_x,
+        "height": float(region["height"]) / scale_y,
+    }
+
+
 def map_next_goal_snapshot(
     snapshot: dict[str, Any],
     expected_goal_number: int,
@@ -1464,31 +1525,66 @@ def _marker_payload(item: dict[str, Any], reason: str) -> dict[str, Any]:
     }
 
 
-def _odds_event_sequences(
+def _odds_events_in_region(
     snapshot: dict[str, Any],
     region: dict[str, float],
-) -> list[int]:
-    sequences: set[int] = set()
+) -> list[dict[str, Any]]:
+    """Return odds draw events for this button in the active Canvas generation."""
+    by_seq: dict[int, dict[str, Any]] = {}
     generation = snapshot.get("generation")
+
     items = list(snapshot.get("texts") or [])
     items.extend(
         item
         for item in (snapshot.get("events") or [])
         if str(item.get("event_type") or "") == "text"
-        and (
-            generation is None
-            or int(item.get("generation") or 0) == int(generation)
-        )
     )
+
     for item in items:
+        item_generation = item.get("generation")
+        if (
+            generation is not None
+            and item_generation is not None
+            and int(item_generation) != int(generation)
+        ):
+            continue
+
         if not _rect_intersects_marker(region, item):
             continue
+
         if _parse_odds(str(item.get("text") or "")) is None:
             continue
+
         seq = int(item.get("seq") or 0)
         if seq > 0:
-            sequences.add(seq)
-    return sorted(sequences)
+            by_seq[seq] = item
+
+    return [by_seq[seq] for seq in sorted(by_seq)]
+
+
+def _same_render_burst(
+    marker: dict[str, Any],
+    odds_item: dict[str, Any] | None,
+) -> bool:
+    if odds_item is None:
+        return False
+    marker_seq = int(marker.get("seq") or 0)
+    odds_seq = int(odds_item.get("seq") or 0)
+    if marker_seq <= 0 or odds_seq <= 0 or abs(odds_seq - marker_seq) > 128:
+        return False
+    marker_generation = marker.get("generation")
+    odds_generation = odds_item.get("generation")
+    if (
+        marker_generation is not None
+        and odds_generation is not None
+        and int(marker_generation) != int(odds_generation)
+    ):
+        return False
+    marker_ts = marker.get("timestamp_ms")
+    odds_ts = odds_item.get("timestamp_ms")
+    if marker_ts is None or odds_ts is None:
+        return abs(odds_seq - marker_seq) <= 24
+    return abs(float(odds_ts) - float(marker_ts)) <= 350.0
 
 
 def detect_lock_state(
@@ -1517,8 +1613,14 @@ def detect_lock_state(
     hook_installed_at = snapshot.get("hook_installed_at")
 
     for side, region in ((1, team1_region), (2, team2_region)):
-        odds_sequences = _odds_event_sequences(snapshot, region)
-        latest_odds_seq = odds_sequences[-1] if odds_sequences else 0
+        odds_events = _odds_events_in_region(snapshot, region)
+        odds_sequences = [int(item.get("seq") or 0) for item in odds_events]
+        latest_odds_item = odds_events[-1] if odds_events else None
+        latest_odds_seq = (
+            int(latest_odds_item.get("seq") or 0)
+            if latest_odds_item is not None
+            else 0
+        )
 
         current_candidates: list[dict[str, Any]] = []
         for item in current_items:
@@ -1527,8 +1629,13 @@ def detect_lock_state(
             reason = _lock_reason_for_marker(region, item)
             if reason is None:
                 continue
-            if int(item.get("seq") or 0) < latest_odds_seq:
-                continue
+            marker_seq = int(item.get("seq") or 0)
+            if marker_seq < latest_odds_seq:
+                if (
+                    reason == "canvas-vector-icon"
+                    or not _same_render_burst(item, latest_odds_item)
+                ):
+                    continue
             payload = _marker_payload(item, reason)
             payload["hook_installed_at"] = hook_installed_at
             current_candidates.append(payload)
@@ -1578,6 +1685,195 @@ def detect_lock_state(
         "recent_locked_sides": recent_locked_sides,
         "markers": current_result,
         "recent_markers": recent_result,
+    }
+
+
+def _scale_region_between_layers(
+    region: dict[str, float],
+    *,
+    source_layer: dict[str, Any],
+    target_layer: dict[str, Any],
+) -> dict[str, float] | None:
+    source_width = float(source_layer.get("width") or 0.0)
+    source_height = float(source_layer.get("height") or 0.0)
+    target_width = float(target_layer.get("width") or 0.0)
+    target_height = float(target_layer.get("height") or 0.0)
+    if (
+        source_width <= 0
+        or source_height <= 0
+        or target_width <= 0
+        or target_height <= 0
+    ):
+        return None
+    return {
+        "x": float(region["x"]) * target_width / source_width,
+        "y": float(region["y"]) * target_height / source_height,
+        "width": float(region["width"]) * target_width / source_width,
+        "height": float(region["height"]) * target_height / source_height,
+    }
+
+
+def _detect_multilayer_lock_state(
+    snapshot: dict[str, Any],
+    *,
+    source_canvas_id: int | None,
+    team1_region: dict[str, float],
+    team2_region: dict[str, float],
+    team1_click_region: dict[str, float],
+    team2_click_region: dict[str, float],
+) -> dict[str, Any]:
+    layers = list(snapshot.get("canvases") or [])
+    if not layers:
+        return detect_lock_state(
+            snapshot,
+            team1_region=team1_region,
+            team2_region=team2_region,
+        )
+
+    source_layer = _canvas_layer_by_id(snapshot, source_canvas_id)
+    selected_id = snapshot.get("selected_canvas_id")
+    current_markers: dict[str, Any] = {}
+    recent_markers: dict[str, Any] = {}
+    checked_layers: list[int] = []
+
+    for layer in layers:
+        layer_id = layer.get("id")
+        if layer_id is not None:
+            checked_layers.append(int(layer_id))
+
+        if (
+            source_canvas_id is not None
+            and layer_id is not None
+            and int(layer_id) == int(source_canvas_id)
+        ):
+            region1 = dict(team1_region)
+            region2 = dict(team2_region)
+        elif (
+            selected_id is not None
+            and layer_id is not None
+            and int(layer_id) == int(selected_id)
+        ):
+            region1 = dict(team1_click_region)
+            region2 = dict(team2_click_region)
+        else:
+            region1 = _project_visible_region_to_layer(
+                team1_click_region,
+                target_layer=layer,
+                snapshot=snapshot,
+            )
+            region2 = _project_visible_region_to_layer(
+                team2_click_region,
+                target_layer=layer,
+                snapshot=snapshot,
+            )
+            if (region1 is None or region2 is None) and source_layer is not None:
+                region1 = _scale_region_between_layers(
+                    team1_region,
+                    source_layer=source_layer,
+                    target_layer=layer,
+                )
+                region2 = _scale_region_between_layers(
+                    team2_region,
+                    source_layer=source_layer,
+                    target_layer=layer,
+                )
+
+        if region1 is None or region2 is None:
+            continue
+
+        layer_snapshot = {
+            **layer,
+            "snapshot_at_ms": (
+                layer.get("snapshot_at_ms")
+                or snapshot.get("snapshot_at_ms")
+            ),
+        }
+        state = detect_lock_state(
+            layer_snapshot,
+            team1_region=region1,
+            team2_region=region2,
+        )
+
+        for side, marker in (state.get("markers") or {}).items():
+            candidate = {
+                **marker,
+                "detected_canvas_id": layer_id,
+            }
+            previous = current_markers.get(str(side))
+            if previous is None or int(candidate.get("seq") or 0) > int(
+                previous.get("seq") or 0
+            ):
+                current_markers[str(side)] = candidate
+
+        for side, marker in (state.get("recent_markers") or {}).items():
+            candidate = {
+                **marker,
+                "detected_canvas_id": layer_id,
+            }
+            previous = recent_markers.get(str(side))
+            if previous is None or int(candidate.get("seq") or 0) > int(
+                previous.get("seq") or 0
+            ):
+                recent_markers[str(side)] = candidate
+
+    locked_sides = tuple(sorted(int(side) for side in current_markers))
+    recent_locked_sides = tuple(
+        sorted(
+            int(side)
+            for side in recent_markers
+            if int(side) not in locked_sides
+        )
+    )
+    return {
+        "locked_sides": locked_sides,
+        "recent_locked_sides": recent_locked_sides,
+        "markers": current_markers,
+        "recent_markers": recent_markers,
+        "checked_canvas_ids": tuple(sorted(set(checked_layers))),
+    }
+
+
+async def read_next_goal_lock_state(
+    page: Page,
+    next_goal_number: int,
+) -> dict[str, Any]:
+    """Read only Canvas 2D lock state using the last mapped Next Goal buttons."""
+    cached = _LAST_MARKETS.get(id(page))
+    if (
+        cached is None
+        or cached.url != page.url
+        or int(cached.next_goal_number) != int(next_goal_number)
+    ):
+        return {
+            "available": False,
+            "locked_sides": (),
+            "recent_locked_sides": (),
+            "markers": {},
+            "recent_markers": {},
+            "reason": "NO_CACHED_MARKET_MAPPING",
+        }
+
+    snapshot = await capture_canvas_2d_snapshot(page)
+    lock_state = _detect_multilayer_lock_state(
+        snapshot,
+        source_canvas_id=cached.source_canvas_id,
+        team1_region=cached.team1_region,
+        team2_region=cached.team2_region,
+        team1_click_region=cached.team1_click_region,
+        team2_click_region=cached.team2_click_region,
+    )
+    recent_locked_sides, recent_lock_markers = _consume_recent_lock_sides(
+        page,
+        lock_state,
+    )
+    return {
+        "available": True,
+        "locked_sides": lock_state["locked_sides"],
+        "recent_locked_sides": recent_locked_sides,
+        "markers": lock_state["markers"],
+        "recent_markers": recent_lock_markers,
+        "checked_canvas_ids": lock_state.get("checked_canvas_ids") or (),
+        "reason": None,
     }
 
 
@@ -1862,10 +2158,13 @@ async def read_next_goal_odds(
     if mapping is None:
         if _cached_market_is_usable(page, cached, next_goal_number, snapshot):
             assert cached is not None
-            lock_state = detect_lock_state(
-                _mapping_source_layer(snapshot, cached.source_canvas_id),
+            lock_state = _detect_multilayer_lock_state(
+                snapshot,
+                source_canvas_id=cached.source_canvas_id,
                 team1_region=cached.team1_region,
                 team2_region=cached.team2_region,
+                team1_click_region=cached.team1_click_region,
+                team2_click_region=cached.team2_click_region,
             )
             recent_locked_sides, recent_lock_markers = _consume_recent_lock_sides(
                 page,
@@ -1922,11 +2221,13 @@ async def read_next_goal_odds(
             },
         )
 
-    source_layer = _mapping_source_layer(snapshot, mapping.source_canvas_id)
-    lock_state = detect_lock_state(
-        source_layer,
+    lock_state = _detect_multilayer_lock_state(
+        snapshot,
+        source_canvas_id=mapping.source_canvas_id,
         team1_region=mapping.team1_region,
         team2_region=mapping.team2_region,
+        team1_click_region=mapping.team1_click_region,
+        team2_click_region=mapping.team2_click_region,
     )
     recent_locked_sides, recent_lock_markers = _consume_recent_lock_sides(
         page,
@@ -1955,6 +2256,7 @@ async def read_next_goal_odds(
             f"goal={next_goal_number}; odds={mapping.team1_odds}/{mapping.team2_odds}; "
             f"locked_sides={list(lock_state['locked_sides'])}; "
             f"recent_locked_sides={list(recent_locked_sides)}; "
+            f"checked_canvas_ids={list(lock_state.get('checked_canvas_ids') or ())}; "
             f"source_canvas_id={mapping.source_canvas_id}; "
             f"source_class={mapping.source_canvas.get('class_name')}; "
             f"team1_source_button={mapping.team1_region}; "

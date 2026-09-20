@@ -109,6 +109,83 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
             selected_team_scored_between(Score(2, 0), Score(4, 0), Scorer.TEAM_2)
         )
 
+    async def test_prebet_canvas_gate_blocks_selected_side_before_virtual_bet(self):
+        window = self.window()
+        odds = NextGoalOdds(
+            1.8,
+            2.1,
+            next_goal_number=3,
+            source="CANVAS_2D",
+        )
+        lock_state = {
+            "available": True,
+            "locked_sides": (2,),
+            "recent_locked_sides": (),
+            "markers": {
+                "2": {
+                    "reason": "canvas-image-icon",
+                    "detected_canvas_id": 3,
+                }
+            },
+            "recent_markers": {},
+            "checked_canvas_ids": (1, 2, 3),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            repository = DemoRepository(Path(directory))
+            with (
+                patch("backend.app.demo.engine.REPOSITORY", repository),
+                patch(
+                    "backend.app.demo.engine.read_next_goal_lock_state",
+                    AsyncMock(return_value=lock_state),
+                ),
+            ):
+                engine = DemoEngine(FakeManager())
+                engine._mode = "DEMO"
+                blocked = await engine._demo_prebet_canvas_is_blocked(
+                    object(),
+                    odds,
+                    window,
+                )
+                logs = await repository.logs()
+
+        self.assertTrue(blocked)
+        self.assertTrue(window.blocked_window_active)
+        self.assertIn(
+            "DEMO_PREBET_CANVAS_LOCKED",
+            [item["event"] for item in logs],
+        )
+
+    async def test_prebet_canvas_gate_allows_unlocked_selected_side(self):
+        window = self.window()
+        odds = NextGoalOdds(
+            1.8,
+            2.1,
+            next_goal_number=3,
+            source="CANVAS_2D",
+        )
+        lock_state = {
+            "available": True,
+            "locked_sides": (),
+            "recent_locked_sides": (),
+            "markers": {},
+            "recent_markers": {},
+            "checked_canvas_ids": (1, 2, 3),
+        }
+        with patch(
+            "backend.app.demo.engine.read_next_goal_lock_state",
+            AsyncMock(return_value=lock_state),
+        ):
+            engine = DemoEngine(FakeManager())
+            engine._mode = "DEMO"
+            blocked = await engine._demo_prebet_canvas_is_blocked(
+                object(),
+                odds,
+                window,
+            )
+
+        self.assertFalse(blocked)
+        self.assertFalse(window.blocked_window_active)
+
     async def run_market_wait(self, snapshots, odds_side_effect):
         QueueMatchBrowser.snapshots = list(snapshots)
         window = self.window()
