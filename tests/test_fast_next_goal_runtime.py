@@ -11,6 +11,7 @@ from backend.app.demo.fast_next_goal_runtime import (
     _selected_side_is_locked,
     _selected_side_was_recently_locked,
     _side_number,
+    _transition_protection_requires_fresh_score,
 )
 from backend.app.demo.engine import selected_team_scored_between
 from backend.app.demo.models import NextGoalOdds, Score, Scorer
@@ -39,6 +40,17 @@ class FastNextGoalRuntimeTests(unittest.TestCase):
 
         self.assertIsNone(_consume_fast_snapshot(engine, changed))
         self.assertEqual(engine._fast_demo_odds_snapshot_uses, 0)
+
+    def test_transition_protection_bypasses_cached_prebet_snapshot(self):
+        protection = SimpleNamespace(
+            started_after_settlement=True,
+            protection_active=True,
+        )
+        engine = SimpleNamespace(_active_demo_protection=protection)
+
+        self.assertTrue(_transition_protection_requires_fresh_score(engine))
+        protection.protection_active = False
+        self.assertFalse(_transition_protection_requires_fresh_score(engine))
 
     def test_only_selected_side_lock_blocks_virtual_bet(self):
         odds = NextGoalOdds(

@@ -48,6 +48,15 @@ def _consume_fast_snapshot(engine: Any, previous: Any) -> Any | None:
     return cached
 
 
+def _transition_protection_requires_fresh_score(engine: Any) -> bool:
+    window = getattr(engine, "_active_demo_protection", None)
+    return bool(
+        window is not None
+        and window.started_after_settlement
+        and window.protection_active
+    )
+
+
 def _side_number(side: Any) -> int | None:
     value = getattr(side, "value", side)
     value = str(value or "").upper()
@@ -518,7 +527,9 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
         selected_match: dict[str, Any],
         previous,
     ):
-        if self._mode == "DEMO":
+        if self._mode == "DEMO" and not _transition_protection_requires_fresh_score(
+            self
+        ):
             cached = _consume_fast_snapshot(self, previous)
             if cached is not None:
                 await self._publish_snapshot(
