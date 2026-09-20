@@ -1,11 +1,15 @@
 import unittest
+from unittest.mock import patch
 
 from backend.app.browser.canvas_2d_adapter import (
+    _CachedMarket,
+    _LAST_MARKETS,
     _detect_multilayer_lock_state,
     _LAST_REPORTED_LOCK_SEQ,
     _consume_recent_lock_sides,
     detect_lock_state,
     map_next_goal_snapshot,
+    read_next_goal_lock_state,
 )
 
 
@@ -514,6 +518,65 @@ class Canvas2DAdapterTests(unittest.TestCase):
             mapping.team2_click_region,
             {"x": 277.5, "y": 44.0, "width": 65.0, "height": 22.0},
         )
+
+
+class Canvas2DAdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_read_lock_state_passes_goal_as_market_context(self):
+        page = type("Page", (), {"url": "https://example.test/match-1"})()
+        region = {"x": 10.0, "y": 20.0, "width": 30.0, "height": 40.0}
+        _LAST_MARKETS[id(page)] = _CachedMarket(
+            url=page.url,
+            next_goal_number=2,
+            team1_odds=1.90,
+            team2_odds=1.95,
+            team1_region=region,
+            team2_region=region,
+            team1_click_region=region,
+            team2_click_region=region,
+            source_canvas_id=1,
+            canvas={"width": 1000, "height": 500},
+        )
+        seen = {}
+        lock_state = {
+            "locked_sides": (),
+            "recent_locked_sides": (),
+            "markers": {},
+            "recent_markers": {},
+            "checked_canvas_ids": (1, 2, 3),
+        }
+
+        async def fake_snapshot(_page):
+            return {"status": "READY"}
+
+        def fake_detect(*_args, **_kwargs):
+            return lock_state
+
+        def fake_consume(_page, _state, *, market_context):
+            seen["market_context"] = market_context
+            return (), {}
+
+        try:
+            with (
+                patch(
+                    "backend.app.browser.canvas_2d_adapter.capture_canvas_2d_snapshot",
+                    side_effect=fake_snapshot,
+                ),
+                patch(
+                    "backend.app.browser.canvas_2d_adapter._detect_multilayer_lock_state",
+                    side_effect=fake_detect,
+                ),
+                patch(
+                    "backend.app.browser.canvas_2d_adapter._consume_recent_lock_sides",
+                    side_effect=fake_consume,
+                ),
+            ):
+                state = await read_next_goal_lock_state(page, 2)
+        finally:
+            _LAST_MARKETS.pop(id(page), None)
+
+        self.assertEqual(seen["market_context"], 2)
+        self.assertTrue(state["available"])
+        self.assertEqual(state["checked_canvas_ids"], (1, 2, 3))
 
 
 if __name__ == "__main__":
