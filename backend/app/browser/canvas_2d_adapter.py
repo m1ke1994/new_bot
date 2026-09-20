@@ -1865,6 +1865,7 @@ async def read_next_goal_lock_state(
     recent_locked_sides, recent_lock_markers = _consume_recent_lock_sides(
         page,
         lock_state,
+        market_context=int(next_goal_number),
     )
     return {
         "available": True,
