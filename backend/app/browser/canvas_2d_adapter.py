@@ -1814,6 +1814,29 @@ def _detect_multilayer_lock_state(
         if source_layer is not None
         else dict(team2_region)
     )
+
+    # Outcome cells are adjacent. The label-side padding can make their search
+    # regions overlap by a few pixels; split that overlap so one lock marker
+    # can never be attributed to both teams.
+    region1_right = (
+        float(source_lock_region1["x"]) + float(source_lock_region1["width"])
+    )
+    region2_left = float(source_lock_region2["x"])
+    if region1_right > region2_left:
+        boundary = (region1_right + region2_left) / 2.0
+        region2_right = (
+            float(source_lock_region2["x"]) + float(source_lock_region2["width"])
+        )
+        source_lock_region1 = {
+            **source_lock_region1,
+            "width": max(1.0, boundary - float(source_lock_region1["x"])),
+        }
+        source_lock_region2 = {
+            **source_lock_region2,
+            "x": boundary,
+            "width": max(1.0, region2_right - boundary),
+        }
+
     visible_lock_region1 = (
         _project_region_to_visible_canvas(
             source_lock_region1,
