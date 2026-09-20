@@ -354,7 +354,7 @@ class Canvas2DAdapterTests(unittest.TestCase):
             "generation": 0,
             "kind": "drawImage",
             "event_type": "image",
-            "x": 318,
+            "x": 330,
             "y": 96,
             "width": 12,
             "height": 14,
