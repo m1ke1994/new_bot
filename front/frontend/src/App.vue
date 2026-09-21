@@ -726,7 +726,7 @@ function bookmakerLogLabel(item) {
   if (event === 'MATCH_CONSECUTIVE_LOSSES') return 'ПРОИГРЫШИ В МАТЧЕ'
   if (event === 'MAX_3_STEPS_LIMIT_REACHED') return 'MAX 3: ЛИМИТ ДОСТИГНУТ'
   if (event === 'MAX_3_STEPS_SWITCHING_MATCH') return 'MAX 3: СМЕНА МАТЧА'
-  if (event === 'MAX_3_STEPS_CONTINUING') return 'MAX 3: ПРОДОЛЖАЕМ ДОГОН'
+  if (event === 'MAX_3_STEPS_CONTINUING_TO_END') return 'MAX 3: ВТОРОЙ МАТЧ ДО КОНЦА'
   return event
 }
 
@@ -1088,7 +1088,7 @@ onBeforeUnmount(() => {
 
               <input v-model="strategyConfig.max_three_steps_enabled" type="checkbox" :disabled="state.running || actionPending" @change="saveMatchFilters">
 
-              <span class="filter-copy"><strong>max 3 шага</strong><small>После 3 проигрышей подряд закрыть матч и продолжить догон на следующем матче со следующего шага</small></span>
+              <span class="filter-copy"><strong>max 3 шага</strong><small>Только в первом матче: после 3 проигрышей перейти на второй матч; во втором идти догоном до WIN или конца ряда</small></span>
 
               <span class="filter-state">{{ strategyConfig.max_three_steps_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
 
