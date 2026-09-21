@@ -73,6 +73,7 @@ class MaxThreeStepsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved["status"], "WAITING_FOR_MATCH")
         self.assertIsNone(saved["current_match_id"])
         self.assertIsNone(saved["selected_team"])
+        self.assertEqual(saved["max_three_switched"], 1)
         self.assertIn("A", saved["blocked_match_ids"])
         events = [item["event"] for item in logs]
         self.assertIn("MAX_3_STEPS_LIMIT_REACHED", events)
@@ -82,6 +83,74 @@ class MaxThreeStepsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state_payload["bet"]["step"], 4)
         self.assertEqual(state_payload["bet"]["amount"], 283)
         self.assertEqual(state_payload["bet"]["status"], "WAITING_NEXT_MATCH")
+
+    async def test_second_max_three_switch_is_disabled_until_sequence_reset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = DemoRepository(Path(directory))
+            cycle_id = (await repository.get_sequence())["sequence_id"]
+            await repository.save_sequence(
+                current_step=3,
+                status="ACTIVE",
+                current_match_id="A",
+                selected_team="Team A",
+            )
+
+            with (
+                patch("backend.app.demo.engine.REPOSITORY", repository),
+                patch(
+                    "backend.app.demo.engine.STATE.update",
+                    AsyncMock(),
+                ),
+            ):
+                engine = DemoEngine(FakeManager())
+                engine._config = StrategyConfig.from_payload(
+                    {
+                        "initial_stake": 27,
+                        "progression_multiplier": 2,
+                        "max_steps": 8,
+                        "stakes": [27, 59, 129, 283, 622, 1368, 3000, 6600],
+                        "max_three_steps_enabled": True,
+                    }
+                )
+
+                await engine._switch_match_after_three_losses(
+                    selected_match={
+                        "match_id": "A",
+                        "team1": "Team A",
+                        "team2": "Team B",
+                    },
+                    match_name="Team A — Team B",
+                    cycle_id=cycle_id,
+                    step=3,
+                    losses_in_current_match=3,
+                )
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "MAX_3_STEPS_SWITCH_ALREADY_USED",
+                ):
+                    await engine._switch_match_after_three_losses(
+                        selected_match={
+                            "match_id": "B",
+                            "team1": "Team C",
+                            "team2": "Team D",
+                        },
+                        match_name="Team C — Team D",
+                        cycle_id=cycle_id,
+                        step=6,
+                        losses_in_current_match=3,
+                    )
+
+                after_first_switch = await repository.get_sequence()
+                self.assertEqual(after_first_switch["current_step"], 4)
+                self.assertEqual(after_first_switch["max_three_switched"], 1)
+                self.assertNotIn("B", after_first_switch["blocked_match_ids"])
+
+                reset = await repository.reset_sequence()
+
+        self.assertEqual(reset["current_step"], 1)
+        self.assertEqual(reset["max_three_switched"], 0)
+        self.assertEqual(reset["blocked_match_ids"], [])
 
 
 if __name__ == "__main__":
