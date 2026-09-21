@@ -37,6 +37,7 @@ class StrategyConfig:
     exclude_teams_enabled: bool
     min_initial_odds_enabled: bool
     blocked_events_switch_enabled: bool
+    max_three_steps_enabled: bool
     strategy_type: StrategyType
 
     @classmethod
@@ -55,6 +56,9 @@ class StrategyConfig:
         blocked_events_switch_enabled = _boolean_setting(
             payload, "blocked_events_switch_enabled", default=False
         )
+        max_three_steps_enabled = _boolean_setting(
+            payload, "max_three_steps_enabled", default=False
+        )
         try:
             strategy_type = StrategyType(
                 str(payload.get("strategy_type", StrategyType.NEXT_GOAL.value)).strip().upper()
@@ -71,6 +75,7 @@ class StrategyConfig:
             exclude_teams_enabled,
             min_initial_odds_enabled,
             blocked_events_switch_enabled,
+            max_three_steps_enabled,
             strategy_type,
         )
         config.validate()
@@ -96,6 +101,7 @@ class StrategyConfig:
             "exclude_teams_enabled": self.exclude_teams_enabled,
             "min_initial_odds_enabled": self.min_initial_odds_enabled,
             "blocked_events_switch_enabled": self.blocked_events_switch_enabled,
+            "max_three_steps_enabled": self.max_three_steps_enabled,
             "strategy_type": self.strategy_type.value,
         }
 
