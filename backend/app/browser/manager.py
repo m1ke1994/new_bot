@@ -116,36 +116,22 @@ class BrowserManager:
             self.playwright = None
             raise
 
-        # Install the Canvas 2D instrumentation before any bookmaker navigation.
-        # The active page may already exist (persistent context), so we also inject
-        # the hook into its current document. Future documents/frames receive it
-        # automatically through BrowserContext.add_init_script().
-        from backend.app.browser.canvas_2d_adapter import CANVAS_2D_HOOK_SCRIPT
-
-        await context.add_init_script(CANVAS_2D_HOOK_SCRIPT)
-
+        # Do not instrument Canvas/Path2D during the bookmaker application's
+        # initial boot. Hook v4 is intentionally installed lazily by the market
+        # reader only after the match page has rendered. Replacing/intercepting
+        # Path2D during Vue/application startup can delay or break skeleton
+        # hydration on some bookmaker builds.
         self.context = context
         self.generation += 1
         self._context_closed = False
         context.on("close", lambda *_: self._mark_context_closed())
         self.page = context.pages[0] if context.pages else await context.new_page()
 
-        for existing_page in context.pages:
-            if existing_page.is_closed():
-                continue
-            try:
-                await existing_page.evaluate(CANVAS_2D_HOOK_SCRIPT)
-            except Exception:
-                # Cross-navigation / browser-internal pages can reject evaluate.
-                # The init script is still registered for the next real document.
-                pass
-
         await self._log(
-            "CANVAS_2D_HOOK_INSTALLED_EARLY",
+            "CANVAS_2D_HOOK_DEFERRED",
             (
-                "Canvas 2D hook v4 registered on BrowserContext before site navigation; "
-                "tracking fillText/drawImage/Path2D/fill(path)/stroke(path)/"
-                "translucent overlays across Canvas layers."
+                "Canvas 2D hook v4 deferred until market reading; "
+                "bookmaker page boot remains untouched."
             ),
         )
         await self._log(
