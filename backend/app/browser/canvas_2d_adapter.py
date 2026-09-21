@@ -1796,6 +1796,62 @@ def _small_icon_in_region(
     )
 
 
+def _style_alpha(value: Any) -> float:
+    text = str(value or "").strip().casefold()
+    if not text:
+        return 1.0
+    if text == "transparent":
+        return 0.0
+
+    if text.startswith("#"):
+        raw = text[1:]
+        try:
+            if len(raw) == 4:
+                return int(raw[3] * 2, 16) / 255.0
+            if len(raw) == 8:
+                return int(raw[6:8], 16) / 255.0
+        except ValueError:
+            return 1.0
+
+    match = re.fullmatch(r"(?:rgba|hsla)\((.*)\)", text)
+    if match is not None:
+        body = match.group(1).strip()
+        if "/" in body:
+            alpha_text = body.rsplit("/", 1)[1].strip()
+        else:
+            parts = [part.strip() for part in body.split(",")]
+            alpha_text = parts[3] if len(parts) >= 4 else ""
+        if alpha_text:
+            try:
+                if alpha_text.endswith("%"):
+                    return max(0.0, min(1.0, float(alpha_text[:-1]) / 100.0))
+                return max(0.0, min(1.0, float(alpha_text)))
+            except ValueError:
+                pass
+
+    match = re.fullmatch(r"(?:rgb|hsl)\((.*)\)", text)
+    if match is not None and "/" in match.group(1):
+        alpha_text = match.group(1).rsplit("/", 1)[1].strip()
+        try:
+            if alpha_text.endswith("%"):
+                return max(0.0, min(1.0, float(alpha_text[:-1]) / 100.0))
+            return max(0.0, min(1.0, float(alpha_text)))
+        except ValueError:
+            pass
+
+    return 1.0
+
+
+def _effective_alpha(item: dict[str, Any], style_key: str) -> float:
+    global_alpha = float(
+        item.get("alpha") if item.get("alpha") is not None else 1.0
+    )
+    return max(
+        0.0,
+        min(1.0, global_alpha * _style_alpha(item.get(style_key))),
+    )
+
+
 def _lock_reason_for_marker(
     region: dict[str, float],
     item: dict[str, Any],
@@ -1816,17 +1872,26 @@ def _lock_reason_for_marker(
 
     if event_type == "path" or kind in {"fill", "stroke"}:
         if (
-            int(item.get("path_op_count") or 0) >= 3
+            int(item.get("path_op_count") or 0) >= 2
             and _small_icon_in_region(region, item)
         ):
-            return "canvas-vector-icon"
+            return (
+                "canvas-path2d-icon"
+                if str(item.get("path_source") or "") == "Path2D"
+                else "canvas-vector-icon"
+            )
+        if (
+            kind == "fill"
+            and 0.05 <= _effective_alpha(item, "fill_style") < 0.98
+            and _overlap_ratio(region, item) >= 0.70
+        ):
+            return "canvas-dim-overlay"
         return None
 
     if event_type == "rect" or kind in {"fillRect", "strokeRect", "rect", "roundRect"}:
-        alpha = float(item.get("alpha") if item.get("alpha") is not None else 1.0)
         if (
             kind == "fillRect"
-            and 0.05 <= alpha < 0.98
+            and 0.05 <= _effective_alpha(item, "fill_style") < 0.98
             and _overlap_ratio(region, item) >= 0.70
         ):
             return "canvas-dim-overlay"
@@ -1852,6 +1917,8 @@ def _marker_payload(item: dict[str, Any], reason: str) -> dict[str, Any]:
         "fill_style": item.get("fill_style"),
         "stroke_style": item.get("stroke_style"),
         "path_op_count": item.get("path_op_count"),
+        "path_source": item.get("path_source"),
+        "effective_fill_alpha": _effective_alpha(item, "fill_style"),
     }
 
 
@@ -2417,6 +2484,8 @@ def _diagnostic_message(snapshot: dict[str, Any]) -> str:
             )
         elif method in {
             "drawImage",
+            "fillPath2D",
+            "strokePath2D",
             "putImageData",
             "transferControlToOffscreen",
             "getContext",
@@ -2433,6 +2502,7 @@ def _diagnostic_message(snapshot: dict[str, Any]) -> str:
         f"offscreen_2d_available={diagnostics.get('offscreen_2d_available')}; "
         f"transfer_offscreen={diagnostics.get('transfer_control_to_offscreen', 0)}; "
         f"createImageBitmap={diagnostics.get('create_image_bitmap', 0)}; "
+        f"path2d_hooked={diagnostics.get('path2d_hooked', False)}; "
         f"canvases_seen={diagnostics.get('canvases_seen', 0)}; "
         f"texts={len(snapshot.get('texts') or [])}; "
         f"rects={len(snapshot.get('rects') or [])}; "
