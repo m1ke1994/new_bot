@@ -1140,6 +1140,20 @@ class _CachedMarket:
 _LAST_MARKETS: dict[int, _CachedMarket] = {}
 _LAST_DIAGNOSTIC_SIGNATURES: dict[int, str] = {}
 _LAST_REPORTED_LOCK_SEQ: dict[tuple[int, str, int, int, int, int, int], int] = {}
+_LATCHED_LOCKS: dict[tuple[int, str, int, int, int], dict[str, Any]] = {}
+_LAST_LOCK_STATE_BY_MARKET: dict[tuple[int, str, int, int], tuple[int, ...]] = {}
+
+PERSISTENT_LOCK_REASONS = frozenset(
+    {
+        "lock-symbol",
+        "lock-text",
+        "private-icon-glyph",
+        "lock-image",
+        "canvas-image-icon",
+        "canvas-vector-icon",
+        "canvas-path2d-icon",
+    }
+)
 
 
 async def _log(logger: Logger | None, event: str, message: str) -> None:
@@ -1922,6 +1936,257 @@ def _marker_payload(item: dict[str, Any], reason: str) -> dict[str, Any]:
     }
 
 
+def _rect_coverage_ratio(
+    target: dict[str, Any],
+    cover: dict[str, Any],
+) -> float:
+    tx = float(target.get("x") or 0.0)
+    ty = float(target.get("y") or 0.0)
+    tw = max(0.0, float(target.get("width") or 0.0))
+    th = max(0.0, float(target.get("height") or 0.0))
+    cx = float(cover.get("x") or 0.0)
+    cy = float(cover.get("y") or 0.0)
+    cw = max(0.0, float(cover.get("width") or 0.0))
+    ch = max(0.0, float(cover.get("height") or 0.0))
+    if tw <= 0 or th <= 0 or cw <= 0 or ch <= 0:
+        return 0.0
+    left = max(tx, cx)
+    top = max(ty, cy)
+    right = min(tx + tw, cx + cw)
+    bottom = min(ty + th, cy + ch)
+    if right <= left or bottom <= top:
+        return 0.0
+    return ((right - left) * (bottom - top)) / (tw * th)
+
+
+def _marker_cleared_after(
+    snapshot: dict[str, Any],
+    marker: dict[str, Any],
+) -> bool:
+    marker_seq = int(marker.get("seq") or 0)
+    marker_generation = marker.get("generation")
+    marker_canvas = marker.get("canvas_id")
+    if marker_seq <= 0:
+        return False
+    for event in snapshot.get("events") or []:
+        if str(event.get("event_type") or "") != "clear":
+            continue
+        if int(event.get("seq") or 0) <= marker_seq:
+            continue
+        event_generation = event.get("generation")
+        if (
+            marker_generation is not None
+            and event_generation is not None
+            and int(event_generation) != int(marker_generation)
+        ):
+            continue
+        event_canvas = event.get("canvas_id")
+        if (
+            marker_canvas is not None
+            and event_canvas is not None
+            and int(event_canvas) != int(marker_canvas)
+        ):
+            continue
+        if _rect_coverage_ratio(marker, event) >= 0.50:
+            return True
+    return False
+
+
+def _persistent_lock_key(
+    page: Page,
+    snapshot: dict[str, Any],
+    market_context: int,
+    side: int,
+) -> tuple[int, str, int, int, int]:
+    installed_at = int(
+        (snapshot.get("diagnostics") or {}).get("installed_at") or 0
+    )
+    return (
+        id(page),
+        str(getattr(page, "url", "") or ""),
+        installed_at,
+        int(market_context),
+        int(side),
+    )
+
+
+def _layer_for_lock_marker(
+    snapshot: dict[str, Any],
+    marker: dict[str, Any],
+) -> dict[str, Any] | None:
+    marker_canvas = marker.get("detected_canvas_id")
+    if marker_canvas is None:
+        marker_canvas = marker.get("canvas_id")
+    if marker_canvas is None:
+        return None
+    return _canvas_layer_by_id(snapshot, int(marker_canvas))
+
+
+def _latched_marker_still_visible(
+    snapshot: dict[str, Any],
+    marker: dict[str, Any],
+) -> bool:
+    layer = _layer_for_lock_marker(snapshot, marker)
+    if layer is None:
+        return False
+    marker_generation = marker.get("generation")
+    layer_generation = layer.get("generation")
+    if (
+        marker_generation is not None
+        and layer_generation is not None
+        and int(marker_generation) != int(layer_generation)
+    ):
+        return False
+    layer_snapshot = {
+        **layer,
+        "snapshot_at_ms": (
+            layer.get("snapshot_at_ms")
+            or snapshot.get("snapshot_at_ms")
+        ),
+    }
+    return not _marker_cleared_after(layer_snapshot, marker)
+
+
+def _apply_persistent_lock_latch(
+    page: Page,
+    snapshot: dict[str, Any],
+    lock_state: dict[str, Any],
+    *,
+    market_context: int,
+) -> dict[str, Any]:
+    current_markers = {
+        str(side): dict(marker)
+        for side, marker in (lock_state.get("markers") or {}).items()
+    }
+    recent_markers = {
+        str(side): dict(marker)
+        for side, marker in (lock_state.get("recent_markers") or {}).items()
+    }
+
+    detected_markers = {**recent_markers, **current_markers}
+    released_sides: list[int] = []
+
+    # Drop stale contexts for this page so a previous match/market can never
+    # leak a lock into the current Next Goal market.
+    page_id = id(page)
+    page_url = str(getattr(page, "url", "") or "")
+    installed_at = int(
+        (snapshot.get("diagnostics") or {}).get("installed_at") or 0
+    )
+    for key in list(_LATCHED_LOCKS):
+        if key[0] != page_id:
+            continue
+        if (
+            key[1] != page_url
+            or key[2] != installed_at
+            or key[3] != int(market_context)
+        ):
+            _LATCHED_LOCKS.pop(key, None)
+
+    for side_text, marker in detected_markers.items():
+        side = int(side_text)
+        if str(marker.get("reason") or "") not in PERSISTENT_LOCK_REASONS:
+            continue
+        key = _persistent_lock_key(page, snapshot, market_context, side)
+        marker = {
+            **marker,
+            "latched": True,
+            "persistent_until_clear": True,
+        }
+        _LATCHED_LOCKS[key] = marker
+        current_markers[str(side)] = marker
+
+    for side in (1, 2):
+        key = _persistent_lock_key(page, snapshot, market_context, side)
+        marker = _LATCHED_LOCKS.get(key)
+        if marker is None:
+            continue
+        if not _latched_marker_still_visible(snapshot, marker):
+            _LATCHED_LOCKS.pop(key, None)
+            current_markers.pop(str(side), None)
+            recent_markers.pop(str(side), None)
+            released_sides.append(side)
+            continue
+        current_markers[str(side)] = {
+            **marker,
+            "latched": True,
+            "persistent_until_clear": True,
+        }
+
+    locked_sides = tuple(sorted(int(side) for side in current_markers))
+    recent_locked_sides = tuple(
+        sorted(
+            int(side)
+            for side in recent_markers
+            if int(side) not in locked_sides
+        )
+    )
+    return {
+        **lock_state,
+        "locked_sides": locked_sides,
+        "recent_locked_sides": recent_locked_sides,
+        "markers": current_markers,
+        "recent_markers": recent_markers,
+        "released_sides": tuple(sorted(set(released_sides))),
+    }
+
+
+async def _log_lock_transition(
+    page: Page,
+    market_context: int,
+    lock_state: dict[str, Any],
+    logger: Logger | None,
+) -> None:
+    if logger is None:
+        return
+    installed_at = 0
+    for marker in (lock_state.get("markers") or {}).values():
+        installed_at = int(marker.get("hook_installed_at") or installed_at or 0)
+        if installed_at:
+            break
+    key = (
+        id(page),
+        str(getattr(page, "url", "") or ""),
+        installed_at,
+        int(market_context),
+    )
+    current = tuple(sorted(int(side) for side in lock_state.get("locked_sides") or ()))
+    previous = _LAST_LOCK_STATE_BY_MARKET.get(key, ())
+    if current == previous:
+        return
+
+    if current:
+        marker_parts: list[str] = []
+        for side in current:
+            marker = (lock_state.get("markers") or {}).get(str(side)) or {}
+            marker_parts.append(
+                f"side={side}:reason={marker.get('reason')}:"
+                f"canvas={marker.get('detected_canvas_id') or marker.get('canvas_id')}:"
+                f"seq={marker.get('seq')}:latched={bool(marker.get('latched'))}"
+            )
+        await _log(
+            logger,
+            "CANVAS_2D_LOCK_ACTIVE",
+            (
+                f"goal={market_context}; locked_sides={list(current)}; "
+                f"persistent_until_clear=true; "
+                f"checked_canvas_ids={list(lock_state.get('checked_canvas_ids') or ())}; "
+                f"markers=[{' | '.join(marker_parts)}]"
+            ),
+        )
+    elif previous:
+        await _log(
+            logger,
+            "CANVAS_2D_LOCK_RELEASED",
+            (
+                f"goal={market_context}; previous_locked_sides={list(previous)}; "
+                f"released_sides={list(lock_state.get('released_sides') or previous)}; "
+                "Canvas clear/generation change confirmed unlock"
+            ),
+        )
+    _LAST_LOCK_STATE_BY_MARKET[key] = current
+
+
 def _odds_events_in_region(
     snapshot: dict[str, Any],
     region: dict[str, float],
@@ -2027,12 +2292,15 @@ def detect_lock_state(
             if reason is None:
                 continue
             marker_seq = int(item.get("seq") or 0)
-            if marker_seq < latest_odds_seq:
-                if (
-                    reason == "canvas-vector-icon"
-                    or not _same_render_burst(item, latest_odds_item)
-                ):
+            persistent_lock = reason in PERSISTENT_LOCK_REASONS
+            if persistent_lock:
+                if _marker_cleared_after(snapshot, item):
                     continue
+            elif (
+                marker_seq < latest_odds_seq
+                and not _same_render_burst(item, latest_odds_item)
+            ):
+                continue
             payload = _marker_payload(item, reason)
             payload["hook_installed_at"] = hook_installed_at
             current_candidates.append(payload)
@@ -2051,12 +2319,9 @@ def detect_lock_state(
             if reason is None:
                 continue
             marker_seq = int(item.get("seq") or 0)
-            explicit_lock = reason in {
-                "lock-symbol",
-                "lock-text",
-                "private-icon-glyph",
-                "lock-image",
-            }
+            explicit_lock = reason in PERSISTENT_LOCK_REASONS
+            if explicit_lock and _marker_cleared_after(snapshot, item):
+                continue
             if not explicit_lock:
                 had_odds_before = any(seq < marker_seq for seq in odds_sequences)
                 redrawn_odds_after = any(seq > marker_seq for seq in odds_sequences)
@@ -2286,6 +2551,7 @@ def _detect_multilayer_lock_state(
 async def read_next_goal_lock_state(
     page: Page,
     next_goal_number: int,
+    logger: Logger | None = None,
 ) -> dict[str, Any]:
     """Read only Canvas 2D lock state using the last mapped Next Goal buttons."""
     cached = _LAST_MARKETS.get(id(page))
@@ -2312,6 +2578,18 @@ async def read_next_goal_lock_state(
         team1_click_region=cached.team1_click_region,
         team2_click_region=cached.team2_click_region,
     )
+    lock_state = _apply_persistent_lock_latch(
+        page,
+        snapshot,
+        lock_state,
+        market_context=int(next_goal_number),
+    )
+    await _log_lock_transition(
+        page,
+        int(next_goal_number),
+        lock_state,
+        logger,
+    )
     recent_locked_sides, recent_lock_markers = _consume_recent_lock_sides(
         page,
         lock_state,
@@ -2324,6 +2602,7 @@ async def read_next_goal_lock_state(
         "markers": lock_state["markers"],
         "recent_markers": recent_lock_markers,
         "checked_canvas_ids": lock_state.get("checked_canvas_ids") or (),
+        "released_sides": lock_state.get("released_sides") or (),
         "reason": None,
     }
 
@@ -2635,6 +2914,18 @@ async def read_next_goal_odds(
                 team1_click_region=cached.team1_click_region,
                 team2_click_region=cached.team2_click_region,
             )
+            lock_state = _apply_persistent_lock_latch(
+                page,
+                snapshot,
+                lock_state,
+                market_context=next_goal_number,
+            )
+            await _log_lock_transition(
+                page,
+                next_goal_number,
+                lock_state,
+                logger,
+            )
             recent_locked_sides, recent_lock_markers = _consume_recent_lock_sides(
                 page,
                 lock_state,
@@ -2697,6 +2988,18 @@ async def read_next_goal_odds(
         team2_region=mapping.team2_region,
         team1_click_region=mapping.team1_click_region,
         team2_click_region=mapping.team2_click_region,
+    )
+    lock_state = _apply_persistent_lock_latch(
+        page,
+        snapshot,
+        lock_state,
+        market_context=next_goal_number,
+    )
+    await _log_lock_transition(
+        page,
+        next_goal_number,
+        lock_state,
+        logger,
     )
     recent_locked_sides, recent_lock_markers = _consume_recent_lock_sides(
         page,
