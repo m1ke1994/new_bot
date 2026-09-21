@@ -143,9 +143,9 @@ class BrowserManager:
         await self._log(
             "CANVAS_2D_HOOK_INSTALLED_EARLY",
             (
-                "Canvas 2D hook v2 registered on BrowserContext before site navigation; "
-                "tracking getContext/fillText/drawImage/putImageData/"
-                "transferControlToOffscreen/path calls."
+                "Canvas 2D hook v4 registered on BrowserContext before site navigation; "
+                "tracking fillText/drawImage/Path2D/fill(path)/stroke(path)/"
+                "translucent overlays across Canvas layers."
             ),
         )
         await self._log(
