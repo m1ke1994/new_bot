@@ -499,6 +499,13 @@ tbody tr:hover { background: rgba(255, 255, 255, .018); }
 }
 .log-row-bookmaker-unlock .log-event { color: var(--green); font-weight: 800; }
 .log-row-bookmaker-unlock p { color: #bdebd6; }
+
+.log-row-bookmaker-goal-lock {
+  border-left: 3px solid #ff6b6b;
+  background: rgba(255, 107, 107, .10);
+}
+.log-row-bookmaker-goal-lock .log-event { color: #ff8a8a; font-weight: 900; }
+.log-row-bookmaker-goal-lock p { color: #ffd0d0; }
 .log-row time { color: #657389; }
 .log-event { color: var(--green); overflow-wrap: anywhere; }
 .log-row p { margin: 0; color: #aab5c4; overflow-wrap: anywhere; }
