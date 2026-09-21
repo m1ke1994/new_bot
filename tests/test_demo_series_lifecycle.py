@@ -403,11 +403,11 @@ class DemoSeriesLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 engine._wait_for_match_start = AsyncMock(
                     return_value=live_after_first_goal
                 )
+                async def keep_current_score(_browser, _selected_match, previous):
+                    return previous
+
                 engine._read_fresh_score = AsyncMock(
-                    side_effect=[
-                        prematch,
-                        live_after_first_goal,
-                    ]
+                    side_effect=keep_current_score
                 )
                 engine._wait_for_goal = AsyncMock(
                     return_value=(live_after_second_goal, Scorer.TEAM_1)
