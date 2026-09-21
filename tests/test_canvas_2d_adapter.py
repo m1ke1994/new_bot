@@ -5,9 +5,11 @@ from backend.app.browser.canvas_2d_adapter import (
     CANVAS_2D_HOOK_SCRIPT,
     _CachedMarket,
     _LAST_MARKETS,
+    _LATCHED_LOCKS,
     _detect_multilayer_lock_state,
     _LAST_REPORTED_LOCK_SEQ,
     _consume_recent_lock_sides,
+    _apply_persistent_lock_latch,
     detect_lock_state,
     map_next_goal_snapshot,
     read_next_goal_lock_state,
@@ -251,7 +253,7 @@ class Canvas2DAdapterTests(unittest.TestCase):
         self.assertIn('recordPathPaint(this, "fill", args)', CANVAS_2D_HOOK_SCRIPT)
         self.assertIn('recordPathPaint(this, "stroke", args)', CANVAS_2D_HOOK_SCRIPT)
 
-    def test_transient_vector_lock_survives_unlock_redraw(self):
+    def test_vector_lock_stays_current_after_odds_redraw_until_clear(self):
         snapshot = self.snapshot()
         snapshot["texts"][-1]["seq"] = 30
         mapping = map_next_goal_snapshot(snapshot, 3)
@@ -288,12 +290,32 @@ class Canvas2DAdapterTests(unittest.TestCase):
             team2_region=mapping.team2_region,
         )
 
-        self.assertEqual(lock_state["locked_sides"], ())
-        self.assertEqual(lock_state["recent_locked_sides"], (2,))
+        self.assertEqual(lock_state["locked_sides"], (2,))
         self.assertEqual(
-            lock_state["recent_markers"]["2"]["reason"],
+            lock_state["markers"]["2"]["reason"],
             "canvas-vector-icon",
         )
+
+        clear = {
+            "seq": 40,
+            "timestamp_ms": 1150,
+            "canvas_id": 1,
+            "generation": 0,
+            "kind": "clearRect",
+            "event_type": "clear",
+            "x": 560,
+            "y": 90,
+            "width": 45,
+            "height": 40,
+        }
+        snapshot["events"].append(clear)
+        cleared_state = detect_lock_state(
+            snapshot,
+            team1_region=mapping.team1_region,
+            team2_region=mapping.team2_region,
+        )
+        self.assertEqual(cleared_state["locked_sides"], ())
+        self.assertEqual(cleared_state["recent_locked_sides"], ())
 
     def test_transient_lock_is_seq_consumed_without_age_expiry(self):
         snapshot = self.snapshot()
@@ -356,6 +378,120 @@ class Canvas2DAdapterTests(unittest.TestCase):
         self.assertEqual(lock_state["recent_locked_sides"], (2,))
         self.assertEqual(first_sides, (2,))
         self.assertEqual(second_sides, ())
+
+    def test_persistent_lock_latch_survives_event_trim_until_clear(self):
+        page = type("Page", (), {"url": "https://example.test/match-1"})()
+        marker = {
+            "seq": 20,
+            "timestamp_ms": 1000,
+            "canvas_id": 3,
+            "detected_canvas_id": 3,
+            "generation": 0,
+            "kind": "fill",
+            "event_type": "path",
+            "path_source": "Path2D",
+            "x": 575,
+            "y": 99,
+            "width": 13,
+            "height": 19,
+            "path_op_count": 4,
+            "reason": "canvas-path2d-icon",
+        }
+        layer = {
+            "id": 3,
+            "generation": 0,
+            "width": 1000,
+            "height": 500,
+            "texts": [],
+            "rects": [],
+            "images": [],
+            "paths": [marker],
+            "events": [marker],
+        }
+        snapshot = {
+            "diagnostics": {"installed_at": 1234},
+            "snapshot_at_ms": 1200,
+            "canvases": [layer],
+        }
+        _LATCHED_LOCKS.clear()
+
+        first = _apply_persistent_lock_latch(
+            page,
+            snapshot,
+            {
+                "locked_sides": (2,),
+                "recent_locked_sides": (),
+                "markers": {"2": marker},
+                "recent_markers": {},
+                "checked_canvas_ids": (3,),
+            },
+            market_context=3,
+        )
+        self.assertEqual(first["locked_sides"], (2,))
+        self.assertTrue(first["markers"]["2"]["latched"])
+
+        # The original path event may fall out of the rolling event buffers,
+        # but the visible lock must stay active until an explicit clear.
+        trimmed_snapshot = {
+            **snapshot,
+            "canvases": [
+                {
+                    **layer,
+                    "paths": [],
+                    "events": [],
+                }
+            ],
+        }
+        latched = _apply_persistent_lock_latch(
+            page,
+            trimmed_snapshot,
+            {
+                "locked_sides": (),
+                "recent_locked_sides": (),
+                "markers": {},
+                "recent_markers": {},
+                "checked_canvas_ids": (3,),
+            },
+            market_context=3,
+        )
+        self.assertEqual(latched["locked_sides"], (2,))
+
+        clear = {
+            "seq": 50,
+            "timestamp_ms": 1300,
+            "canvas_id": 3,
+            "generation": 0,
+            "kind": "clearRect",
+            "event_type": "clear",
+            "x": 560,
+            "y": 90,
+            "width": 45,
+            "height": 40,
+        }
+        cleared_snapshot = {
+            **snapshot,
+            "canvases": [
+                {
+                    **layer,
+                    "paths": [],
+                    "events": [clear],
+                }
+            ],
+        }
+        released = _apply_persistent_lock_latch(
+            page,
+            cleared_snapshot,
+            {
+                "locked_sides": (),
+                "recent_locked_sides": (),
+                "markers": {},
+                "recent_markers": {},
+                "checked_canvas_ids": (3,),
+            },
+            market_context=3,
+        )
+        self.assertEqual(released["locked_sides"], ())
+        self.assertEqual(released["released_sides"], (2,))
 
     def test_lock_cursor_resets_for_generation_match_and_browser_context(self):
         page = type("Page", (), {"url": "https://example.test/match-1"})()
