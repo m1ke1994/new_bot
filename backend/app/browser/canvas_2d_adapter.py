@@ -2689,6 +2689,33 @@ async def read_next_goal_odds(
         market_context=next_goal_number,
     )
 
+    if lock_state["locked_sides"] or recent_locked_sides:
+        marker_parts: list[str] = []
+        for side in sorted(
+            set(lock_state["locked_sides"]) | set(recent_locked_sides)
+        ):
+            marker = (
+                (lock_state.get("markers") or {}).get(str(side))
+                or recent_lock_markers.get(str(side))
+                or {}
+            )
+            marker_parts.append(
+                f"side={side}:reason={marker.get('reason')}:"
+                f"canvas={marker.get('detected_canvas_id') or marker.get('canvas_id')}:"
+                f"source={marker.get('path_source')}"
+            )
+        await _log(
+            logger,
+            "CANVAS_2D_LOCK_DETECTED",
+            (
+                f"goal={next_goal_number}; "
+                f"locked_sides={list(lock_state['locked_sides'])}; "
+                f"recent_locked_sides={list(recent_locked_sides)}; "
+                f"checked_canvas_ids={list(lock_state.get('checked_canvas_ids') or ())}; "
+                f"markers=[{' | '.join(marker_parts)}]"
+            ),
+        )
+
     _LAST_MARKETS[cache_key] = _CachedMarket(
         url=page.url,
         next_goal_number=next_goal_number,
