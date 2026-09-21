@@ -52,7 +52,8 @@ class DemoRepository:
                 );
                 CREATE TABLE IF NOT EXISTS sequence_state (
                     id INTEGER PRIMARY KEY CHECK(id = 1), sequence_id TEXT NOT NULL, current_step INTEGER NOT NULL, status TEXT NOT NULL,
-                    cumulative_pnl TEXT NOT NULL, cumulative_losses TEXT NOT NULL, current_match_id TEXT, selected_team TEXT, updated_at TEXT NOT NULL
+                    cumulative_pnl TEXT NOT NULL, cumulative_losses TEXT NOT NULL, current_match_id TEXT, selected_team TEXT,
+                    max_three_switched INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS sequence_blocked_matches (
                     sequence_id TEXT NOT NULL, match_id TEXT NOT NULL, created_at TEXT NOT NULL,
@@ -62,10 +63,29 @@ class DemoRepository:
                 CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL, timestamp TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS cycles (id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL, timestamp TEXT NOT NULL);
             """)
+            sequence_columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(sequence_state)").fetchall()
+            }
+            if "max_three_switched" not in sequence_columns:
+                db.execute(
+                    "ALTER TABLE sequence_state "
+                    "ADD COLUMN max_three_switched INTEGER NOT NULL DEFAULT 0"
+                )
             now = local_now()
             db.execute("INSERT OR IGNORE INTO strategy_config VALUES (1, ?, ?, ?)", (json.dumps(DEFAULT_STRATEGY_CONFIG.to_dict()), now, now))
             db.execute("INSERT OR IGNORE INTO budget_state VALUES (1, ?, ?, ?, ?)", (str(DEMO_START_BUDGET), str(DEMO_START_BUDGET), "0.00", now))
-            db.execute("INSERT OR IGNORE INTO sequence_state VALUES (1, ?, 1, 'WAITING_FOR_MATCH', '0.00', '0.00', NULL, NULL, ?)", (uuid4().hex, now))
+            db.execute(
+                """
+                INSERT OR IGNORE INTO sequence_state(
+                    id, sequence_id, current_step, status,
+                    cumulative_pnl, cumulative_losses,
+                    current_match_id, selected_team,
+                    max_three_switched, updated_at
+                ) VALUES (1, ?, 1, 'WAITING_FOR_MATCH', '0.00', '0.00', NULL, NULL, 0, ?)
+                """,
+                (uuid4().hex, now),
+            )
         self._ready = True
 
     async def initialize(self) -> None:
@@ -125,7 +145,17 @@ class DemoRepository:
     async def save_sequence(self, **changes: Any) -> dict[str, Any]:
         current = await self.get_sequence()
         current.update(changes, updated_at=local_now())
-        columns = ("sequence_id", "current_step", "status", "cumulative_pnl", "cumulative_losses", "current_match_id", "selected_team", "updated_at")
+        columns = (
+            "sequence_id",
+            "current_step",
+            "status",
+            "cumulative_pnl",
+            "cumulative_losses",
+            "current_match_id",
+            "selected_team",
+            "max_three_switched",
+            "updated_at",
+        )
         async with self._lock:
             with self._connection() as db:
                 db.execute(f"UPDATE sequence_state SET {', '.join(f'{column}=?' for column in columns)} WHERE id=1", tuple(current[column] for column in columns))
@@ -133,7 +163,16 @@ class DemoRepository:
 
     async def reset_sequence(self) -> dict[str, Any]:
         current = await self.get_sequence()
-        result = await self.save_sequence(sequence_id=uuid4().hex, current_step=1, status="WAITING_FOR_MATCH", cumulative_pnl="0.00", cumulative_losses="0.00", current_match_id=None, selected_team=None)
+        result = await self.save_sequence(
+            sequence_id=uuid4().hex,
+            current_step=1,
+            status="WAITING_FOR_MATCH",
+            cumulative_pnl="0.00",
+            cumulative_losses="0.00",
+            current_match_id=None,
+            selected_team=None,
+            max_three_switched=0,
+        )
         await self.clear_blocked_matches(str(current["sequence_id"]))
         return result
 
