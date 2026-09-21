@@ -123,6 +123,9 @@ DEMO_BLOCKED_MARKET_STATUSES = frozenset(
     {"MARKET_LOCKED", "MARKET_NOT_FOUND", "ODDS_NOT_FOUND"}
 )
 
+DEMO_ACCEPTANCE_CONFIRMATIONS = 3
+DEMO_ACCEPTANCE_INTERVAL_SECONDS = 0.12
+
 
 class MissedSelectedTeamGoal(RuntimeError):
     def __init__(self, snapshot: ScoreboardSnapshot) -> None:
@@ -1092,14 +1095,38 @@ class DemoEngine:
                 snapshot = pre_active
                 expected_goal = snapshot.score.team1 + snapshot.score.team2 + 1
                 if current_odds.next_goal_number == expected_goal:
-                    if (
-                        snapshot.period
-                        and await self._demo_prebet_canvas_is_blocked(
-                            page,
-                            current_odds,
-                            demo_blocked_window,
-                        )
-                    ):
+                    acceptance_ready = True
+                    if snapshot.period:
+                        if demo_blocked_window.started_after_settlement:
+                            try:
+                                (
+                                    acceptance_ready,
+                                    snapshot,
+                                ) = await self._confirm_demo_bet_acceptance(
+                                    page=page,
+                                    browser=browser,
+                                    selected_match=selected_match,
+                                    current_odds=current_odds,
+                                    window=demo_blocked_window,
+                                    snapshot=snapshot,
+                                )
+                            except MissedSelectedTeamGoal as missed:
+                                await self._finish_demo_missed_selected_team_goal(
+                                    window=demo_blocked_window,
+                                    selected_match=selected_match,
+                                    cycle_id=cycle_id,
+                                    snapshot=missed.snapshot,
+                                )
+                                self._current_series = None
+                                return
+                        else:
+                            acceptance_ready = not await self._demo_prebet_canvas_is_blocked(
+                                page,
+                                current_odds,
+                                demo_blocked_window,
+                            )
+
+                    if not acceptance_ready:
                         try:
                             odds_result = await self._wait_for_odds(
                                 snapshot,
@@ -2375,6 +2402,175 @@ class DemoEngine:
             ),
             f"[NEXT_GOAL][DEMO][BLOCKED] selected team did not score; baseline updated to {after.text()}",
         )
+
+    async def _confirm_demo_bet_acceptance(
+        self,
+        *,
+        page: Page,
+        browser: MatchBrowser,
+        selected_match: dict[str, Any],
+        current_odds: Any,
+        window: DemoBlockedWindow,
+        snapshot: ScoreboardSnapshot,
+    ) -> tuple[bool, ScoreboardSnapshot]:
+        """Require a short stable-open window before DEMO_BET_CREATED.
+
+        This gate is used for a next step after settlement. One unlocked Canvas
+        sample is not enough: the same score/goal must stay open across several
+        fast checks. Any lock resets acceptance. Any score change is handled as
+        an unaccepted step and is routed through the existing missed-goal logic.
+        """
+        baseline_score = snapshot.score
+        expected_goal = baseline_score.team1 + baseline_score.team2 + 1
+        await REPOSITORY.log(
+            "DEMO_STEP_ARMING",
+            (
+                f"step={window.step}; stake={window.stake:g}; "
+                f"score={baseline_score.text()}; goal={expected_goal}; "
+                f"confirmations_required={DEMO_ACCEPTANCE_CONFIRMATIONS}; "
+                f"interval_ms={int(DEMO_ACCEPTANCE_INTERVAL_SECONDS * 1000)}"
+            ),
+        )
+        await STATE.update(
+            event="DEMO_STEP_ARMING",
+            market_locked=False,
+            message=(
+                f"Шаг {window.step}: подтверждаем свободный рынок перед "
+                "виртуальным принятием ставки"
+            ),
+        )
+
+        for confirmation in range(1, DEMO_ACCEPTANCE_CONFIRMATIONS + 1):
+            fresh = await self._read_fresh_score(
+                browser,
+                selected_match,
+                snapshot,
+            )
+            if fresh.score != baseline_score:
+                await REPOSITORY.log(
+                    "DEMO_SCORE_CHANGED_BEFORE_ACCEPTANCE",
+                    (
+                        f"step={window.step}; score={baseline_score.text()}"
+                        f"->{fresh.score.text()}; accepted=false"
+                    ),
+                )
+                await self._observe_demo_blocked_score(window, fresh)
+                await REPOSITORY.log(
+                    "DEMO_OPEN_CONFIRMATION_RESET",
+                    (
+                        f"step={window.step}; reason=score_changed; "
+                        f"confirmed={confirmation - 1}/"
+                        f"{DEMO_ACCEPTANCE_CONFIRMATIONS}"
+                    ),
+                )
+                return False, fresh
+
+            fresh_expected_goal = fresh.score.team1 + fresh.score.team2 + 1
+            if (
+                current_odds.next_goal_number != expected_goal
+                or fresh_expected_goal != expected_goal
+            ):
+                await REPOSITORY.log(
+                    "DEMO_OPEN_CONFIRMATION_RESET",
+                    (
+                        f"step={window.step}; reason=stale_goal; "
+                        f"market_goal={current_odds.next_goal_number}; "
+                        f"expected_goal={fresh_expected_goal}; accepted=false"
+                    ),
+                )
+                return False, fresh
+
+            blocked = (
+                bool(fresh.period)
+                and await self._demo_prebet_canvas_is_blocked(
+                    page,
+                    current_odds,
+                    window,
+                )
+            )
+            if blocked:
+                await REPOSITORY.log(
+                    "DEMO_OPEN_CONFIRMATION_RESET",
+                    (
+                        f"step={window.step}; reason=canvas_lock; "
+                        f"confirmed={confirmation - 1}/"
+                        f"{DEMO_ACCEPTANCE_CONFIRMATIONS}; accepted=false"
+                    ),
+                )
+                return False, fresh
+
+            await REPOSITORY.log(
+                "DEMO_OPEN_CONFIRMATION",
+                (
+                    f"step={window.step}; confirmation={confirmation}/"
+                    f"{DEMO_ACCEPTANCE_CONFIRMATIONS}; "
+                    f"score={fresh.score.text()}; goal={expected_goal}; "
+                    "locked=false"
+                ),
+            )
+            snapshot = fresh
+            if confirmation < DEMO_ACCEPTANCE_CONFIRMATIONS:
+                await self._sleep_or_stop(DEMO_ACCEPTANCE_INTERVAL_SECONDS)
+
+        # One final scoreboard read after the last lock observation closes the
+        # most important race: goal after the last unlocked sample but before
+        # the virtual bet boundary.
+        final_snapshot = await self._read_fresh_score(
+            browser,
+            selected_match,
+            snapshot,
+        )
+        if final_snapshot.score != baseline_score:
+            await REPOSITORY.log(
+                "DEMO_SCORE_CHANGED_BEFORE_ACCEPTANCE",
+                (
+                    f"step={window.step}; score={baseline_score.text()}"
+                    f"->{final_snapshot.score.text()}; accepted=false; "
+                    "phase=final_score_guard"
+                ),
+            )
+            await self._observe_demo_blocked_score(window, final_snapshot)
+            await REPOSITORY.log(
+                "DEMO_OPEN_CONFIRMATION_RESET",
+                (
+                    f"step={window.step}; reason=final_score_changed; "
+                    f"confirmed={DEMO_ACCEPTANCE_CONFIRMATIONS}/"
+                    f"{DEMO_ACCEPTANCE_CONFIRMATIONS}; accepted=false"
+                ),
+            )
+            return False, final_snapshot
+
+        final_expected_goal = (
+            final_snapshot.score.team1 + final_snapshot.score.team2 + 1
+        )
+        if final_expected_goal != expected_goal:
+            await REPOSITORY.log(
+                "DEMO_OPEN_CONFIRMATION_RESET",
+                (
+                    f"step={window.step}; reason=final_goal_mismatch; "
+                    f"market_goal={current_odds.next_goal_number}; "
+                    f"expected_goal={final_expected_goal}; accepted=false"
+                ),
+            )
+            return False, final_snapshot
+
+        await REPOSITORY.log(
+            "DEMO_BET_ACCEPTANCE_CONFIRMED",
+            (
+                f"step={window.step}; stake={window.stake:g}; "
+                f"score={final_snapshot.score.text()}; goal={expected_goal}; "
+                f"confirmations={DEMO_ACCEPTANCE_CONFIRMATIONS}; accepted=true"
+            ),
+        )
+        await STATE.update(
+            event="DEMO_BET_ACCEPTANCE_CONFIRMED",
+            market_locked=False,
+            message=(
+                f"Шаг {window.step}: рынок стабильно свободен, "
+                "виртуальная ставка может быть создана"
+            ),
+        )
+        return True, final_snapshot
 
     async def _demo_prebet_canvas_is_blocked(
         self,
