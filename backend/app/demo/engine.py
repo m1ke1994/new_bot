@@ -766,40 +766,42 @@ class DemoEngine:
             return
         await REPOSITORY.log("MATCH_OPENED", opened["url"])
 
-        await REPOSITORY.log(
-            "MATCH_CONTENT_WAIT",
-            "URL матча открыт; ждём scoreboard и фактически отрисованную зону рынков (до 30 секунд)",
-        )
-        try:
-            ready = await league.wait_match_content_ready()
-        except MatchContentLoadTimeout as error:
-            details = error.details
+        readiness_waiter = getattr(league, "wait_match_content_ready", None)
+        if callable(readiness_waiter):
             await REPOSITORY.log(
-                "MATCH_CONTENT_LOAD_TIMEOUT",
+                "MATCH_CONTENT_WAIT",
+                "URL матча открыт; ждём scoreboard и фактически отрисованную зону рынков (до 30 секунд)",
+            )
+            try:
+                ready = await readiness_waiter()
+            except MatchContentLoadTimeout as error:
+                details = error.details
+                await REPOSITORY.log(
+                    "MATCH_CONTENT_LOAD_TIMEOUT",
+                    (
+                        f"{error}; url={details.get('url')}; "
+                        f"scoreboard_ready={details.get('scoreboard_ready')}; "
+                        f"market_ready={details.get('market_ready')}; "
+                        f"market_selector={details.get('market_selector')}; "
+                        f"attempts={details.get('attempts')}; "
+                        f"last_score_error={details.get('last_score_error')}"
+                    ),
+                )
+                await self._status(
+                    DemoStatus.MATCH_SKIPPED,
+                    "Матч не дорисовался за 30 секунд; возвращаемся к выбору матча",
+                    "MATCH_CONTENT_LOAD_TIMEOUT",
+                )
+                return
+
+            await REPOSITORY.log(
+                "MATCH_CONTENT_READY",
                 (
-                    f"{error}; url={details.get('url')}; "
-                    f"scoreboard_ready={details.get('scoreboard_ready')}; "
-                    f"market_ready={details.get('market_ready')}; "
-                    f"market_selector={details.get('market_selector')}; "
-                    f"attempts={details.get('attempts')}; "
-                    f"last_score_error={details.get('last_score_error')}"
+                    f"score={ready.get('score')}; period={ready.get('period') or 'UPCOMING'}; "
+                    f"market_selector={ready.get('market_selector')}; "
+                    f"elapsed_ms={ready.get('elapsed_ms')}; attempts={ready.get('attempts')}"
                 ),
             )
-            await self._status(
-                DemoStatus.MATCH_SKIPPED,
-                "Матч не дорисовался за 30 секунд; возвращаемся к выбору матча",
-                "MATCH_CONTENT_LOAD_TIMEOUT",
-            )
-            return
-
-        await REPOSITORY.log(
-            "MATCH_CONTENT_READY",
-            (
-                f"score={ready.get('score')}; period={ready.get('period') or 'UPCOMING'}; "
-                f"market_selector={ready.get('market_selector')}; "
-                f"elapsed_ms={ready.get('elapsed_ms')}; attempts={ready.get('attempts')}"
-            ),
-        )
 
         # Каждый новый матч: перед первой ставкой ждём 10 секунд.
         # Пауза относится только к моменту после открытия нового матча.
