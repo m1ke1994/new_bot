@@ -11,7 +11,10 @@ from uuid import uuid4
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from auth import authorize
-from backend.app.browser.canvas_2d_adapter import read_next_goal_lock_state
+from backend.app.browser.canvas_2d_adapter import (
+    read_next_goal_lock_state,
+    reset_canvas_2d_for_live_transition,
+)
 from backend.app.browser.canvas_vision import load_latest_analysis
 from backend.app.browser.first_half import (
     FirstHalfNotReady,
@@ -1286,10 +1289,93 @@ class DemoEngine:
                         f"boundary={self._mode}_BET_CREATED",
                     )
 
+            monitor_odds = current_odds
             if waiting_for_match_start:
+                canvas_live_transition = (
+                    str(getattr(current_odds, "source", "") or "") == "CANVAS_2D"
+                )
+                if canvas_live_transition:
+                    try:
+                        transition_page = await self.browser_manager.ensure_page()
+                        await reset_canvas_2d_for_live_transition(
+                            transition_page,
+                            REPOSITORY.log,
+                        )
+                        await REPOSITORY.log(
+                            "CANVAS_2D_WAITING_NATIVE_LIVE_BOOT",
+                            (
+                                f"bet_id={bet_id}; goal={current_odds.next_goal_number}; "
+                                "Canvas hook cleared before UPCOMING -> LIVE"
+                            ),
+                        )
+                    except Exception as error:
+                        await REPOSITORY.log(
+                            "CANVAS_2D_LIVE_TRANSITION_RESET_FAILED",
+                            (
+                                f"{type(error).__name__}: {error}; "
+                                "continuing match-start wait without aborting active bet"
+                            ),
+                        )
+
                 started_snapshot = await self._wait_for_match_start(selected_match)
                 if started_snapshot is None:
                     return
+                snapshot = started_snapshot
+
+                if canvas_live_transition:
+                    await REPOSITORY.log(
+                        "CANVAS_2D_LIVE_BOOT_GRACE",
+                        (
+                            f"score={snapshot.score.text()}; waiting 750 ms for native "
+                            "LIVE market hydration before reinstalling Canvas hook"
+                        ),
+                    )
+                    await self._sleep_or_stop(0.75)
+                    try:
+                        transition_page = await self.browser_manager.ensure_page()
+                        refreshed_monitor_odds = await read_next_goal_odds(
+                            transition_page,
+                            snapshot.team1,
+                            snapshot.team2,
+                            snapshot.score.team1,
+                            snapshot.score.team2,
+                            REPOSITORY.log,
+                            read_only=True,
+                        )
+                        if (
+                            refreshed_monitor_odds.next_goal_number
+                            == current_odds.next_goal_number
+                        ):
+                            monitor_odds = refreshed_monitor_odds
+                            await REPOSITORY.log(
+                                "CANVAS_2D_LIVE_MONITOR_REMAPPED",
+                                (
+                                    f"bet_id={bet_id}; goal={current_odds.next_goal_number}; "
+                                    f"score={snapshot.score.text()}; "
+                                    "Canvas hook reinstalled after LIVE hydration; "
+                                    "active-bet lock mapping refreshed"
+                                ),
+                            )
+                        else:
+                            await REPOSITORY.log(
+                                "CANVAS_2D_LIVE_MONITOR_REMAP_STALE",
+                                (
+                                    f"bet_id={bet_id}; accepted_goal="
+                                    f"{current_odds.next_goal_number}; live_goal="
+                                    f"{refreshed_monitor_odds.next_goal_number}; "
+                                    f"score={snapshot.score.text()}"
+                                ),
+                            )
+                    except Exception as error:
+                        await REPOSITORY.log(
+                            "CANVAS_2D_LIVE_MONITOR_REMAP_FAILED",
+                            (
+                                f"{type(error).__name__}: {error}; "
+                                "active bet remains valid; lock diagnostics may be unavailable "
+                                "until the next market read"
+                            ),
+                        )
+
                 await REPOSITORY.log("ACTIVE_BET_RESUMED", f"existing bet_id={bet_id}")
                 current_state = await STATE.snapshot()
                 await STATE.update(
@@ -1311,7 +1397,7 @@ class DemoEngine:
                 )
                 return
             self._active_bet_lock_context = {
-                "active_odds": current_odds,
+                "active_odds": monitor_odds,
                 "selected_side": selection.selected_side,
                 "step": step,
                 "bet_id": bet_id,
