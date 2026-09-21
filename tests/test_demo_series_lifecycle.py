@@ -404,7 +404,10 @@ class DemoSeriesLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     return_value=live_after_first_goal
                 )
                 engine._read_fresh_score = AsyncMock(
-                    return_value=live_after_first_goal
+                    side_effect=[
+                        prematch,
+                        live_after_first_goal,
+                    ]
                 )
                 engine._wait_for_goal = AsyncMock(
                     return_value=(live_after_second_goal, Scorer.TEAM_1)
