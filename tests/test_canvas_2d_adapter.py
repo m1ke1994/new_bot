@@ -246,8 +246,10 @@ class Canvas2DAdapterTests(unittest.TestCase):
     def test_hook_v4_contains_path2d_capture(self):
         self.assertIn("version: 4", CANVAS_2D_HOOK_SCRIPT)
         self.assertIn("path2DStates", CANVAS_2D_HOOK_SCRIPT)
-        self.assertIn("fillPath2D", CANVAS_2D_HOOK_SCRIPT)
-        self.assertIn("strokePath2D", CANVAS_2D_HOOK_SCRIPT)
+        self.assertIn("installPath2DHook", CANVAS_2D_HOOK_SCRIPT)
+        self.assertIn('bump(kind + "Path2D")', CANVAS_2D_HOOK_SCRIPT)
+        self.assertIn('recordPathPaint(this, "fill", args)', CANVAS_2D_HOOK_SCRIPT)
+        self.assertIn('recordPathPaint(this, "stroke", args)', CANVAS_2D_HOOK_SCRIPT)
 
     def test_transient_vector_lock_survives_unlock_redraw(self):
         snapshot = self.snapshot()
