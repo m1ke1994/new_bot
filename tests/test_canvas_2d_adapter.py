@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from backend.app.browser.canvas_2d_adapter import (
+    CANVAS_2D_HOOK_SCRIPT,
     _CachedMarket,
     _LAST_MARKETS,
     _detect_multilayer_lock_state,
@@ -135,6 +136,118 @@ class Canvas2DAdapterTests(unittest.TestCase):
 
         self.assertEqual(lock_state["locked_sides"], (2,))
         self.assertEqual(lock_state["markers"]["2"]["reason"], "canvas-vector-icon")
+
+    def test_path2d_icon_inside_outcome_marks_locked_side(self):
+        snapshot = self.snapshot()
+        mapping = map_next_goal_snapshot(snapshot, 3)
+        assert mapping is not None
+        path2d_lock = {
+            "seq": 20,
+            "timestamp_ms": 1000,
+            "canvas_id": 1,
+            "generation": 0,
+            "kind": "fill",
+            "event_type": "path",
+            "path_source": "Path2D",
+            "x": 575,
+            "y": 99,
+            "width": 13,
+            "height": 19,
+            "path_op_count": 4,
+            "fill_style": "#7f8b9f",
+            "alpha": 1.0,
+        }
+        snapshot["paths"] = [path2d_lock]
+        snapshot["events"] = [path2d_lock]
+        snapshot["snapshot_at_ms"] = 1200
+
+        lock_state = detect_lock_state(
+            snapshot,
+            team1_region=mapping.team1_region,
+            team2_region=mapping.team2_region,
+        )
+
+        self.assertEqual(lock_state["locked_sides"], (2,))
+        self.assertEqual(
+            lock_state["markers"]["2"]["reason"],
+            "canvas-path2d-icon",
+        )
+
+    def test_rgba_fillrect_overlay_marks_locked_side(self):
+        snapshot = self.snapshot()
+        mapping = map_next_goal_snapshot(snapshot, 3)
+        assert mapping is not None
+        overlay = {
+            "seq": 20,
+            "timestamp_ms": 1000,
+            "canvas_id": 1,
+            "generation": 0,
+            "kind": "fillRect",
+            "event_type": "rect",
+            "x": 555,
+            "y": 88,
+            "width": 130,
+            "height": 44,
+            "fill_style": "rgba(20, 30, 40, 0.42)",
+            "alpha": 1.0,
+        }
+        snapshot["rects"].append(overlay)
+        snapshot["events"] = [overlay]
+        snapshot["snapshot_at_ms"] = 1200
+
+        lock_state = detect_lock_state(
+            snapshot,
+            team1_region=mapping.team1_region,
+            team2_region=mapping.team2_region,
+        )
+
+        self.assertEqual(lock_state["locked_sides"], (2,))
+        self.assertEqual(
+            lock_state["markers"]["2"]["reason"],
+            "canvas-dim-overlay",
+        )
+
+    def test_rgba_path2d_overlay_marks_locked_side(self):
+        snapshot = self.snapshot()
+        mapping = map_next_goal_snapshot(snapshot, 3)
+        assert mapping is not None
+        overlay = {
+            "seq": 20,
+            "timestamp_ms": 1000,
+            "canvas_id": 1,
+            "generation": 0,
+            "kind": "fill",
+            "event_type": "path",
+            "path_source": "Path2D",
+            "x": 555,
+            "y": 88,
+            "width": 130,
+            "height": 44,
+            "path_op_count": 4,
+            "fill_style": "rgb(20 30 40 / 42%)",
+            "alpha": 1.0,
+        }
+        snapshot["paths"] = [overlay]
+        snapshot["events"] = [overlay]
+        snapshot["snapshot_at_ms"] = 1200
+
+        lock_state = detect_lock_state(
+            snapshot,
+            team1_region=mapping.team1_region,
+            team2_region=mapping.team2_region,
+        )
+
+        self.assertEqual(lock_state["locked_sides"], (2,))
+        self.assertEqual(
+            lock_state["markers"]["2"]["reason"],
+            "canvas-dim-overlay",
+        )
+
+    def test_hook_v4_contains_path2d_capture(self):
+        self.assertIn("version: 4", CANVAS_2D_HOOK_SCRIPT)
+        self.assertIn("path2DStates", CANVAS_2D_HOOK_SCRIPT)
+        self.assertIn("fillPath2D", CANVAS_2D_HOOK_SCRIPT)
+        self.assertIn("strokePath2D", CANVAS_2D_HOOK_SCRIPT)
 
     def test_transient_vector_lock_survives_unlock_redraw(self):
         snapshot = self.snapshot()
