@@ -116,6 +116,8 @@ const strategyConfig = ref({
 
   blocked_events_switch_enabled: false,
 
+  max_three_steps_enabled: false,
+
 })
 
 const backendError = ref('')
@@ -1075,6 +1077,16 @@ onBeforeUnmount(() => {
               <span class="filter-copy"><strong>Заблокированные события</strong><small>Контролировать пропущенный гол выбранной команды во время блокировки</small></span>
 
               <span class="filter-state">{{ strategyConfig.blocked_events_switch_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
+
+            </label>
+
+            <label v-if="strategyConfig.strategy_type === 'NEXT_GOAL'" :class="['match-filter-option', { 'filter-disabled': !strategyConfig.max_three_steps_enabled }]">
+
+              <input v-model="strategyConfig.max_three_steps_enabled" type="checkbox" :disabled="state.running || actionPending" @change="saveMatchFilters">
+
+              <span class="filter-copy"><strong>max 3 шага</strong><small>После 3 проигрышей подряд закрыть матч и продолжить догон на следующем матче со следующего шага</small></span>
+
+              <span class="filter-state">{{ strategyConfig.max_three_steps_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
 
             </label>
 
