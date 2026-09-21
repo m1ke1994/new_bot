@@ -1290,6 +1290,7 @@ class DemoEngine:
                     )
 
             monitor_odds = current_odds
+            goal_seen_at_live_start: tuple[ScoreboardSnapshot, Scorer] | None = None
             if waiting_for_match_start:
                 canvas_live_transition = (
                     str(getattr(current_odds, "source", "") or "") == "CANVAS_2D"
@@ -1322,7 +1323,33 @@ class DemoEngine:
                     return
                 snapshot = started_snapshot
 
-                if canvas_live_transition:
+                # The first accepted bet belongs to goal №1 from score 0:0.
+                # The bookmaker can expose the LIVE scoreboard only after that
+                # goal has already happened. In that case the bet is already
+                # resolved and MUST NOT be remapped to goal №2 or kept waiting
+                # for the stale goal №1.
+                live_start_scorer = detect_scorer(score_before, snapshot.score)
+                if live_start_scorer != Scorer.UNKNOWN:
+                    goal_seen_at_live_start = (snapshot, live_start_scorer)
+                    await REPOSITORY.log(
+                        "ACTIVE_BET_RESOLVED_DURING_LIVE_START",
+                        (
+                            f"bet_id={bet_id}; step={step}; accepted_goal="
+                            f"{current_odds.next_goal_number}; "
+                            f"score={score_before.text()}->{snapshot.score.text()}; "
+                            f"scorer={live_start_scorer.value}; "
+                            "score advanced before active-bet monitor started"
+                        ),
+                    )
+                    await STATE.update(
+                        event="ACTIVE_BET_RESOLVED_DURING_LIVE_START",
+                        message=(
+                            "Счёт изменился до запуска LIVE-монитора; "
+                            "рассчитываем уже принятую ставку по фактическому голу"
+                        ),
+                    )
+
+                if canvas_live_transition and goal_seen_at_live_start is None:
                     await REPOSITORY.log(
                         "CANVAS_2D_LIVE_BOOT_GRACE",
                         (
@@ -1376,15 +1403,19 @@ class DemoEngine:
                             ),
                         )
 
-                await REPOSITORY.log("ACTIVE_BET_RESUMED", f"existing bet_id={bet_id}")
-                current_state = await STATE.snapshot()
-                await STATE.update(
-                    event="ACTIVE_BET_RESUMED",
-                    bet={
-                        **current_state.get("bet", {}),
-                        "status": "WAITING_FOR_GOAL",
-                    },
-                )
+                if goal_seen_at_live_start is None:
+                    await REPOSITORY.log(
+                        "ACTIVE_BET_RESUMED",
+                        f"existing bet_id={bet_id}",
+                    )
+                    current_state = await STATE.snapshot()
+                    await STATE.update(
+                        event="ACTIVE_BET_RESUMED",
+                        bet={
+                            **current_state.get("bet", {}),
+                            "status": "WAITING_FOR_GOAL",
+                        },
+                    )
 
             if self._mode == "LIVE" and (
                 self._active_live_bet is None
@@ -1396,22 +1427,25 @@ class DemoEngine:
                     "Изменение счёта нельзя оценивать без подтверждённой ACTIVE LIVE-ставки",
                 )
                 return
-            self._active_bet_lock_context = {
-                "active_odds": monitor_odds,
-                "selected_side": selection.selected_side,
-                "step": step,
-                "bet_id": bet_id,
-            }
-            try:
-                goal = await self._wait_for_goal(
-                    browser,
-                    selected_match,
-                    snapshot,
-                )
-            finally:
-                self._active_bet_lock_context = None
-            if goal is None:
-                return
+            if goal_seen_at_live_start is not None:
+                goal = goal_seen_at_live_start
+            else:
+                self._active_bet_lock_context = {
+                    "active_odds": monitor_odds,
+                    "selected_side": selection.selected_side,
+                    "step": step,
+                    "bet_id": bet_id,
+                }
+                try:
+                    goal = await self._wait_for_goal(
+                        browser,
+                        selected_match,
+                        snapshot,
+                    )
+                finally:
+                    self._active_bet_lock_context = None
+                if goal is None:
+                    return
             new_snapshot, scorer = goal
             common_record = {
                 **active_record,
