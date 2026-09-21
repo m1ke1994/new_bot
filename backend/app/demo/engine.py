@@ -766,6 +766,7 @@ class DemoEngine:
             return
         await REPOSITORY.log("MATCH_OPENED", opened["url"])
 
+        readiness_elapsed_seconds = 0.0
         readiness_waiter = getattr(league, "wait_match_content_ready", None)
         if callable(readiness_waiter):
             await REPOSITORY.log(
@@ -794,6 +795,10 @@ class DemoEngine:
                 )
                 return
 
+            readiness_elapsed_seconds = max(
+                0.0,
+                float(ready.get("elapsed_ms") or 0) / 1000.0,
+            )
             await REPOSITORY.log(
                 "MATCH_CONTENT_READY",
                 (
@@ -803,19 +808,26 @@ class DemoEngine:
                 ),
             )
 
-        # Каждый новый матч: перед первой ставкой ждём 10 секунд.
-        # Пауза относится только к моменту после открытия нового матча.
-        # Догоны внутри уже выбранного матча выполняются без этой задержки.
+        # Сохраняем исходное правило: первая ставка не раньше чем через 10 секунд
+        # после открытия нового матча. Время, уже потраченное readiness-gate,
+        # засчитываем в эти 10 секунд, чтобы не добавлять лишнюю задержку.
+        remaining_new_match_delay = max(0.0, 10.0 - readiness_elapsed_seconds)
         await REPOSITORY.log(
             "NEW_MATCH_BET_DELAY",
-            f"{match_name}: ждём 10 секунд перед первой ставкой",
+            (
+                f"{match_name}: до первой ставки осталось "
+                f"{remaining_new_match_delay:.2f} сек из исходных 10 сек"
+            ),
         )
         await STATE.update(
-            message=f"Новый матч открыт. Пауза 10 секунд перед первой ставкой: {match_name}",
+            message=(
+                f"Новый матч открыт. До первой ставки осталось "
+                f"{remaining_new_match_delay:.2f} сек: {match_name}"
+            ),
             event="NEW_MATCH_BET_DELAY",
         )
 
-        await self._sleep_or_stop(10.0)
+        await self._sleep_or_stop(remaining_new_match_delay)
 
         if self._stop_event.is_set():
             return
