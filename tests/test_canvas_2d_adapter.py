@@ -1,9 +1,12 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from backend.app.browser.canvas_2d_adapter import (
     CANVAS_2D_HOOK_SCRIPT,
     _CachedMarket,
+    HOOKED_PAGE_IDS,
+    _LAST_DIAGNOSTIC_SIGNATURES,
+    _LAST_LOCK_STATE_BY_MARKET,
     _LAST_MARKETS,
     _LATCHED_LOCKS,
     _detect_multilayer_lock_state,
@@ -13,6 +16,7 @@ from backend.app.browser.canvas_2d_adapter import (
     detect_lock_state,
     map_next_goal_snapshot,
     read_next_goal_lock_state,
+    reset_canvas_2d_for_live_transition,
 )
 
 
@@ -946,6 +950,73 @@ class Canvas2DAdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen["market_context"], 2)
         self.assertTrue(state["available"])
         self.assertEqual(state["checked_canvas_ids"], (1, 2, 3))
+
+
+
+
+class FakeTransitionPage:
+    def __init__(self):
+        self.url = "https://example.test/match"
+        self.reload_calls = []
+
+    async def evaluate(self, _script):
+        return True
+
+    async def reload(self, **kwargs):
+        self.reload_calls.append(kwargs)
+        return None
+
+
+class Canvas2DTransitionResetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_transition_reload_clears_hook_and_cached_market_state(self):
+        page = FakeTransitionPage()
+        page_id = id(page)
+        HOOKED_PAGE_IDS.add(page_id)
+        _LAST_DIAGNOSTIC_SIGNATURES[page_id] = "old"
+        _LAST_MARKETS[page_id] = _CachedMarket(
+            url=page.url,
+            next_goal_number=1,
+            team1_odds=1.9,
+            team2_odds=1.8,
+            team1_region={"x": 1, "y": 1, "width": 1, "height": 1},
+            team2_region={"x": 2, "y": 1, "width": 1, "height": 1},
+            team1_click_region={"x": 1, "y": 1, "width": 1, "height": 1},
+            team2_click_region={"x": 2, "y": 1, "width": 1, "height": 1},
+            source_canvas_id=1,
+            canvas={"width": 100, "height": 50},
+        )
+        _LATCHED_LOCKS[(page_id, page.url, 1, 1, 1)] = {"reason": "lock"}
+        _LAST_LOCK_STATE_BY_MARKET[(page_id, page.url, 1, 1)] = (1,)
+        _LAST_REPORTED_LOCK_SEQ[(page_id, page.url, 1, 1, 1, 1, 1)] = 99
+        logger = AsyncMock()
+
+        had_hook = await reset_canvas_2d_for_live_transition(page, logger)
+
+        self.assertTrue(had_hook)
+        self.assertEqual(
+            page.reload_calls,
+            [{"wait_until": "domcontentloaded", "timeout": 30_000}],
+        )
+        self.assertNotIn(page_id, HOOKED_PAGE_IDS)
+        self.assertNotIn(page_id, _LAST_MARKETS)
+        self.assertNotIn(page_id, _LAST_DIAGNOSTIC_SIGNATURES)
+        self.assertFalse(
+            any(key[0] == page_id for key in _LATCHED_LOCKS)
+        )
+        self.assertFalse(
+            any(key[0] == page_id for key in _LAST_LOCK_STATE_BY_MARKET)
+        )
+        self.assertFalse(
+            any(key[0] == page_id for key in _LAST_REPORTED_LOCK_SEQ)
+        )
+        events = [call.args[0] for call in logger.await_args_list]
+        self.assertEqual(
+            events,
+            [
+                "CANVAS_2D_LIVE_TRANSITION_RESET_STARTED",
+                "CANVAS_2D_LIVE_TRANSITION_RESET_COMPLETED",
+            ],
+        )
 
 
 if __name__ == "__main__":
