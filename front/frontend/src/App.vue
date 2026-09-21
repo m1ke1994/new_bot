@@ -670,6 +670,7 @@ const bookmakerLockEvents = new Set([
   'DEMO_PREBET_CANVAS_LOCK_CHECK',
   'DEMO_PREBET_CANVAS_LOCKED',
   'DEMO_PREBET_CANVAS_LOCK_STATE_UNAVAILABLE',
+  'CANVAS_2D_LOCK_DETECTED',
   'CANVAS_2D_LOCKED_USING_LAST_ODDS',
 ])
 
@@ -683,6 +684,7 @@ function bookmakerLogLabel(item) {
   if (event === 'DEMO_PREBET_CANVAS_LOCKED') return 'БЛОКИРОВКА БК'
   if (event === 'DEMO_PREBET_CANVAS_LOCK_CHECK') return 'ПРОВЕРКА ЗАМКА'
   if (event === 'DEMO_PREBET_CANVAS_LOCK_STATE_UNAVAILABLE') return 'ЗАМОК: НЕТ ДАННЫХ'
+  if (event === 'CANVAS_2D_LOCK_DETECTED') return 'ЗАМОК ОБНАРУЖЕН'
   if (event === 'CANVAS_2D_LOCKED_USING_LAST_ODDS') return 'ЗАМОК CANVAS'
   return event
 }
