@@ -2330,7 +2330,11 @@ class DemoEngine:
             )
             return True
 
-        state = await read_next_goal_lock_state(page, int(next_goal_number))
+        state = await read_next_goal_lock_state(
+            page,
+            int(next_goal_number),
+            logger=REPOSITORY.log,
+        )
         if not state.get("available"):
             await REPOSITORY.log(
                 "DEMO_PREBET_CANVAS_LOCK_STATE_UNAVAILABLE",
@@ -2359,6 +2363,26 @@ class DemoEngine:
             ),
         )
         if selected_side not in locked and selected_side not in recent:
+            if window.blocked_window_active:
+                window.blocked_window_active = False
+                await REPOSITORY.log(
+                    "DEMO_PREBET_CANVAS_UNLOCKED",
+                    (
+                        "[NEXT_GOAL][DEMO][PREBET] bookmaker lock released; "
+                        f"step={window.step}; selected_side={selected_side}; "
+                        f"goal={next_goal_number}; "
+                        f"released_sides={list(state.get('released_sides') or ())}; "
+                        "bet creation may continue"
+                    ),
+                )
+                await STATE.update(
+                    market_locked=False,
+                    event="DEMO_PREBET_CANVAS_UNLOCKED",
+                    message=(
+                        f"Замок БК снят для шага {window.step}; "
+                        "следующая ставка снова разрешена"
+                    ),
+                )
             return False
 
         window.blocked_window_active = True
@@ -2378,7 +2402,18 @@ class DemoEngine:
                 f"recent_locked_sides={sorted(recent)}; "
                 f"reason={marker.get('reason')}; "
                 f"canvas_id={marker.get('detected_canvas_id')}; "
+                f"marker_seq={marker.get('seq')}; "
+                f"latched={bool(marker.get('latched'))}; "
+                f"persistent_until_clear={bool(marker.get('persistent_until_clear'))}; "
                 f"checked_canvas_ids={list(state.get('checked_canvas_ids') or ())}"
+            ),
+        )
+        await STATE.update(
+            market_locked=True,
+            event="DEMO_PREBET_CANVAS_LOCKED",
+            message=(
+                f"Блокировка БК активна: шаг {window.step}, "
+                f"сторона {selected_side}, причина={marker.get('reason')}"
             ),
         )
         return True
@@ -2586,6 +2621,21 @@ class DemoEngine:
                 else:
                     reader_source = "DOM / Playwright"
                 odds_state = self._odds_state(odds, None, None)
+                selected_lock_active = False
+                if demo_blocked_window is not None:
+                    selected_side_number = (
+                        1
+                        if demo_blocked_window.selected_side == Scorer.TEAM_1
+                        else 2
+                    )
+                    odds_locked = {
+                        int(side)
+                        for side in (
+                            tuple(getattr(odds, "locked_sides", ()) or ())
+                            + tuple(getattr(odds, "recent_locked_sides", ()) or ())
+                        )
+                    }
+                    selected_lock_active = selected_side_number in odds_locked
                 await STATE.update(
                     market_reader={
                         "source": reader_source,
@@ -2595,7 +2645,7 @@ class DemoEngine:
                     },
                     odds=odds_state,
                     market_available=True,
-                    market_locked=False,
+                    market_locked=selected_lock_active,
                     odds_available=True,
                 )
                 await self._status(
@@ -2607,12 +2657,14 @@ class DemoEngine:
                     demo_blocked_window is not None
                     and demo_blocked_window.blocked_window_active
                 ):
-                    demo_blocked_window.blocked_window_active = False
                     await REPOSITORY.log(
-                        "DEMO_BLOCKED_MARKET_RECOVERED",
-                        f"[NEXT_GOAL][DEMO][BLOCKED] fresh market ready at "
-                        f"{verified.score.text()}; step={demo_blocked_window.step} "
-                        f"stake={demo_blocked_window.stake:g}",
+                        "DEMO_BLOCKED_ODDS_VISIBLE",
+                        (
+                            "[NEXT_GOAL][DEMO][BLOCKED] odds are readable but "
+                            "blocked_window remains active until final Canvas lock gate "
+                            f"confirms unlock; step={demo_blocked_window.step}; "
+                            f"selected_lock_active={selected_lock_active}"
+                        ),
                     )
                 return snapshot, odds
             except MarketReadError as error:
