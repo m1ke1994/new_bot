@@ -27,12 +27,12 @@ HOOKED_PAGE_IDS: set[int] = set()
 
 CANVAS_2D_HOOK_SCRIPT = r"""
 (() => {
-    if (window.__autobetCanvas2D && window.__autobetCanvas2D.version === 3) {
+    if (window.__autobetCanvas2D && window.__autobetCanvas2D.version === 4) {
         return;
     }
 
     const state = {
-        version: 3,
+        version: 4,
         seq: 0,
         nextCanvasId: 1,
         canvases: new Map(),
@@ -193,6 +193,132 @@ CANVAS_2D_HOOK_SCRIPT = r"""
     };
 
     const pathStates = new WeakMap();
+    const path2DStates = new WeakMap();
+
+    const emptyTrackedPath = () => ({
+        points: [],
+        op_count: 0,
+        commands: [],
+    });
+
+    const path2DState = (path) => {
+        if (!path || (typeof path !== "object" && typeof path !== "function")) {
+            return null;
+        }
+        let tracked = path2DStates.get(path);
+        if (!tracked) {
+            tracked = emptyTrackedPath();
+            path2DStates.set(path, tracked);
+        }
+        return tracked;
+    };
+
+    const pushPath2DPoint = (tracked, x, y) => {
+        if (!tracked) return;
+        const px = Number(x);
+        const py = Number(y);
+        if (!Number.isFinite(px) || !Number.isFinite(py)) return;
+        tracked.points.push({ x: px, y: py });
+    };
+
+    const pushPath2DCommand = (tracked, command) => {
+        if (!tracked) return;
+        tracked.op_count += 1;
+        tracked.commands.push(command);
+        if (tracked.commands.length > 64) {
+            tracked.commands.splice(0, tracked.commands.length - 64);
+        }
+    };
+
+    const parseSvgPathIntoState = (data, tracked) => {
+        if (!tracked || typeof data !== "string" || !data.trim()) return;
+        const tokens = data.match(/[a-zA-Z]|[-+]?(?:\d*\.)?\d+(?:[eE][-+]?\d+)?/g) || [];
+        let index = 0;
+        let command = "";
+        let cx = 0, cy = 0, sx = 0, sy = 0;
+
+        const isCommand = (token) => /^[a-zA-Z]$/.test(token);
+        const number = () => Number(tokens[index++]);
+        const addPoint = (x, y) => pushPath2DPoint(tracked, x, y);
+        const endpoint = (x, y) => {
+            cx = x;
+            cy = y;
+            addPoint(cx, cy);
+        };
+
+        while (index < tokens.length) {
+            if (isCommand(tokens[index])) command = tokens[index++];
+            if (!command) break;
+            const relative = command === command.toLowerCase();
+            const upper = command.toUpperCase();
+
+            try {
+                if (upper === "Z") {
+                    endpoint(sx, sy);
+                    pushPath2DCommand(tracked, command);
+                    command = "";
+                    continue;
+                }
+                if (upper === "M" || upper === "L" || upper === "T") {
+                    if (index + 1 >= tokens.length || isCommand(tokens[index])) continue;
+                    let x = number(), y = number();
+                    if (relative) { x += cx; y += cy; }
+                    endpoint(x, y);
+                    if (upper === "M") { sx = cx; sy = cy; command = relative ? "l" : "L"; }
+                    pushPath2DCommand(tracked, upper);
+                    continue;
+                }
+                if (upper === "H") {
+                    if (index >= tokens.length || isCommand(tokens[index])) continue;
+                    let x = number();
+                    if (relative) x += cx;
+                    endpoint(x, cy);
+                    pushPath2DCommand(tracked, upper);
+                    continue;
+                }
+                if (upper === "V") {
+                    if (index >= tokens.length || isCommand(tokens[index])) continue;
+                    let y = number();
+                    if (relative) y += cy;
+                    endpoint(cx, y);
+                    pushPath2DCommand(tracked, upper);
+                    continue;
+                }
+                if (upper === "C") {
+                    if (index + 5 >= tokens.length || isCommand(tokens[index])) continue;
+                    let x1=number(), y1=number(), x2=number(), y2=number(), x=number(), y=number();
+                    if (relative) { x1+=cx; y1+=cy; x2+=cx; y2+=cy; x+=cx; y+=cy; }
+                    addPoint(x1,y1); addPoint(x2,y2); endpoint(x,y);
+                    pushPath2DCommand(tracked, upper);
+                    continue;
+                }
+                if (upper === "S" || upper === "Q") {
+                    if (index + 3 >= tokens.length || isCommand(tokens[index])) continue;
+                    let x1=number(), y1=number(), x=number(), y=number();
+                    if (relative) { x1+=cx; y1+=cy; x+=cx; y+=cy; }
+                    addPoint(x1,y1); endpoint(x,y);
+                    pushPath2DCommand(tracked, upper);
+                    continue;
+                }
+                if (upper === "A") {
+                    if (index + 6 >= tokens.length || isCommand(tokens[index])) continue;
+                    const rx=Math.abs(number()), ry=Math.abs(number());
+                    number(); number(); number();
+                    let x=number(), y=number();
+                    if (relative) { x+=cx; y+=cy; }
+                    addPoint(cx-rx, cy-ry); addPoint(cx+rx, cy+ry);
+                    addPoint(x-rx, y-ry); addPoint(x+rx, y+ry);
+                    endpoint(x,y);
+                    pushPath2DCommand(tracked, upper);
+                    continue;
+                }
+                // Unknown command: advance one token to avoid an infinite loop.
+                index += 1;
+            } catch (_) {
+                break;
+            }
+        }
+    };
 
     const resetTrackedPath = (ctx) => {
         pathStates.set(ctx, {
@@ -260,15 +386,34 @@ CANVAS_2D_HOOK_SCRIPT = r"""
         };
     };
 
-    const recordPathPaint = (ctx, kind) => {
+    const recordPathPaint = (ctx, kind, args = []) => {
         bump(kind);
         const item = canvasState(ctx.canvas);
-        const tracked = trackedPath(ctx);
-        const box = trackedPathBounds(tracked);
+        let tracked = trackedPath(ctx);
+        let box = trackedPathBounds(tracked);
+        let pathSource = "current-path";
+
+        const pathArg = args && args.length ? args[0] : null;
+        const pathTracked = pathArg ? path2DStates.get(pathArg) : null;
+        if (pathTracked && pathTracked.points.length) {
+            const matrix = ctx.getTransform();
+            const mapped = pathTracked.points.map((p) => point(matrix, p.x, p.y));
+            tracked = pathTracked;
+            box = trackedPathBounds({ points: mapped });
+            pathSource = "Path2D";
+            bump(kind + "Path2D");
+            rememberCall(kind + "Path2D", {
+                op_count: tracked.op_count,
+                command_count: tracked.commands.length,
+                context: ctx && ctx.constructor ? ctx.constructor.name : "unknown",
+            });
+        }
+
         if (!item || !box || tracked.op_count <= 0) return;
         const event = {
             ...eventMeta(item, kind),
             event_type: "path",
+            path_source: pathSource,
             x: box.x,
             y: box.y,
             width: box.width,
@@ -475,6 +620,117 @@ CANVAS_2D_HOOK_SCRIPT = r"""
         proto[name] = wrapped;
     };
 
+    const installPath2DHook = () => {
+        const NativePath2D = window.Path2D;
+        if (!NativePath2D || NativePath2D.__autobetCanvas2DWrapped) return;
+
+        const nativeProto = NativePath2D.prototype;
+        const wrapPathMethod = (name, tracker) => {
+            const original = nativeProto && nativeProto[name];
+            if (typeof original !== "function" || original.__autobetCanvas2DWrapped) return;
+            const wrapped = function(...args) {
+                const result = original.apply(this, args);
+                try { tracker(this, args); } catch (_) {}
+                return result;
+            };
+            try {
+                Object.defineProperty(wrapped, "__autobetCanvas2DWrapped", { value: true });
+            } catch (_) {
+                wrapped.__autobetCanvas2DWrapped = true;
+            }
+            nativeProto[name] = wrapped;
+        };
+
+        const WrappedPath2D = function(arg) {
+            const path = arguments.length ? new NativePath2D(arg) : new NativePath2D();
+            const tracked = path2DState(path);
+            try {
+                if (arg && path2DStates.has(arg)) {
+                    const source = path2DStates.get(arg);
+                    tracked.points.push(...source.points.map((p) => ({ x: p.x, y: p.y })));
+                    tracked.op_count = source.op_count;
+                    tracked.commands.push(...source.commands);
+                } else if (typeof arg === "string") {
+                    parseSvgPathIntoState(arg, tracked);
+                }
+            } catch (_) {}
+            return path;
+        };
+        WrappedPath2D.prototype = nativeProto;
+        try { Object.setPrototypeOf(WrappedPath2D, NativePath2D); } catch (_) {}
+        try {
+            Object.defineProperty(WrappedPath2D, "__autobetCanvas2DWrapped", { value: true });
+        } catch (_) {
+            WrappedPath2D.__autobetCanvas2DWrapped = true;
+        }
+
+        wrapPathMethod("moveTo", (path,args) => {
+            const s=path2DState(path); pushPath2DPoint(s,args[0],args[1]); pushPath2DCommand(s,"moveTo");
+        });
+        wrapPathMethod("lineTo", (path,args) => {
+            const s=path2DState(path); pushPath2DPoint(s,args[0],args[1]); pushPath2DCommand(s,"lineTo");
+        });
+        wrapPathMethod("bezierCurveTo", (path,args) => {
+            const s=path2DState(path);
+            pushPath2DPoint(s,args[0],args[1]); pushPath2DPoint(s,args[2],args[3]); pushPath2DPoint(s,args[4],args[5]);
+            pushPath2DCommand(s,"bezierCurveTo");
+        });
+        wrapPathMethod("quadraticCurveTo", (path,args) => {
+            const s=path2DState(path);
+            pushPath2DPoint(s,args[0],args[1]); pushPath2DPoint(s,args[2],args[3]);
+            pushPath2DCommand(s,"quadraticCurveTo");
+        });
+        wrapPathMethod("rect", (path,args) => {
+            const s=path2DState(path), x=Number(args[0])||0, y=Number(args[1])||0, w=Number(args[2])||0, h=Number(args[3])||0;
+            pushPath2DPoint(s,x,y); pushPath2DPoint(s,x+w,y); pushPath2DPoint(s,x+w,y+h); pushPath2DPoint(s,x,y+h);
+            pushPath2DCommand(s,"rect");
+        });
+        wrapPathMethod("roundRect", (path,args) => {
+            const s=path2DState(path), x=Number(args[0])||0, y=Number(args[1])||0, w=Number(args[2])||0, h=Number(args[3])||0;
+            pushPath2DPoint(s,x,y); pushPath2DPoint(s,x+w,y); pushPath2DPoint(s,x+w,y+h); pushPath2DPoint(s,x,y+h);
+            pushPath2DCommand(s,"roundRect");
+        });
+        wrapPathMethod("arc", (path,args) => {
+            const s=path2DState(path), x=Number(args[0])||0, y=Number(args[1])||0, r=Math.abs(Number(args[2])||0);
+            pushPath2DPoint(s,x-r,y-r); pushPath2DPoint(s,x+r,y+r); pushPath2DCommand(s,"arc");
+        });
+        wrapPathMethod("ellipse", (path,args) => {
+            const s=path2DState(path), x=Number(args[0])||0, y=Number(args[1])||0, rx=Math.abs(Number(args[2])||0), ry=Math.abs(Number(args[3])||0);
+            pushPath2DPoint(s,x-rx,y-ry); pushPath2DPoint(s,x+rx,y+ry); pushPath2DCommand(s,"ellipse");
+        });
+        wrapPathMethod("arcTo", (path,args) => {
+            const s=path2DState(path), r=Math.abs(Number(args[4])||0);
+            pushPath2DPoint(s,(Number(args[0])||0)-r,(Number(args[1])||0)-r);
+            pushPath2DPoint(s,(Number(args[0])||0)+r,(Number(args[1])||0)+r);
+            pushPath2DPoint(s,(Number(args[2])||0)-r,(Number(args[3])||0)-r);
+            pushPath2DPoint(s,(Number(args[2])||0)+r,(Number(args[3])||0)+r);
+            pushPath2DCommand(s,"arcTo");
+        });
+        wrapPathMethod("closePath", (path) => {
+            pushPath2DCommand(path2DState(path),"closePath");
+        });
+        wrapPathMethod("addPath", (path,args) => {
+            const s=path2DState(path);
+            const source=args[0] ? path2DStates.get(args[0]) : null;
+            if (!source) return;
+            const matrix=args[1] || {a:1,b:0,c:0,d:1,e:0,f:0};
+            for (const p of source.points) {
+                pushPath2DPoint(s,
+                    (Number(matrix.a ?? 1)*p.x)+(Number(matrix.c ?? 0)*p.y)+Number(matrix.e ?? 0),
+                    (Number(matrix.b ?? 0)*p.x)+(Number(matrix.d ?? 1)*p.y)+Number(matrix.f ?? 0)
+                );
+            }
+            s.op_count += source.op_count;
+            s.commands.push(...source.commands.slice(-64));
+            pushPath2DCommand(s,"addPath");
+        });
+
+        try { window.Path2D = WrappedPath2D; } catch (_) {}
+        state.diagnostics.path2d_hooked = window.Path2D === WrappedPath2D;
+    };
+
+    installPath2DHook();
+
     const patch2DPrototype = (proto) => {
         if (!proto) return;
 
@@ -638,12 +894,12 @@ CANVAS_2D_HOOK_SCRIPT = r"""
         });
 
         patchMethod(proto, "fill", function(original, args) {
-            try { recordPathPaint(this, "fill"); } catch (_) {}
+            try { recordPathPaint(this, "fill", args); } catch (_) {}
             return original.apply(this, args);
         });
 
         patchMethod(proto, "stroke", function(original, args) {
-            try { recordPathPaint(this, "stroke"); } catch (_) {}
+            try { recordPathPaint(this, "stroke", args); } catch (_) {}
             return original.apply(this, args);
         });
 
@@ -2170,7 +2426,7 @@ def _diagnostic_message(snapshot: dict[str, Any]) -> str:
             sample_parts.append(f"{method}({item})")
 
     return (
-        f"hook_v={snapshot.get('hook_version') or diagnostics.get('version') or 3}; "
+        f"hook_v={snapshot.get('hook_version') or diagnostics.get('version') or 4}; "
         f"status={snapshot.get('status')}; "
         f"contexts={contexts}; calls={calls}; "
         f"offscreen_available={diagnostics.get('offscreen_canvas_available')}; "
