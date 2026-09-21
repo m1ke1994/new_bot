@@ -685,6 +685,10 @@ const bookmakerLockEvents = new Set([
   'ACTIVE_BET_LOCK_MONITOR_ERROR',
   'ACTIVE_BET_GOAL_LOCK_CONTEXT',
   'ACTIVE_BET_GOAL_DURING_LOCK',
+  'DEMO_STEP_ARMING',
+  'DEMO_OPEN_CONFIRMATION_RESET',
+  'DEMO_SCORE_CHANGED_BEFORE_ACCEPTANCE',
+  'DEMO_BET_ACCEPTANCE_CONFIRMED',
 ])
 
 function isBookmakerLockLog(item) {
@@ -698,6 +702,7 @@ function isBookmakerUnlockLog(item) {
     event === 'DEMO_PREBET_CANVAS_UNLOCKED'
     || event === 'CANVAS_2D_LOCK_RELEASED'
     || event === 'ACTIVE_BET_LOCK_RELEASED'
+    || event === 'DEMO_BET_ACCEPTANCE_CONFIRMED'
   )
 }
 
@@ -727,6 +732,11 @@ function bookmakerLogLabel(item) {
   if (event === 'MAX_3_STEPS_LIMIT_REACHED') return 'MAX 3: ЛИМИТ ДОСТИГНУТ'
   if (event === 'MAX_3_STEPS_SWITCHING_MATCH') return 'MAX 3: СМЕНА МАТЧА'
   if (event === 'MAX_3_STEPS_CONTINUING_TO_END') return 'MAX 3: ВТОРОЙ МАТЧ ДО КОНЦА'
+  if (event === 'DEMO_STEP_ARMING') return 'ШАГ: ОЖИДАНИЕ ПРИНЯТИЯ'
+  if (event === 'DEMO_OPEN_CONFIRMATION') return 'РЫНОК СВОБОДЕН'
+  if (event === 'DEMO_OPEN_CONFIRMATION_RESET') return 'ПРИНЯТИЕ СБРОШЕНО'
+  if (event === 'DEMO_SCORE_CHANGED_BEFORE_ACCEPTANCE') return 'СЧЁТ ИЗМЕНИЛСЯ ДО ПРИНЯТИЯ'
+  if (event === 'DEMO_BET_ACCEPTANCE_CONFIRMED') return 'ПРИНЯТИЕ ПОДТВЕРЖДЕНО'
   return event
 }
 
