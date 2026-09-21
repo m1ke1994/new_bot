@@ -88,6 +88,16 @@ class OneMatchLeagueBrowser:
     async def open_match(self, _selected_match):
         return {"url": "https://example.test/match"}
 
+    async def wait_match_content_ready(self):
+        return {
+            "ready": True,
+            "attempts": 1,
+            "elapsed_ms": 0,
+            "score": "0:0",
+            "period": "",
+            "market_selector": "canvas.market-grid-canvas__canvas",
+        }
+
 
 class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
     def window(self) -> DemoBlockedWindow:
