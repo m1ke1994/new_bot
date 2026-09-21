@@ -723,6 +723,10 @@ function bookmakerLogLabel(item) {
   if (event === 'ACTIVE_BET_LOCK_MONITOR_ERROR') return 'ОШИБКА МОНИТОРА ЗАМКА'
   if (event === 'ACTIVE_BET_GOAL_LOCK_CONTEXT') return 'КОНТЕКСТ ГОЛА / ЗАМКА'
   if (event === 'ACTIVE_BET_GOAL_DURING_LOCK') return 'ГОЛ ПРИ БЛОКИРОВКЕ'
+  if (event === 'MATCH_CONSECUTIVE_LOSSES') return 'ПРОИГРЫШИ В МАТЧЕ'
+  if (event === 'MAX_3_STEPS_LIMIT_REACHED') return 'MAX 3: ЛИМИТ ДОСТИГНУТ'
+  if (event === 'MAX_3_STEPS_SWITCHING_MATCH') return 'MAX 3: СМЕНА МАТЧА'
+  if (event === 'MAX_3_STEPS_CONTINUING') return 'MAX 3: ПРОДОЛЖАЕМ ДОГОН'
   return event
 }
 
