@@ -348,7 +348,14 @@ class DemoRepository:
                     (str(DEMO_START_BUDGET), str(DEMO_START_BUDGET), "0.00", now),
                 )
                 db.execute(
-                    "INSERT INTO sequence_state VALUES (1, ?, 1, 'WAITING_FOR_MATCH', '0.00', '0.00', NULL, NULL, ?)",
+                    """
+                    INSERT INTO sequence_state(
+                        id, sequence_id, current_step, status,
+                        cumulative_pnl, cumulative_losses,
+                        current_match_id, selected_team,
+                        max_three_switched, updated_at
+                    ) VALUES (1, ?, 1, 'WAITING_FOR_MATCH', '0.00', '0.00', NULL, NULL, 0, ?)
+                    """,
                     (uuid4().hex, now),
                 )
 
