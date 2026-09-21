@@ -1,9 +1,12 @@
+import asyncio
 import re
 from typing import Any
 
 from playwright.async_api import Page
 
+from backend.app.browser.scoreboard import ScoreReadError, read_scoreboard
 from backend.app.match_filters import excluded_team_in_match
+from xbet_config import SELECTORS
 from matches import (
     exact_match_link_selector,
     find_league_container,
@@ -20,8 +23,30 @@ class MatchAlreadyStarted(RuntimeError):
     pass
 
 
+class MatchContentLoadTimeout(RuntimeError):
+    def __init__(self, message: str, *, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.details = details or {}
+
+
 MATCH_CARD_READ_ATTEMPTS = 4
 MATCH_CARD_RETRY_DELAY_MS = 75
+MATCH_CONTENT_READY_TIMEOUT_MS = 30_000
+MATCH_CONTENT_READY_POLL_MS = 250
+
+MATCH_CONTENT_MARKET_SELECTORS = tuple(
+    selector
+    for selector in (
+        '.game-panel__markets input.ui-search-default__input[placeholder="Поиск по рынкам"]',
+        '.market-grid-game-panel__markets input.ui-search-default__input[placeholder="Поиск по рынкам"]',
+        'input.ui-search-default__input[placeholder="Поиск по рынкам"]',
+        SELECTORS.market_group,
+        ".game-markets-group",
+        SELECTORS.canvas,
+        "canvas.market-grid-canvas__canvas",
+    )
+    if selector
+)
 
 
 class LeagueBrowser:
@@ -152,6 +177,73 @@ class LeagueBrowser:
                 f"Матч уже начался перед открытием; period={period or '<empty>'}"
             )
         return current
+
+    async def _visible_market_surface(self) -> str | None:
+        """Return a concrete rendered market surface, not just the match URL."""
+        for selector in MATCH_CONTENT_MARKET_SELECTORS:
+            try:
+                locator = self.page.locator(selector).first
+                if not await locator.count() or not await locator.is_visible():
+                    continue
+                box = await locator.bounding_box()
+                if box is not None and (
+                    float(box.get("width") or 0.0) < 20.0
+                    or float(box.get("height") or 0.0) < 12.0
+                ):
+                    continue
+                return selector
+            except Exception:
+                continue
+        return None
+
+    async def wait_match_content_ready(
+        self,
+        *,
+        timeout_ms: int = MATCH_CONTENT_READY_TIMEOUT_MS,
+    ) -> dict[str, Any]:
+        """Wait until both scoreboard and a real market surface are rendered."""
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        deadline = started + max(0, timeout_ms) / 1000.0
+        attempts = 0
+        last_score_error = ""
+        last_market_selector: str | None = None
+
+        while True:
+            attempts += 1
+            scoreboard = None
+            try:
+                scoreboard = await read_scoreboard(self.page)
+                last_score_error = ""
+            except ScoreReadError as error:
+                last_score_error = str(error)
+
+            last_market_selector = await self._visible_market_surface()
+            if scoreboard is not None and last_market_selector is not None:
+                return {
+                    "ready": True,
+                    "attempts": attempts,
+                    "elapsed_ms": int((loop.time() - started) * 1000),
+                    "score": scoreboard.score.text(),
+                    "period": scoreboard.period or "",
+                    "market_selector": last_market_selector,
+                }
+
+            if loop.time() >= deadline:
+                raise MatchContentLoadTimeout(
+                    "Страница матча открыта, но scoreboard/рынки не дорисовались "
+                    f"за {timeout_ms / 1000:.0f} секунд.",
+                    details={
+                        "url": self.page.url,
+                        "attempts": attempts,
+                        "scoreboard_ready": scoreboard is not None,
+                        "market_ready": last_market_selector is not None,
+                        "market_selector": last_market_selector,
+                        "last_score_error": last_score_error,
+                    },
+                )
+
+            await self.page.wait_for_timeout(MATCH_CONTENT_READY_POLL_MS)
 
     async def open_match(self, match: dict[str, Any]) -> dict[str, str]:
         match = await self.revalidate_upcoming(match)
