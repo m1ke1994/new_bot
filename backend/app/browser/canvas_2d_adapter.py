@@ -2369,12 +2369,18 @@ class Canvas2DCoefficientLocator:
         await canvas.click(position=self._position(box), **kwargs)
 
 
-async def ensure_canvas_2d_hook(page: Page) -> None:
+async def ensure_canvas_2d_hook(page: Page) -> bool:
+    """Install instrumentation only in the already-rendered current document.
+
+    Do not register it as an init script for future navigations: Path2D
+    interception is intentionally kept away from bookmaker application boot.
+    Returns True when this is the first market-reader installation for the page.
+    """
     page_id = id(page)
-    if page_id not in HOOKED_PAGE_IDS:
-        await page.add_init_script(CANVAS_2D_HOOK_SCRIPT)
-        HOOKED_PAGE_IDS.add(page_id)
+    first_install = page_id not in HOOKED_PAGE_IDS
     await page.evaluate(CANVAS_2D_HOOK_SCRIPT)
+    HOOKED_PAGE_IDS.add(page_id)
+    return first_install
 
 
 async def capture_canvas_2d_snapshot(page: Page) -> dict[str, Any]:
@@ -2544,7 +2550,16 @@ async def read_next_goal_odds(
 ) -> NextGoalOdds:
     del read_only
     next_goal_number = score1 + score2 + 1
-    await ensure_canvas_2d_hook(page)
+    hook_installed_now = await ensure_canvas_2d_hook(page)
+    if hook_installed_now:
+        await _log(
+            logger,
+            "CANVAS_2D_HOOK_INSTALLED_LATE",
+            (
+                "Canvas 2D hook v4 installed after match content readiness; "
+                "Path2D interception starts only for market reading."
+            ),
+        )
 
     try:
         await hybrid_market._prepare_market_search(
