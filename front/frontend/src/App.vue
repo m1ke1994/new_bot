@@ -683,6 +683,11 @@ function isBookmakerLockLog(item) {
   return bookmakerLockEvents.has(event)
 }
 
+function isBookmakerUnlockLog(item) {
+  const event = String(item?.event || '')
+  return event === 'DEMO_PREBET_CANVAS_UNLOCKED' || event === 'CANVAS_2D_LOCK_RELEASED'
+}
+
 function bookmakerLogLabel(item) {
   const event = String(item?.event || '')
   if (event === 'DEMO_PREBET_CANVAS_LOCKED') return 'БЛОКИРОВКА БК'
@@ -1667,7 +1672,13 @@ onBeforeUnmount(() => {
               <div
                 v-for="(item, index) in recentLogs"
                 :key="`${item.timestamp}-${index}`"
-                :class="['log-row', { 'log-row-bookmaker-lock': isBookmakerLockLog(item) }]"
+                :class="[
+                  'log-row',
+                  {
+                    'log-row-bookmaker-lock': isBookmakerLockLog(item) && !isBookmakerUnlockLog(item),
+                    'log-row-bookmaker-unlock': isBookmakerUnlockLog(item),
+                  },
+                ]"
               >
 
                 <time>{{ item.time }}</time>
