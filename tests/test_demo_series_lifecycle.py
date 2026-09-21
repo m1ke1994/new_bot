@@ -334,5 +334,114 @@ class DemoSeriesLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history[1]["next_goal_number"], 3)
 
 
+
+    async def test_first_goal_seen_at_live_start_is_settled_before_waiting_for_next_goal(self):
+        """A 0:0 accepted bet must settle if first LIVE snapshot is already 0:1."""
+        FakeLeagueBrowser.scan_calls = 0
+        FakeLeagueBrowser.open_match_calls = 0
+
+        prematch = ScoreboardSnapshot(
+            MATCH["team1"],
+            MATCH["team2"],
+            Score(0, 0),
+            "",
+            "",
+        )
+        live_after_first_goal = snapshot(0, 1)
+        live_after_second_goal = snapshot(1, 1)
+        first_odds = NextGoalOdds(
+            2.05,
+            1.80,
+            market="Следующий гол №1",
+            next_goal_number=1,
+            source="CANVAS_2D",
+        )
+        second_odds = NextGoalOdds(
+            1.95,
+            1.82,
+            market="Следующий гол №2",
+            next_goal_number=2,
+            source="CANVAS_2D",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = DemoRepository(Path(directory))
+            with (
+                patch("backend.app.demo.engine.REPOSITORY", repository),
+                patch("backend.app.demo.engine.LeagueBrowser", FakeLeagueBrowser),
+                patch(
+                    "backend.app.demo.engine.reset_canvas_2d_for_live_transition",
+                    AsyncMock(return_value=True),
+                ) as reset_canvas,
+                patch(
+                    "backend.app.demo.engine.read_next_goal_odds",
+                    AsyncMock(),
+                ) as remap_reader,
+            ):
+                engine = DemoEngine(FakeManager())
+                engine._mode = "DEMO"
+                engine._config = StrategyConfig.from_payload(
+                    {
+                        "initial_stake": 25,
+                        "progression_multiplier": 2,
+                        "max_steps": 2,
+                        "stakes": [25, 56],
+                        "blocked_events_switch_enabled": False,
+                        "min_initial_odds_enabled": False,
+                    }
+                )
+                engine._sleep_or_stop = AsyncMock()
+                engine._wait_for_initial_zero_score = AsyncMock(
+                    return_value=prematch
+                )
+                engine._wait_for_odds = AsyncMock(
+                    side_effect=[
+                        (prematch, first_odds),
+                        (live_after_first_goal, second_odds),
+                    ]
+                )
+                engine._wait_for_match_start = AsyncMock(
+                    return_value=live_after_first_goal
+                )
+                engine._read_fresh_score = AsyncMock(
+                    return_value=live_after_first_goal
+                )
+                engine._wait_for_goal = AsyncMock(
+                    return_value=(live_after_second_goal, Scorer.TEAM_1)
+                )
+
+                await engine._process_next_match(object())
+
+                history = await repository.history(mode="DEMO")
+                logs = await repository.logs()
+
+        self.assertEqual(
+            [item["result"] for item in history],
+            ["LOSE", "WIN"],
+        )
+        self.assertEqual(
+            [item["score_before"] for item in history],
+            ["0:0", "0:1"],
+        )
+        self.assertEqual(
+            [item["score_after"] for item in history],
+            ["0:1", "1:1"],
+        )
+        self.assertEqual(
+            [item["step"] for item in history],
+            [1, 2],
+        )
+        self.assertEqual(engine._wait_for_goal.await_count, 1)
+        self.assertEqual(
+            engine._wait_for_goal.await_args.args[2].score,
+            Score(0, 1),
+        )
+        reset_canvas.assert_awaited_once()
+        remap_reader.assert_not_awaited()
+        events = [item["event"] for item in logs]
+        self.assertIn("ACTIVE_BET_RESOLVED_DURING_LIVE_START", events)
+        self.assertNotIn("CANVAS_2D_LIVE_MONITOR_REMAP_STALE", events)
+
+
 if __name__ == "__main__":
     unittest.main()
