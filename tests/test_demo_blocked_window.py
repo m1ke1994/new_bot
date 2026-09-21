@@ -503,6 +503,9 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
                 engine._sleep_or_stop = AsyncMock()
+                engine._confirm_demo_bet_acceptance = AsyncMock(
+                    side_effect=lambda **kwargs: (True, kwargs["snapshot"])
+                )
                 engine.live_executor.prepare = AsyncMock()
                 engine._wait_for_initial_zero_score = AsyncMock(
                     return_value=scores["zero"]
@@ -634,6 +637,9 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
                 engine._sleep_or_stop = AsyncMock()
+                engine._confirm_demo_bet_acceptance = AsyncMock(
+                    side_effect=lambda **kwargs: (True, kwargs["snapshot"])
+                )
                 engine._wait_for_initial_zero_score = AsyncMock(return_value=zero)
                 engine._wait_for_odds = AsyncMock(
                     side_effect=[(zero, first_odds), (opponent_again, second_odds)]
@@ -755,6 +761,9 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
                 engine._sleep_or_stop = AsyncMock()
+                engine._confirm_demo_bet_acceptance = AsyncMock(
+                    side_effect=lambda **kwargs: (True, kwargs["snapshot"])
+                )
                 engine._wait_for_initial_zero_score = AsyncMock(return_value=zero)
                 engine._wait_for_odds = AsyncMock(
                     side_effect=[(zero, first_odds), (first_loss, second_odds)]
