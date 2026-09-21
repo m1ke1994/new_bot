@@ -188,6 +188,7 @@ class DemoEngine:
         self._live_attempt_counter = 0
         self._current_series: CurrentSeries | None = None
         self._active_demo_protection: DemoBlockedWindow | None = None
+        self._active_bet_lock_context: dict[str, Any] | None = None
 
     async def restore(self) -> None:
         """Hydrate the in-memory dashboard from durable storage after a restart."""
@@ -1261,15 +1262,20 @@ class DemoEngine:
                     "Изменение счёта нельзя оценивать без подтверждённой ACTIVE LIVE-ставки",
                 )
                 return
-            goal = await self._wait_for_goal(
-                browser,
-                selected_match,
-                snapshot,
-                active_odds=current_odds,
-                selected_side=selection.selected_side,
-                step=step,
-                bet_id=bet_id,
-            )
+            self._active_bet_lock_context = {
+                "active_odds": current_odds,
+                "selected_side": selection.selected_side,
+                "step": step,
+                "bet_id": bet_id,
+            }
+            try:
+                goal = await self._wait_for_goal(
+                    browser,
+                    selected_match,
+                    snapshot,
+                )
+            finally:
+                self._active_bet_lock_context = None
             if goal is None:
                 return
             new_snapshot, scorer = goal
@@ -3503,6 +3509,16 @@ class DemoEngine:
             "WAITING_FOR_NEXT_GOAL",
         )
         await REPOSITORY.log("WAITING_FOR_NEXT_GOAL", previous.score.text())
+
+        lock_context = self._active_bet_lock_context or {}
+        if active_odds is None:
+            active_odds = lock_context.get("active_odds")
+        if selected_side is None:
+            selected_side = lock_context.get("selected_side")
+        if step is None:
+            step = lock_context.get("step")
+        if bet_id is None:
+            bet_id = lock_context.get("bet_id")
 
         lock_monitor_enabled = bool(
             self._config.blocked_events_switch_enabled
