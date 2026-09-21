@@ -676,6 +676,13 @@ const bookmakerLockEvents = new Set([
   'CANVAS_2D_LOCK_RELEASED',
   'CANVAS_2D_LOCK_DETECTED',
   'CANVAS_2D_LOCKED_USING_LAST_ODDS',
+  'ACTIVE_BET_LOCK_MONITOR_STARTED',
+  'ACTIVE_BET_LOCK_ACTIVE',
+  'ACTIVE_BET_LOCK_RELEASED',
+  'ACTIVE_BET_LOCK_STATE_UNAVAILABLE',
+  'ACTIVE_BET_LOCK_MONITOR_ERROR',
+  'ACTIVE_BET_GOAL_LOCK_CONTEXT',
+  'ACTIVE_BET_GOAL_DURING_LOCK',
 ])
 
 function isBookmakerLockLog(item) {
@@ -685,7 +692,15 @@ function isBookmakerLockLog(item) {
 
 function isBookmakerUnlockLog(item) {
   const event = String(item?.event || '')
-  return event === 'DEMO_PREBET_CANVAS_UNLOCKED' || event === 'CANVAS_2D_LOCK_RELEASED'
+  return (
+    event === 'DEMO_PREBET_CANVAS_UNLOCKED'
+    || event === 'CANVAS_2D_LOCK_RELEASED'
+    || event === 'ACTIVE_BET_LOCK_RELEASED'
+  )
+}
+
+function isBookmakerGoalDuringLockLog(item) {
+  return String(item?.event || '') === 'ACTIVE_BET_GOAL_DURING_LOCK'
 }
 
 function bookmakerLogLabel(item) {
@@ -699,6 +714,13 @@ function bookmakerLogLabel(item) {
   if (event === 'CANVAS_2D_LOCK_RELEASED') return 'ЗАМОК СНЯТ CANVAS'
   if (event === 'CANVAS_2D_LOCK_DETECTED') return 'ЗАМОК ОБНАРУЖЕН'
   if (event === 'CANVAS_2D_LOCKED_USING_LAST_ODDS') return 'ЗАМОК CANVAS'
+  if (event === 'ACTIVE_BET_LOCK_MONITOR_STARTED') return 'МОНИТОР ЗАМКА АКТИВЕН'
+  if (event === 'ACTIVE_BET_LOCK_ACTIVE') return 'БЛОКИРОВКА ПРИ АКТИВНОЙ СТАВКЕ'
+  if (event === 'ACTIVE_BET_LOCK_RELEASED') return 'БЛОКИРОВКА СНЯТА'
+  if (event === 'ACTIVE_BET_LOCK_STATE_UNAVAILABLE') return 'ЗАМОК: НЕТ ДАННЫХ'
+  if (event === 'ACTIVE_BET_LOCK_MONITOR_ERROR') return 'ОШИБКА МОНИТОРА ЗАМКА'
+  if (event === 'ACTIVE_BET_GOAL_LOCK_CONTEXT') return 'КОНТЕКСТ ГОЛА / ЗАМКА'
+  if (event === 'ACTIVE_BET_GOAL_DURING_LOCK') return 'ГОЛ ПРИ БЛОКИРОВКЕ'
   return event
 }
 
@@ -1675,8 +1697,9 @@ onBeforeUnmount(() => {
                 :class="[
                   'log-row',
                   {
-                    'log-row-bookmaker-lock': isBookmakerLockLog(item) && !isBookmakerUnlockLog(item),
+                    'log-row-bookmaker-lock': isBookmakerLockLog(item) && !isBookmakerUnlockLog(item) && !isBookmakerGoalDuringLockLog(item),
                     'log-row-bookmaker-unlock': isBookmakerUnlockLog(item),
+                    'log-row-bookmaker-goal-lock': isBookmakerGoalDuringLockLog(item),
                   },
                 ]"
               >
