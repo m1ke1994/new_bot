@@ -731,6 +731,9 @@ class DemoEngine:
 
         sequence = await REPOSITORY.get_sequence()
         cycle_id = sequence["sequence_id"]
+        max_three_switch_used = bool(
+            int(sequence.get("max_three_switched") or 0)
+        )
         match_name = f"{selected_match['team1']} — {selected_match['team2']}"
         match_state = {
             "id": selected_match.get("match_id"),
@@ -763,12 +766,17 @@ class DemoEngine:
                 "NEXT_GOAL_BLOCKED_NEXT_MATCH_SELECTED",
                 f"[NEXT_GOAL] Next match selected: {match_name}",
             )
-            if self._config.max_three_steps_enabled:
+            if (
+                self._config.max_three_steps_enabled
+                and max_three_switch_used
+            ):
                 await REPOSITORY.log(
-                    "MAX_3_STEPS_CONTINUING",
+                    "MAX_3_STEPS_CONTINUING_TO_END",
                     (
-                        f"Новый матч: продолжаем догон с шага {step}; "
-                        f"stake={amount:g}; match={match_name}"
+                        f"Второй матч после лимита max 3: продолжаем догон "
+                        f"с шага {step} до WIN или конца ряда; "
+                        f"stake={amount:g}; match={match_name}; "
+                        "повторного переключения по max 3 не будет"
                     ),
                 )
         await self._status(DemoStatus.OPENING_MATCH, "Открываем выбранный матч", "OPEN_MATCH")
@@ -1450,6 +1458,7 @@ class DemoEngine:
             if (
                 result == "LOSE"
                 and self._config.max_three_steps_enabled
+                and not max_three_switch_used
                 and losses_in_current_match >= 3
                 and step < self._config.max_steps
             ):
@@ -2481,9 +2490,12 @@ class DemoEngine:
         step: int,
         losses_in_current_match: int,
     ) -> int:
-        """Move the same betting sequence to another match after 3 real losses."""
+        """Use the one allowed max-three switch for this betting sequence."""
         if step >= self._config.max_steps:
             raise ValueError("Cannot switch match after the final configured step")
+        current_sequence = await REPOSITORY.get_sequence()
+        if bool(int(current_sequence.get("max_three_switched") or 0)):
+            raise RuntimeError("MAX_3_STEPS_SWITCH_ALREADY_USED")
         next_step = step + 1
         match_id = next_goal_match_identity(selected_match)
         await REPOSITORY.add_blocked_match(cycle_id, match_id)
@@ -2492,6 +2504,7 @@ class DemoEngine:
             status="WAITING_FOR_MATCH",
             current_match_id=None,
             selected_team=None,
+            max_three_switched=1,
         )
         await REPOSITORY.log(
             "MAX_3_STEPS_LIMIT_REACHED",
@@ -2504,16 +2517,17 @@ class DemoEngine:
         await REPOSITORY.log(
             "MAX_3_STEPS_SWITCHING_MATCH",
             (
-                "Закрываем текущий матч после 3 проигрышей подряд; "
-                f"продолжаем серию на следующем матче с шага {next_step}"
+                "Закрываем первый матч после 3 проигрышей подряд; "
+                f"на следующем матче продолжаем с шага {next_step} "
+                "и идём догоном до WIN или конца ряда без повторного max 3"
             ),
         )
         await STATE.update(
             status=DemoStatus.WAITING_NEXT_MATCH.value,
             event="MAX_3_STEPS_SWITCHING_MATCH",
             message=(
-                "3 проигрыша подряд в матче. Переходим на следующий матч "
-                f"и продолжаем с шага {next_step}"
+                "3 проигрыша подряд в первом матче. Переходим на второй "
+                f"матч с шага {next_step}; дальше догон до WIN или конца ряда"
             ),
             sequence=sequence_after_switch,
             bet={
