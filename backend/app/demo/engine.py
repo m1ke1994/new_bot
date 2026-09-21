@@ -1261,7 +1261,15 @@ class DemoEngine:
                     "Изменение счёта нельзя оценивать без подтверждённой ACTIVE LIVE-ставки",
                 )
                 return
-            goal = await self._wait_for_goal(browser, selected_match, snapshot)
+            goal = await self._wait_for_goal(
+                browser,
+                selected_match,
+                snapshot,
+                active_odds=current_odds,
+                selected_side=selection.selected_side,
+                step=step,
+                bet_id=bet_id,
+            )
             if goal is None:
                 return
             new_snapshot, scorer = goal
@@ -3483,6 +3491,11 @@ class DemoEngine:
         browser: MatchBrowser,
         selected_match: dict[str, Any],
         previous: ScoreboardSnapshot,
+        *,
+        active_odds: Any | None = None,
+        selected_side: Scorer | None = None,
+        step: int | None = None,
+        bet_id: str | None = None,
     ) -> tuple[ScoreboardSnapshot, Scorer] | None:
         await self._status(
             DemoStatus.WAITING_FOR_GOAL,
@@ -3490,9 +3503,164 @@ class DemoEngine:
             "WAITING_FOR_NEXT_GOAL",
         )
         await REPOSITORY.log("WAITING_FOR_NEXT_GOAL", previous.score.text())
+
+        lock_monitor_enabled = bool(
+            self._config.blocked_events_switch_enabled
+            and active_odds is not None
+            and str(getattr(active_odds, "source", "") or "") == "CANVAS_2D"
+            and getattr(active_odds, "next_goal_number", None) is not None
+        )
+        target_goal = (
+            int(getattr(active_odds, "next_goal_number"))
+            if lock_monitor_enabled
+            else None
+        )
+        selected_side_number = (
+            1
+            if selected_side == Scorer.TEAM_1
+            else (2 if selected_side == Scorer.TEAM_2 else None)
+        )
+        active_lock = False
+        lock_started_at: float | None = None
+        lock_seen_since_bet = False
+        last_lock_release_at: float | None = None
+        last_lock_duration_ms: int | None = None
+        last_locked_sides: tuple[int, ...] = ()
+        lock_read_errors = 0
+
+        if lock_monitor_enabled:
+            await REPOSITORY.log(
+                "ACTIVE_BET_LOCK_MONITOR_STARTED",
+                (
+                    f"bet_id={bet_id}; step={step}; goal={target_goal}; "
+                    f"selected_side={selected_side_number}; score={previous.score.text()}; "
+                    "Canvas lock monitoring active while bet is waiting for goal"
+                ),
+            )
+
         read_errors = 0
         while not self._stop_event.is_set():
             await self._sleep_or_stop(CONFIG.score_poll_interval)
+
+            if lock_monitor_enabled and target_goal is not None:
+                try:
+                    lock_state = await read_next_goal_lock_state(
+                        browser.page,
+                        target_goal,
+                        logger=REPOSITORY.log,
+                    )
+                    if lock_state.get("available"):
+                        locked_sides = tuple(
+                            sorted(
+                                {
+                                    int(side)
+                                    for side in (
+                                        tuple(lock_state.get("locked_sides") or ())
+                                        + tuple(
+                                            lock_state.get("recent_locked_sides") or ()
+                                        )
+                                    )
+                                }
+                            )
+                        )
+                        now = time.monotonic()
+                        lock_now = bool(locked_sides)
+                        selected_locked = bool(
+                            selected_side_number is not None
+                            and selected_side_number in locked_sides
+                        )
+
+                        if lock_now and not active_lock:
+                            active_lock = True
+                            lock_seen_since_bet = True
+                            lock_started_at = now
+                            last_locked_sides = locked_sides
+                            marker_parts: list[str] = []
+                            for side in locked_sides:
+                                marker = (
+                                    (lock_state.get("markers") or {}).get(str(side))
+                                    or (
+                                        lock_state.get("recent_markers") or {}
+                                    ).get(str(side))
+                                    or {}
+                                )
+                                marker_parts.append(
+                                    f"side={side}:reason={marker.get('reason')}:"
+                                    f"canvas={marker.get('detected_canvas_id') or marker.get('canvas_id')}:"
+                                    f"seq={marker.get('seq')}"
+                                )
+                            await REPOSITORY.log(
+                                "ACTIVE_BET_LOCK_ACTIVE",
+                                (
+                                    f"bet_id={bet_id}; step={step}; goal={target_goal}; "
+                                    f"score={previous.score.text()}; "
+                                    f"locked_sides={list(locked_sides)}; "
+                                    f"selected_side={selected_side_number}; "
+                                    f"selected_side_locked={selected_locked}; "
+                                    f"checked_canvas_ids={list(lock_state.get('checked_canvas_ids') or ())}; "
+                                    f"markers=[{' | '.join(marker_parts)}]"
+                                ),
+                            )
+                            await STATE.update(
+                                market_locked=selected_locked,
+                                event="ACTIVE_BET_LOCK_ACTIVE",
+                                message=(
+                                    f"БК заблокировал рынок при активной ставке: "
+                                    f"шаг {step}, стороны {list(locked_sides)}"
+                                ),
+                            )
+                        elif not lock_now and active_lock:
+                            active_lock = False
+                            duration_ms = int(
+                                max(0.0, now - (lock_started_at or now)) * 1000
+                            )
+                            last_lock_duration_ms = duration_ms
+                            last_lock_release_at = now
+                            await REPOSITORY.log(
+                                "ACTIVE_BET_LOCK_RELEASED",
+                                (
+                                    f"bet_id={bet_id}; step={step}; goal={target_goal}; "
+                                    f"score={previous.score.text()}; "
+                                    f"previous_locked_sides={list(last_locked_sides)}; "
+                                    f"duration_ms={duration_ms}; "
+                                    f"released_sides={list(lock_state.get('released_sides') or ())}"
+                                ),
+                            )
+                            await STATE.update(
+                                market_locked=False,
+                                event="ACTIVE_BET_LOCK_RELEASED",
+                                message=(
+                                    f"Блокировка БК при активной ставке снята; "
+                                    f"длительность {duration_ms} мс"
+                                ),
+                            )
+                            lock_started_at = None
+                            last_locked_sides = ()
+                        elif lock_now:
+                            last_locked_sides = locked_sides
+
+                        lock_read_errors = 0
+                    else:
+                        lock_read_errors += 1
+                        if lock_read_errors == 1 or lock_read_errors % 20 == 0:
+                            await REPOSITORY.log(
+                                "ACTIVE_BET_LOCK_STATE_UNAVAILABLE",
+                                (
+                                    f"bet_id={bet_id}; step={step}; goal={target_goal}; "
+                                    f"reason={lock_state.get('reason')}"
+                                ),
+                            )
+                except Exception as error:
+                    lock_read_errors += 1
+                    if lock_read_errors == 1 or lock_read_errors % 20 == 0:
+                        await REPOSITORY.log(
+                            "ACTIVE_BET_LOCK_MONITOR_ERROR",
+                            (
+                                f"bet_id={bet_id}; step={step}; goal={target_goal}; "
+                                f"{type(error).__name__}: {error}"
+                            ),
+                        )
+
             try:
                 current = await browser.snapshot()
             except ScoreReadError as error:
@@ -3510,6 +3678,37 @@ class DemoEngine:
             scorer = detect_scorer(previous.score, current.score)
             if scorer == Scorer.UNKNOWN:
                 continue
+
+            if lock_monitor_enabled:
+                now = time.monotonic()
+                release_ago_ms = (
+                    int(max(0.0, now - last_lock_release_at) * 1000)
+                    if last_lock_release_at is not None
+                    else None
+                )
+                await REPOSITORY.log(
+                    "ACTIVE_BET_GOAL_LOCK_CONTEXT",
+                    (
+                        f"bet_id={bet_id}; step={step}; goal={target_goal}; "
+                        f"score={previous.score.text()}->{current.score.text()}; "
+                        f"lock_active_at_detection={active_lock}; "
+                        f"lock_seen_since_bet={lock_seen_since_bet}; "
+                        f"locked_sides={list(last_locked_sides)}; "
+                        f"last_lock_duration_ms={last_lock_duration_ms}; "
+                        f"last_lock_release_ms_ago={release_ago_ms}"
+                    ),
+                )
+                if active_lock:
+                    await REPOSITORY.log(
+                        "ACTIVE_BET_GOAL_DURING_LOCK",
+                        (
+                            f"bet_id={bet_id}; step={step}; goal={target_goal}; "
+                            f"score={previous.score.text()}->{current.score.text()}; "
+                            f"locked_sides={list(last_locked_sides)}; "
+                            "score changed while Canvas lock was still active"
+                        ),
+                    )
+
             await STATE.update(
                 status=DemoStatus.GOAL_DETECTED.value,
                 message=f"Счёт изменился: {previous.score.text()} → {current.score.text()}",
