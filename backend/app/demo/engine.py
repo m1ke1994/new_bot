@@ -352,6 +352,7 @@ class DemoEngine:
                 f"exclude_teams_enabled={str(self._config.exclude_teams_enabled).lower()} "
                 f"min_initial_odds_enabled={str(self._config.min_initial_odds_enabled).lower()} "
                 f"blocked_events_switch_enabled={str(self._config.blocked_events_switch_enabled).lower()} "
+                f"max_three_steps_enabled={str(self._config.max_three_steps_enabled).lower()} "
                 f"min_initial_odds={MIN_INITIAL_SELECTED_ODDS}",
             )
             await REPOSITORY.log(
@@ -584,7 +585,10 @@ class DemoEngine:
         sequence = await REPOSITORY.get_sequence()
         blocked_match_ids = (
             set(sequence.get("blocked_match_ids") or [])
-            if self._config.blocked_events_switch_enabled
+            if (
+                self._config.blocked_events_switch_enabled
+                or self._config.max_three_steps_enabled
+            )
             else set()
         )
         logged_blocked_skips: set[str] = set()
@@ -710,7 +714,7 @@ class DemoEngine:
             if blocked_match_ids:
                 await self._status(
                     DemoStatus.WAITING_NEXT_MATCH,
-                    "Блокировка — ждём следующий подходящий матч",
+                    "Текущий матч исключён из серии — ждём следующий подходящий матч",
                     "BLOCKED_WAITING_NEXT_MATCH",
                     sequence=sequence,
                 )
@@ -759,6 +763,14 @@ class DemoEngine:
                 "NEXT_GOAL_BLOCKED_NEXT_MATCH_SELECTED",
                 f"[NEXT_GOAL] Next match selected: {match_name}",
             )
+            if self._config.max_three_steps_enabled:
+                await REPOSITORY.log(
+                    "MAX_3_STEPS_CONTINUING",
+                    (
+                        f"Новый матч: продолжаем догон с шага {step}; "
+                        f"stake={amount:g}; match={match_name}"
+                    ),
+                )
         await self._status(DemoStatus.OPENING_MATCH, "Открываем выбранный матч", "OPEN_MATCH")
         try:
             opened = await league.open_match(selected_match)
@@ -906,6 +918,7 @@ class DemoEngine:
 
         won = False
         ambiguous_cycle = False
+        losses_in_current_match = 0
         start_step = int(sequence["current_step"])
         pending_demo_protection: DemoBlockedWindow | None = None
         self._current_series = CurrentSeries(
@@ -1315,6 +1328,7 @@ class DemoEngine:
                     bet={**record, "max_steps": self._config.max_steps},
                 )
                 snapshot = new_snapshot
+                losses_in_current_match = 0
                 if self._mode == "LIVE":
                     self._active_live_bet = None
                 if step < self._config.max_steps:
@@ -1406,6 +1420,16 @@ class DemoEngine:
                 bet={**record, "max_steps": self._config.max_steps},
             )
             snapshot = new_snapshot
+            if result == "LOSE":
+                losses_in_current_match += 1
+                await REPOSITORY.log(
+                    "MATCH_CONSECUTIVE_LOSSES",
+                    (
+                        f"match={match_name}; losses_in_match={losses_in_current_match}; "
+                        f"step={step}; max_three_steps_enabled="
+                        f"{str(self._config.max_three_steps_enabled).lower()}"
+                    ),
+                )
             if self._mode == "LIVE":
                 self._active_live_bet = None
             if result == "WIN":
@@ -1422,6 +1446,64 @@ class DemoEngine:
                 await STATE.update(stats=await REPOSITORY.stats(), sequence=await REPOSITORY.get_sequence())
                 self._current_series = None
                 break
+
+            if (
+                result == "LOSE"
+                and self._config.max_three_steps_enabled
+                and losses_in_current_match >= 3
+                and step < self._config.max_steps
+            ):
+                next_step = step + 1
+                match_id = next_goal_match_identity(selected_match)
+                await REPOSITORY.add_blocked_match(cycle_id, match_id)
+                sequence_after_switch = await REPOSITORY.save_sequence(
+                    current_step=next_step,
+                    status="WAITING_FOR_MATCH",
+                    current_match_id=None,
+                    selected_team=None,
+                    cumulative_pnl=str(
+                        (await REPOSITORY.get_sequence())["cumulative_pnl"]
+                    ),
+                )
+                await REPOSITORY.log(
+                    "MAX_3_STEPS_LIMIT_REACHED",
+                    (
+                        f"match={match_name}; losses_in_match={losses_in_current_match}; "
+                        f"last_lost_step={step}; next_step={next_step}; "
+                        f"next_stake={float(self._config.stakes[next_step - 1]):g}"
+                    ),
+                )
+                await REPOSITORY.log(
+                    "MAX_3_STEPS_SWITCHING_MATCH",
+                    (
+                        f"Закрываем текущий матч после 3 проигрышей подряд; "
+                        f"продолжаем серию на следующем матче с шага {next_step}"
+                    ),
+                )
+                await STATE.update(
+                    status=DemoStatus.WAITING_NEXT_MATCH.value,
+                    event="MAX_3_STEPS_SWITCHING_MATCH",
+                    message=(
+                        f"3 проигрыша подряд в матче. Переходим на следующий матч "
+                        f"и продолжаем с шага {next_step}"
+                    ),
+                    sequence=sequence_after_switch,
+                    bet={
+                        "step": next_step,
+                        "max_steps": self._config.max_steps,
+                        "amount": float(self._config.stakes[next_step - 1]),
+                        "market": "Следующий гол",
+                        "odds": None,
+                        "score_before": None,
+                        "next_goal_number": None,
+                        "status": "WAITING_NEXT_MATCH",
+                    },
+                )
+                self._active_demo_protection = None
+                self._pending_live_bet = None
+                self._current_series = None
+                return
+
             if step < self._config.max_steps:
                 next_step = step + 1
                 self._current_series.assert_identity(
