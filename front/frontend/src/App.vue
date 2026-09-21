@@ -737,6 +737,7 @@ function bookmakerLogLabel(item) {
   if (event === 'DEMO_OPEN_CONFIRMATION_RESET') return 'ПРИНЯТИЕ СБРОШЕНО'
   if (event === 'DEMO_SCORE_CHANGED_BEFORE_ACCEPTANCE') return 'СЧЁТ ИЗМЕНИЛСЯ ДО ПРИНЯТИЯ'
   if (event === 'DEMO_BET_ACCEPTANCE_CONFIRMED') return 'ПРИНЯТИЕ ПОДТВЕРЖДЕНО'
+  if (event === 'ACTIVE_BET_RESOLVED_DURING_LIVE_START') return 'ГОЛ УЖЕ ПРОИЗОШЁЛ ПРИ СТАРТЕ LIVE'
   return event
 }
 
