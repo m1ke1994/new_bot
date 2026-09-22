@@ -1306,7 +1306,7 @@ class DemoEngine:
                             "CANVAS_2D_WAITING_NATIVE_LIVE_BOOT",
                             (
                                 f"bet_id={bet_id}; goal={current_odds.next_goal_number}; "
-                                "Canvas hook cleared before UPCOMING -> LIVE"
+                                "Canvas caches cleared; SPA page kept alive for UPCOMING -> LIVE"
                             ),
                         )
                     except Exception as error:
@@ -1353,8 +1353,8 @@ class DemoEngine:
                     await REPOSITORY.log(
                         "CANVAS_2D_LIVE_BOOT_GRACE",
                         (
-                            f"score={snapshot.score.text()}; waiting 750 ms for native "
-                            "LIVE market hydration before reinstalling Canvas hook"
+                            f"score={snapshot.score.text()}; waiting 750 ms for LIVE "
+                            "market redraw before refreshing Canvas mapping"
                         ),
                     )
                     await self._sleep_or_stop(0.75)
@@ -1379,7 +1379,7 @@ class DemoEngine:
                                 (
                                     f"bet_id={bet_id}; goal={current_odds.next_goal_number}; "
                                     f"score={snapshot.score.text()}; "
-                                    "Canvas hook reinstalled after LIVE hydration; "
+                                    "Canvas market mapping refreshed after LIVE redraw; "
                                     "active-bet lock mapping refreshed"
                                 ),
                             )
