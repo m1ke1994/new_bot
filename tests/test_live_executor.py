@@ -20,6 +20,7 @@ from backend.app.live.executor import (
     EMPTY_COUPON_SELECTOR,
     COUPON_SECOND_TEAM_SELECTOR,
     CONFIRM_SELECTOR,
+    CONFIRM_FALLBACK_SELECTOR,
     COUPON_SELECTOR,
     LiveExecutor,
 )
@@ -96,6 +97,7 @@ class FakePage:
         self.account = FakeLocator(text="Основной (RUB)")
         self.amount = FakeLocator()
         self.confirm = FakeLocator(text="Сделать ставку")
+        self.confirm_fallback = FakeLocator(count=0, visible=False)
         self.balance = FakeLocator(text="1000.00")
         self.reloads = 0
         self.success = FakeLocator(count=0, visible=False)
@@ -144,6 +146,7 @@ class FakePage:
             ACCOUNT_SELECTOR: self.account,
             AMOUNT_SELECTOR: self.amount,
             CONFIRM_SELECTOR: self.confirm,
+            CONFIRM_FALLBACK_SELECTOR: self.confirm_fallback,
             BALANCE_SELECTOR: self.balance,
             BLOCKED_COUPON_SELECTOR: self.blocked_coupon,
             BLOCKED_TEXT_SELECTOR: self.blocked_text,
@@ -267,6 +270,60 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
                 "AWAITING_PLACEMENT_RESULT",
             ],
         )
+
+    async def test_confirm_accepts_uppercase_label(self):
+        executor, page, item = LiveExecutor(), FakePage(), decision()
+        page.confirm = FakeLocator(text="СДЕЛАТЬ СТАВКУ")
+
+        await executor.prepare(page, item)
+
+        self.assertEqual(page.confirm.clicks, 1)
+
+    async def test_confirm_waits_for_coupon_button_to_be_enabled(self):
+        executor, page, item = LiveExecutor(), FakePage(), decision()
+        page.confirm.disabled = True
+
+        async def enable():
+            await asyncio.sleep(0.02)
+            page.confirm.disabled = False
+
+        task = asyncio.create_task(enable())
+        await executor.prepare(page, item)
+        await task
+
+        self.assertEqual(page.confirm.clicks, 1)
+
+    async def test_confirm_not_found_records_coupon_button_diagnostics(self):
+        events = []
+
+        async def log(event, message):
+            events.append((event, message))
+
+        executor, page, item = LiveExecutor(log), FakePage(), decision()
+        page.confirm.present = 0
+        page.confirm_fallback = FakeLocator(text="Проверить ставку")
+
+        with patch("backend.app.live.executor.CONFIRM_WAIT_SECONDS", 0.02):
+            with self.assertRaises(LivePreparationError) as raised:
+                await executor.prepare(page, item)
+
+        self.assertEqual(raised.exception.status, "LIVE_CONFIRM_BUTTON_NOT_FOUND")
+        self.assertEqual(page.confirm.clicks, 0)
+        self.assertTrue(any(
+            event == "LIVE_CONFIRM_BUTTON_DIAGNOSTICS" and "Проверить ставку" in message
+            for event, message in events
+        ))
+
+    async def test_disabled_confirm_never_submits(self):
+        executor, page, item = LiveExecutor(), FakePage(), decision()
+        page.confirm.disabled = True
+
+        with patch("backend.app.live.executor.CONFIRM_WAIT_SECONDS", 0.02):
+            with self.assertRaises(LivePreparationError) as raised:
+                await executor.prepare(page, item)
+
+        self.assertEqual(raised.exception.status, "LIVE_CONFIRM_BUTTON_NOT_READY")
+        self.assertEqual(page.confirm.clicks, 0)
 
     async def test_auto_click_balance_debit_activates_bet(self):
         executor, page, item = LiveExecutor(), FakePage(), decision(amount=42)

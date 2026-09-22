@@ -29,13 +29,19 @@ CONFIRM_BUTTON_CLASS_SELECTOR = (
     "button.ui-button.ui-button--size-m.ui-button--theme-accent"
     ".ui-button--block.ui-button--uppercase.ui-button--rounded"
 )
+CONFIRM_FALLBACK_SELECTOR = (
+    ".coupon-app .coupon-main-tab__make-bet .coupon-buttons button, "
+    ".coupon-app .coupon-buttons button"
+)
 CONFIRM_SELECTOR = (
+    f"{CONFIRM_FALLBACK_SELECTOR}, "
     f"{CONFIRM_BUTTON_CLASS_SELECTOR}, "
     f".coupon-buttons {CONFIRM_BUTTON_CLASS_SELECTOR}, "
     f".coupon-app {CONFIRM_BUTTON_CLASS_SELECTOR}, "
     ".quick-coupon-main button.quick-coupon-put-bet-button"
 )
 CONFIRM_TEXT = "Сделать ставку"
+CONFIRM_WAIT_SECONDS = 5.0
 BALANCE_SELECTOR = '[data-gtm="account-balance-value-desktop"]'
 BLOCKED_COUPON_SELECTOR = (
     ".coupon-bet__lock, "
@@ -161,11 +167,52 @@ class LiveExecutor:
                 if not await candidate.is_visible():
                     continue
                 text = " ".join((await candidate.inner_text()).split())
-                if CONFIRM_TEXT in text:
+                if text.casefold() == CONFIRM_TEXT.casefold():
                     return candidate
         except Exception:
             return None
         return None
+
+    async def _wait_for_ready_confirm_button(self, page: Any) -> tuple[Any | None, str]:
+        """Allow the coupon to re-render and enable its button after stake entry."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + CONFIRM_WAIT_SECONDS
+        state = "NOT_FOUND"
+        while True:
+            if await self.blocked_event_exists(page):
+                return None, "BLOCKED"
+            candidate = await self._visible_confirm_button(page)
+            if candidate is not None:
+                if not await candidate.is_disabled():
+                    return candidate, "READY"
+                state = "DISABLED"
+            if loop.time() >= deadline:
+                return None, state
+            await asyncio.sleep(0.10)
+
+    async def _log_confirm_diagnostics(self, page: Any, attempt_id: str, state: str) -> None:
+        try:
+            buttons = page.locator(CONFIRM_FALLBACK_SELECTOR)
+            count = await buttons.count()
+            details = []
+            for index in range(min(count, 4)):
+                button = buttons.nth(index)
+                details.append(
+                    {
+                        "text": " ".join((await button.inner_text()).split()),
+                        "visible": await button.is_visible(),
+                        "disabled": await button.is_disabled(),
+                    }
+                )
+            await self._log(
+                "LIVE_CONFIRM_BUTTON_DIAGNOSTICS",
+                f"attempt={attempt_id}; state={state}; coupon_buttons={count}; samples={details}",
+            )
+        except Exception as error:
+            await self._log(
+                "LIVE_CONFIRM_BUTTON_DIAGNOSTICS",
+                f"attempt={attempt_id}; state={state}; inspection={type(error).__name__}",
+            )
 
     async def _wait_for_coupon_surface(
         self,
@@ -454,15 +501,35 @@ class LiveExecutor:
                     ),
                 )
 
-                confirm = await self._visible_confirm_button(page)
+                confirm, confirm_state = await self._wait_for_ready_confirm_button(page)
+                if confirm_state == "BLOCKED":
+                    await self._log(
+                        "LIVE_BLOCKED_EVENT_DETECTED",
+                        f"attempt={decision.attempt_id}; phase=before_confirm_click",
+                    )
+                    await self._publish(
+                        decision.attempt_id,
+                        LiveStatus.AWAITING_PLACEMENT_RESULT,
+                        "Coupon заблокирован; ставка не отправляется",
+                        publish,
+                    )
+                    return
                 if confirm is None:
+                    await self._log_confirm_diagnostics(page, decision.attempt_id, confirm_state)
+                    if confirm_state == "DISABLED":
+                        raise LivePreparationError(
+                            "LIVE_CONFIRM_BUTTON_NOT_READY",
+                            "Кнопка «Сделать ставку» осталась недоступна.",
+                        )
                     raise LivePreparationError(
                         "LIVE_CONFIRM_BUTTON_NOT_FOUND",
-                        "Кнопка «Сделать ставку» не найдена.",
+                        "Кнопка «Сделать ставку» не найдена в купоне.",
                     )
-                if await confirm.is_disabled() or CONFIRM_TEXT not in (await confirm.inner_text()):
+                # Recheck the selection and stake after waiting for site updates.
+                await self._verify_coupon_selection(page, decision)
+                if _parse_amount(await amount_input.input_value()) != Decimal(str(decision.amount)):
                     raise LivePreparationError(
-                        "LIVE_CONFIRM_BUTTON_NOT_READY", "Кнопка «Сделать ставку» недоступна."
+                        "LIVE_AMOUNT_VERIFICATION_FAILED", "Сумма ставки изменилась перед подтверждением."
                     )
                 handle = await confirm.element_handle()
                 if handle is None:
