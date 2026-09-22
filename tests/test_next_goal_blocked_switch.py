@@ -371,7 +371,7 @@ class NextGoalBlockedSwitchTests(unittest.IsolatedAsyncioTestCase):
                 logs = await repository.logs()
 
         self.assertIsInstance(result, BlockedMatchSwitch)
-        self.assertEqual(history[0]["result"], "MISSED_SELECTED_TEAM_GOAL")
+        self.assertEqual(history[0]["result"], "BLOCKED_NOT_PLACED")
         self.assertTrue(history[0]["settled"])
         self.assertEqual(history[0]["amount"], 96)
         self.assertEqual(history[0]["budget_change"], 0)
@@ -383,7 +383,7 @@ class NextGoalBlockedSwitchTests(unittest.IsolatedAsyncioTestCase):
         engine.live_executor.prepare.assert_awaited_once()
         engine._wait_for_odds.assert_not_awaited()
         self.assertIn(
-            "NEXT_GOAL_BLOCKED_SAME_MATCH_RETRY_DISABLED",
+            "LIVE_BLOCKED_MATCH_SWITCH",
             [item["event"] for item in logs],
         )
 
@@ -404,30 +404,19 @@ class NextGoalBlockedSwitchTests(unittest.IsolatedAsyncioTestCase):
             selected_team_scored(Score(2, 0), Score(3, 1), Scorer.TEAM_2)
         )
 
-    async def _run_monitored_same_match_retry(
+    async def _run_confirmed_blocked_match_switch(
         self,
-        score_after_block: ScoreboardSnapshot,
+        latest_score: ScoreboardSnapshot,
     ):
         selected_match = MATCHES[0]
         before = snapshot(selected_match, 2, 0)
         old_team2_locator = object()
-        fresh_team2_locator = object()
         initial_odds = NextGoalOdds(
             1.80,
             2.03,
             next_goal_number=3,
             team1_locator=object(),
             team2_locator=old_team2_locator,
-        )
-        fresh_goal_number = (
-            score_after_block.score.team1 + score_after_block.score.team2 + 1
-        )
-        fresh_odds = NextGoalOdds(
-            1.81,
-            2.04,
-            next_goal_number=fresh_goal_number,
-            team1_locator=object(),
-            team2_locator=fresh_team2_locator,
         )
         selection = TeamSelection(
             selected_match["team2"],
@@ -439,7 +428,7 @@ class NextGoalBlockedSwitchTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             repository = DemoRepository(Path(directory))
-            await repository.save_sequence(
+            sequence = await repository.save_sequence(
                 current_step=2,
                 status="ACTIVE",
                 current_match_id="A",
@@ -468,75 +457,65 @@ class NextGoalBlockedSwitchTests(unittest.IsolatedAsyncioTestCase):
                 engine.live_executor.manual_click_seen = AsyncMock(return_value=True)
                 engine.live_executor.invalidate = AsyncMock()
                 engine.live_executor.remove_blocked_coupon = AsyncMock(return_value=True)
-                engine.live_executor.market_was_selected = Mock(return_value=True)
-                engine._publish_pending_bet = AsyncMock()
-                engine._wait_for_odds = AsyncMock(
-                    return_value=(score_after_block, fresh_odds)
-                )
+                engine._wait_for_odds = AsyncMock()
                 engine._wait_for_live_confirmation_or_score = AsyncMock(
-                    side_effect=[
-                        (
-                            PlacementObservation(False, BLOCKED_EVENT_SIGNAL, True),
-                            before,
-                        ),
-                        (PlacementObservation(True, "accepted"), score_after_block),
-                    ]
+                    return_value=(
+                        PlacementObservation(False, BLOCKED_EVENT_SIGNAL, True),
+                        latest_score,
+                    )
                 )
-                engine._read_fresh_score = AsyncMock(
-                    side_effect=[
-                        before,
-                        before,
-                        score_after_block,
-                        score_after_block,
-                        score_after_block,
-                    ]
-                )
+                engine._read_fresh_score = AsyncMock(return_value=before)
 
                 result = await engine._prepare_live_until_placed(
                     browser=object(),
                     selected_match=selected_match,
                     selection=selection,
                     match_name="A TEAM 1 — A TEAM 2",
-                    cycle_id=(await repository.get_sequence())["sequence_id"],
+                    cycle_id=sequence["sequence_id"],
                     step=2,
                     amount=45,
                     snapshot=before,
                     current_odds=initial_odds,
                     record={"mode": "LIVE"},
                 )
-                sequence = await repository.get_sequence()
+                final_sequence = await repository.get_sequence()
                 history = await repository.history(mode="LIVE")
                 logs = await repository.logs()
 
         decisions = [call.args[1] for call in engine.live_executor.prepare.await_args_list]
-        self.assertNotIsInstance(result, BlockedMatchSwitch)
-        self.assertEqual(len(decisions), 2)
-        self.assertEqual([item.strategy_step for item in decisions], [2, 2])
-        self.assertEqual([item.amount for item in decisions], [45, 45])
-        self.assertEqual([item.team for item in decisions], [selected_match["team2"]] * 2)
-        self.assertEqual([item.goal_number for item in decisions], [3, fresh_goal_number])
+        self.assertIsInstance(result, BlockedMatchSwitch)
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0].strategy_step, 2)
+        self.assertEqual(decisions[0].amount, 45)
+        self.assertEqual(decisions[0].team, selected_match["team2"])
         self.assertIs(decisions[0].coefficient_locator, old_team2_locator)
-        self.assertIs(decisions[1].coefficient_locator, fresh_team2_locator)
-        self.assertEqual(sequence["current_step"], 2)
-        self.assertEqual(sequence["blocked_match_ids"], [])
+        self.assertEqual(final_sequence["current_step"], 2)
+        self.assertEqual(final_sequence["status"], "WAITING_NEXT_MATCH")
+        self.assertIsNone(final_sequence["selected_team"])
+        self.assertIn("A", final_sequence["blocked_match_ids"])
         self.assertEqual(len(history), 1)
-        self.assertEqual(history[0]["result"], "ACTIVE")
-        self.assertEqual(history[0]["score_before"], score_after_block.score.text())
+        self.assertEqual(history[0]["result"], "BLOCKED_NOT_PLACED")
+        engine._wait_for_odds.assert_not_awaited()
         return logs
 
-    async def test_opponent_goal_keeps_match_and_retries_with_fresh_market(self):
-        logs = await self._run_monitored_same_match_retry(snapshot(MATCHES[0], 3, 0))
-
+    async def test_opponent_goal_during_confirmed_coupon_lock_switches_match(self):
+        logs = await self._run_confirmed_blocked_match_switch(
+            snapshot(MATCHES[0], 3, 0)
+        )
         self.assertIn(
-            "NEXT_GOAL_BLOCKED_OPPONENT_SCORED",
+            "LIVE_BLOCKED_MATCH_SWITCH",
             [item["event"] for item in logs],
         )
 
-    async def test_unchanged_score_keeps_match_and_retries_with_fresh_locator(self):
-        await self._run_monitored_same_match_retry(snapshot(MATCHES[0], 2, 0))
+    async def test_unchanged_score_during_confirmed_coupon_lock_switches_match(self):
+        await self._run_confirmed_blocked_match_switch(
+            snapshot(MATCHES[0], 2, 0)
+        )
 
-    async def test_multiple_opponent_goals_keep_match_and_update_baseline(self):
-        await self._run_monitored_same_match_retry(snapshot(MATCHES[0], 4, 0))
+    async def test_multiple_goals_during_confirmed_coupon_lock_still_switch_match(self):
+        await self._run_confirmed_blocked_match_switch(
+            snapshot(MATCHES[0], 4, 0)
+        )
 
     async def test_accepted_confirmation_has_priority_over_later_selected_goal(self):
         selected_match = MATCHES[0]
