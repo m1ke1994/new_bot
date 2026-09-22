@@ -201,6 +201,20 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
         page.blocked_text.text = "  Заблокированное   событие  "
         self.assertTrue(await executor.blocked_event_exists(page))
 
+    async def test_current_coupon_dom_does_not_require_legacy_root(self):
+        executor, page, item = LiveExecutor(), FakePage(), decision()
+        page.coupon.present = 0
+        page.coupon.visible = False
+
+        await executor.prepare(page, item)
+
+        self.assertEqual(page.amount.fills, ["", "42"])
+        self.assertEqual(page.confirm.clicks, 1)
+        self.assertEqual(
+            executor.state(item.attempt_id),
+            LiveStatus.AWAITING_PLACEMENT_RESULT,
+        )
+
     async def test_prepares_coupon_and_uses_existing_auto_confirm_mode(self):
         events = []
 
