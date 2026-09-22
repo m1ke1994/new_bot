@@ -342,14 +342,17 @@ class NextGoalBlockedSwitchTests(unittest.IsolatedAsyncioTestCase):
                 engine.live_executor.manual_click_seen = AsyncMock(return_value=True)
                 engine.live_executor.invalidate = AsyncMock()
                 engine.live_executor.remove_blocked_coupon = AsyncMock(return_value=True)
+                engine.live_executor.blocked_event_exists = AsyncMock(
+                    return_value=False
+                )
                 engine._wait_for_live_confirmation_or_score = AsyncMock(
                     return_value=(
                         PlacementObservation(False, BLOCKED_EVENT_SIGNAL, True),
-                        current,
+                        missed,
                     )
                 )
                 engine._read_fresh_score = AsyncMock(
-                    side_effect=[current, current, missed]
+                    side_effect=[current, missed]
                 )
                 engine._wait_for_odds = AsyncMock()
 
@@ -371,7 +374,7 @@ class NextGoalBlockedSwitchTests(unittest.IsolatedAsyncioTestCase):
                 logs = await repository.logs()
 
         self.assertIsInstance(result, BlockedMatchSwitch)
-        self.assertEqual(history[0]["result"], "BLOCKED_NOT_PLACED")
+        self.assertEqual(history[0]["result"], "MISSED_SELECTED_TEAM_GOAL")
         self.assertTrue(history[0]["settled"])
         self.assertEqual(history[0]["amount"], 96)
         self.assertEqual(history[0]["budget_change"], 0)
@@ -383,7 +386,7 @@ class NextGoalBlockedSwitchTests(unittest.IsolatedAsyncioTestCase):
         engine.live_executor.prepare.assert_awaited_once()
         engine._wait_for_odds.assert_not_awaited()
         self.assertIn(
-            "LIVE_BLOCKED_MATCH_SWITCH",
+            "NEXT_GOAL_BLOCKED_SELECTED_TEAM_SCORED",
             [item["event"] for item in logs],
         )
 
@@ -404,19 +407,32 @@ class NextGoalBlockedSwitchTests(unittest.IsolatedAsyncioTestCase):
             selected_team_scored(Score(2, 0), Score(3, 1), Scorer.TEAM_2)
         )
 
-    async def _run_confirmed_blocked_match_switch(
+    async def _run_confirmed_blocked_recovery(
         self,
         latest_score: ScoreboardSnapshot,
+        *,
+        selected_team_scored: bool,
     ):
         selected_match = MATCHES[0]
         before = snapshot(selected_match, 2, 0)
         old_team2_locator = object()
+        fresh_team2_locator = object()
         initial_odds = NextGoalOdds(
             1.80,
             2.03,
             next_goal_number=3,
             team1_locator=object(),
             team2_locator=old_team2_locator,
+        )
+        fresh_goal_number = (
+            latest_score.score.team1 + latest_score.score.team2 + 1
+        )
+        fresh_odds = NextGoalOdds(
+            1.81,
+            2.04,
+            next_goal_number=fresh_goal_number,
+            team1_locator=object(),
+            team2_locator=fresh_team2_locator,
         )
         selection = TeamSelection(
             selected_match["team2"],
@@ -457,14 +473,46 @@ class NextGoalBlockedSwitchTests(unittest.IsolatedAsyncioTestCase):
                 engine.live_executor.manual_click_seen = AsyncMock(return_value=True)
                 engine.live_executor.invalidate = AsyncMock()
                 engine.live_executor.remove_blocked_coupon = AsyncMock(return_value=True)
-                engine._wait_for_odds = AsyncMock()
-                engine._wait_for_live_confirmation_or_score = AsyncMock(
-                    return_value=(
-                        PlacementObservation(False, BLOCKED_EVENT_SIGNAL, True),
-                        latest_score,
-                    )
+                engine.live_executor.blocked_event_exists = AsyncMock(
+                    return_value=False
                 )
-                engine._read_fresh_score = AsyncMock(return_value=before)
+                engine._publish_pending_bet = AsyncMock()
+                engine._read_fresh_score = AsyncMock(
+                    side_effect=[
+                        before,
+                        latest_score,
+                        latest_score,
+                        latest_score,
+                    ]
+                )
+                engine._wait_for_odds = AsyncMock(
+                    return_value=(latest_score, fresh_odds)
+                )
+
+                if selected_team_scored:
+                    engine._wait_for_live_confirmation_or_score = AsyncMock(
+                        return_value=(
+                            PlacementObservation(False, BLOCKED_EVENT_SIGNAL, True),
+                            latest_score,
+                        )
+                    )
+                else:
+                    engine._wait_for_live_confirmation_or_score = AsyncMock(
+                        side_effect=[
+                            (
+                                PlacementObservation(
+                                    False,
+                                    BLOCKED_EVENT_SIGNAL,
+                                    True,
+                                ),
+                                latest_score,
+                            ),
+                            (
+                                PlacementObservation(True, "accepted"),
+                                latest_score,
+                            ),
+                        ]
+                    )
 
                 result = await engine._prepare_live_until_placed(
                     browser=object(),
@@ -482,39 +530,77 @@ class NextGoalBlockedSwitchTests(unittest.IsolatedAsyncioTestCase):
                 history = await repository.history(mode="LIVE")
                 logs = await repository.logs()
 
-        decisions = [call.args[1] for call in engine.live_executor.prepare.await_args_list]
-        self.assertIsInstance(result, BlockedMatchSwitch)
-        self.assertEqual(len(decisions), 1)
-        self.assertEqual(decisions[0].strategy_step, 2)
-        self.assertEqual(decisions[0].amount, 45)
-        self.assertEqual(decisions[0].team, selected_match["team2"])
-        self.assertIs(decisions[0].coefficient_locator, old_team2_locator)
-        self.assertEqual(final_sequence["current_step"], 2)
-        self.assertEqual(final_sequence["status"], "WAITING_NEXT_MATCH")
-        self.assertIsNone(final_sequence["selected_team"])
-        self.assertIn("A", final_sequence["blocked_match_ids"])
-        self.assertEqual(len(history), 1)
-        self.assertEqual(history[0]["result"], "BLOCKED_NOT_PLACED")
-        engine._wait_for_odds.assert_not_awaited()
+        decisions = [
+            call.args[1]
+            for call in engine.live_executor.prepare.await_args_list
+        ]
+
+        if selected_team_scored:
+            self.assertIsInstance(result, BlockedMatchSwitch)
+            self.assertEqual(len(decisions), 1)
+            self.assertEqual(final_sequence["current_step"], 2)
+            self.assertEqual(final_sequence["status"], "WAITING_NEXT_MATCH")
+            self.assertIsNone(final_sequence["selected_team"])
+            self.assertIn("A", final_sequence["blocked_match_ids"])
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["result"], "MISSED_SELECTED_TEAM_GOAL")
+            engine._wait_for_odds.assert_not_awaited()
+        else:
+            self.assertNotIsInstance(result, BlockedMatchSwitch)
+            self.assertIsNotNone(result)
+            self.assertEqual(len(decisions), 2)
+            self.assertEqual([item.strategy_step for item in decisions], [2, 2])
+            self.assertEqual([item.amount for item in decisions], [45, 45])
+            self.assertEqual(
+                [item.team for item in decisions],
+                [selected_match["team2"], selected_match["team2"]],
+            )
+            self.assertEqual(
+                [item.goal_number for item in decisions],
+                [3, fresh_goal_number],
+            )
+            self.assertIs(decisions[0].coefficient_locator, old_team2_locator)
+            self.assertIs(decisions[1].coefficient_locator, fresh_team2_locator)
+            self.assertEqual(final_sequence["current_step"], 2)
+            self.assertEqual(final_sequence["selected_team"], selected_match["team2"])
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["result"], "ACTIVE")
+            self.assertEqual(history[0]["score_before"], latest_score.score.text())
+            self.assertIn(
+                "LIVE_BLOCKED_RETRYING_SAME_MATCH",
+                [item["event"] for item in logs],
+            )
+
         return logs
 
-    async def test_opponent_goal_during_confirmed_coupon_lock_switches_match(self):
-        logs = await self._run_confirmed_blocked_match_switch(
-            snapshot(MATCHES[0], 3, 0)
+    async def test_opponent_goal_during_confirmed_coupon_lock_retries_same_match(self):
+        logs = await self._run_confirmed_blocked_recovery(
+            snapshot(MATCHES[0], 3, 0),
+            selected_team_scored=False,
         )
         self.assertIn(
-            "LIVE_BLOCKED_MATCH_SWITCH",
+            "NEXT_GOAL_BLOCKED_OPPONENT_SCORED",
             [item["event"] for item in logs],
         )
 
-    async def test_unchanged_score_during_confirmed_coupon_lock_switches_match(self):
-        await self._run_confirmed_blocked_match_switch(
-            snapshot(MATCHES[0], 2, 0)
+    async def test_unchanged_score_during_confirmed_coupon_lock_retries_same_match(self):
+        logs = await self._run_confirmed_blocked_recovery(
+            snapshot(MATCHES[0], 2, 0),
+            selected_team_scored=False,
+        )
+        self.assertIn(
+            "NEXT_GOAL_BLOCKED_SCORE_UNCHANGED",
+            [item["event"] for item in logs],
         )
 
-    async def test_multiple_goals_during_confirmed_coupon_lock_still_switch_match(self):
-        await self._run_confirmed_blocked_match_switch(
-            snapshot(MATCHES[0], 4, 0)
+    async def test_selected_team_goal_during_confirmed_coupon_lock_switches_match(self):
+        logs = await self._run_confirmed_blocked_recovery(
+            snapshot(MATCHES[0], 2, 1),
+            selected_team_scored=True,
+        )
+        self.assertIn(
+            "NEXT_GOAL_BLOCKED_SELECTED_TEAM_SCORED",
+            [item["event"] for item in logs],
         )
 
     async def test_accepted_confirmation_has_priority_over_later_selected_goal(self):
