@@ -3267,6 +3267,76 @@ class DemoEngine:
         )
         return BlockedMatchSwitch(match_id=match_id, step=step, amount=amount)
 
+    async def _finish_live_blocked_coupon_switch(
+        self,
+        *,
+        attempt_record: dict[str, Any],
+        selected_match: dict[str, Any],
+        cycle_id: str,
+        step: int,
+        amount: float,
+        snapshot: ScoreboardSnapshot,
+    ) -> BlockedMatchSwitch:
+        """A confirmed locked LIVE coupon always moves the same step to next match."""
+        match_id = next_goal_match_identity(selected_match)
+        blocked_record = await REPOSITORY.save_bet(
+            {
+                **attempt_record,
+                "cycle_id": cycle_id,
+                "match_id": match_id,
+                "result": "BLOCKED_NOT_PLACED",
+                "status": "BLOCKED_NOT_PLACED",
+                "settled": True,
+                "score_after": snapshot.score.text(),
+                "resolved_at": local_now(),
+                "placement_signal": BLOCKED_EVENT_SIGNAL,
+                "placement_result": "BLOCKED",
+                "budget_change": 0,
+                "pnl": 0,
+                "explanation": (
+                    "LIVE coupon показал точный текст «Заблокированное событие»; "
+                    "ставка не принята, тот же шаг переносится на следующий матч"
+                ),
+            }
+        )
+        await REPOSITORY.add_blocked_match(cycle_id, match_id)
+        sequence = await REPOSITORY.save_sequence(
+            current_step=step,
+            status="WAITING_NEXT_MATCH",
+            current_match_id=None,
+            selected_team=None,
+        )
+        self._pending_live_bet = None
+        self._active_live_bet = None
+        await REPOSITORY.log(
+            "LIVE_BLOCKED_MATCH_SWITCH",
+            (
+                f"match_id={match_id}; step={step}; stake={amount:g}; "
+                "confirmed coupon lock -> next match"
+            ),
+        )
+        await REPOSITORY.log(
+            "NEXT_GOAL_BLOCKED_STEP_PRESERVED",
+            f"[NEXT_GOAL][BLOCKED] preserving step={step} stake={amount:g}",
+        )
+        await REPOSITORY.log(
+            "NEXT_GOAL_BLOCKED_RETURNING_TO_LEAGUE",
+            "[NEXT_GOAL] Returning to league; searching next match",
+        )
+        await STATE.update(
+            status=DemoStatus.WAITING_NEXT_MATCH.value,
+            event="LIVE_BLOCKED_MATCH_SWITCH",
+            message=(
+                f"Coupon заблокирован — продолжаем шаг {step} "
+                "в ближайшем следующем матче"
+            ),
+            bet={**blocked_record, "max_steps": self._config.max_steps},
+            sequence=sequence,
+            budget=self._budget.snapshot(),
+            stats=await REPOSITORY.stats(),
+        )
+        return BlockedMatchSwitch(match_id=match_id, step=step, amount=amount)
+
     async def _prepare_live_until_placed(
         self,
         *,
@@ -3495,189 +3565,64 @@ class DemoEngine:
                     return None
                 if not observation.placed:
                     if observation.signal == BLOCKED_EVENT_SIGNAL:
-                        monitor_blocked_score = self._blocked_score_monitoring_enabled(
-                            observation=observation,
-                            selected_match=selected_match,
-                        )
-                        if (
-                            monitor_blocked_score
-                            and self.live_executor.state(attempt_id) == LiveStatus.ACTIVE
-                        ):
-                            attempt_record.update(
-                                result="SUBMISSION_UNKNOWN",
-                                status="UNSAFE_ACCEPTED_BLOCKED_RACE",
-                                settled=False,
-                                resolved_at=local_now(),
-                            )
-                            await REPOSITORY.save_bet(attempt_record)
-                            await REPOSITORY.log(
-                                "NEXT_GOAL_BLOCKED_ACCEPTANCE_UNSAFE",
-                                "[NEXT_GOAL][BLOCKED] acceptance state is unsafe; match switch disabled",
-                            )
-                            self._stop_event.set()
-                            return None
-                        if monitor_blocked_score:
-                            blocked_recovery_score = placement_snapshot.score
-                            blocked_recovery_record = attempt_record
-                            await REPOSITORY.log(
-                                "NEXT_GOAL_BLOCKED_CONFIRMED",
-                                "[NEXT_GOAL][BLOCKED] detected",
-                            )
-                            await REPOSITORY.log(
-                                "NEXT_GOAL_BLOCKED_CONTEXT",
-                                f"[NEXT_GOAL][BLOCKED] match={match_name}; selected_team={selection.selected_team}; "
-                                f"step={step} stake={amount:g}; score_before={placement_snapshot.score.text()}",
-                            )
-                        score_before_removal = await self._read_fresh_score(
-                            browser,
-                            selected_match,
-                            latest or placement_snapshot,
-                        )
                         await REPOSITORY.log(
-                            "LIVE_PENDING_NOT_ACCEPTED",
-                            f"step={step} stake={amount}; blocked event",
+                            "NEXT_GOAL_BLOCKED_CONFIRMED",
+                            (
+                                f"[NEXT_GOAL][BLOCKED] match={match_name}; "
+                                f"step={step}; stake={amount:g}; "
+                                "switching immediately to next match"
+                            ),
                         )
-                        await REPOSITORY.log(
-                            "LIVE_BLOCKED_SCORE_BEFORE_REMOVAL",
-                            f"old={placement_snapshot.score.text()} "
-                            f"current={score_before_removal.score.text()}",
-                        )
-                        await REPOSITORY.log(
-                            "LIVE_BLOCKED_PROGRESS_UNCHANGED",
-                            f"step={step} stake={amount} team={selection.selected_team}",
-                        )
+                        latest_snapshot = latest or placement_snapshot
                         await self._invalidate_live_attempt(
                             attempt_record,
                             decision,
                             observation.signal,
                             publish_live,
                         )
-                        await self.live_executor.remove_blocked_coupon(
-                            page,
-                            attempt_id,
-                        )
-                        score_after_removal = await self._read_fresh_score(
-                            browser,
-                            selected_match,
-                            score_before_removal,
-                        )
-                        if monitor_blocked_score:
-                            await REPOSITORY.log(
-                                "NEXT_GOAL_BLOCKED_COUPON_REMOVED",
-                                "[NEXT_GOAL][BLOCKED] coupon removed",
-                            )
-                            try:
-                                await self._guard_blocked_recovery_score(
-                                    attempt_score=placement_snapshot.score,
-                                    current=score_after_removal,
-                                    selected_side=selection.selected_side,
-                                )
-                            except MissedSelectedTeamGoal as missed:
-                                await REPOSITORY.log(
-                                    "NEXT_GOAL_BLOCKED_SAME_MATCH_RETRY_DISABLED",
-                                    "[NEXT_GOAL][BLOCKED] SAME-MATCH RETRY DISABLED",
-                                )
-                                return await self._finish_missed_selected_team_goal(
-                                    attempt_record=attempt_record,
-                                    selected_match=selected_match,
-                                    cycle_id=cycle_id,
-                                    step=step,
-                                    amount=amount,
-                                    score_after_removal=missed.snapshot,
-                                )
-                            if score_after_removal.score != placement_snapshot.score:
-                                await REPOSITORY.log(
-                                    "NEXT_GOAL_BLOCKED_OPPONENT_SCORED",
-                                    "[NEXT_GOAL][BLOCKED] opponent scored; selected team did not score",
-                                )
-                            await REPOSITORY.log(
-                                "NEXT_GOAL_BLOCKED_BASELINE_UPDATED",
-                                f"[NEXT_GOAL][BLOCKED] baseline updated to {score_after_removal.score.text()}; "
-                                f"continuing same match step={step} stake={amount:g}",
-                            )
-                        else:
-                            await REPOSITORY.discard_unaccepted_bet(attempt_id)
-                        if score_after_removal.score != score_before_removal.score:
-                            await REPOSITORY.log(
-                                "LIVE_SCORE_CHANGED_DURING_BLOCKED_RECOVERY",
-                                f"{score_before_removal.score.text()} → "
-                                f"{score_after_removal.score.text()}",
-                            )
-                        snapshot = score_after_removal
-                        self._pending_live_bet = self._pending_live_bet.with_score(
-                            snapshot.score
-                        )
-                        new_target_goal = self._pending_live_bet.target_goal_number
-                        await REPOSITORY.log(
-                            "LIVE_BLOCKED_GOAL_MARKET_UPDATED",
-                            f"Следующий гол №{target_goal} → "
-                            f"Следующий гол №{new_target_goal}; step={step}",
-                        )
-                        await self._publish_pending_bet(
-                            selection,
-                            match_name,
-                            step,
-                            snapshot,
-                        )
                         try:
-                            odds_result = await self._wait_for_odds(
-                                snapshot,
-                                selected_match,
-                                blocked_attempt_score=(
-                                    blocked_recovery_score
-                                    if monitor_blocked_score
-                                    else None
-                                ),
-                                blocked_selected_side=(
-                                    selection.selected_side
-                                    if monitor_blocked_score
-                                    else None
+                            await self.live_executor.remove_blocked_coupon(
+                                page,
+                                attempt_id,
+                            )
+                        except LivePreparationError as error:
+                            await REPOSITORY.log(
+                                error.status,
+                                (
+                                    f"{error}; continuing match switch because "
+                                    "the exact blocked coupon was already confirmed"
                                 ),
                             )
-                        except MissedSelectedTeamGoal as missed:
-                            await REPOSITORY.log(
-                                "NEXT_GOAL_BLOCKED_SAME_MATCH_RETRY_DISABLED",
-                                "[NEXT_GOAL][BLOCKED] SAME-MATCH RETRY DISABLED",
-                            )
-                            return await self._finish_missed_selected_team_goal(
-                                attempt_record=attempt_record,
-                                selected_match=selected_match,
-                                cycle_id=cycle_id,
-                                step=step,
-                                amount=amount,
-                                score_after_removal=missed.snapshot,
-                            )
-                        if odds_result is None:
-                            return None
-                        snapshot, current_odds = odds_result
-                        if monitor_blocked_score:
-                            await REPOSITORY.discard_unaccepted_bet(attempt_id)
-                            await REPOSITORY.log(
-                                "NEXT_GOAL_BLOCKED_CONTINUING_SAME_MATCH",
-                                f"[NEXT_GOAL][BLOCKED] continuing same match; fresh market loaded; "
-                                f"step={step} stake={amount:g}",
-                            )
-                        retrying_blocked_attempt = True
-                        await REPOSITORY.log(
-                            "LIVE_BLOCKED_RETRYING",
-                            f"step={step} stake={amount} "
-                            f"next_goal={new_target_goal}",
+                        return await self._finish_live_blocked_coupon_switch(
+                            attempt_record=attempt_record,
+                            selected_match=selected_match,
+                            cycle_id=cycle_id,
+                            step=step,
+                            amount=amount,
+                            snapshot=latest_snapshot,
                         )
-                        continue
-                    await self._invalidate_live_attempt(
-                        attempt_record,
-                        decision,
-                        observation.signal,
-                        publish_live,
+
+                    # Any non-blocked submission whose balance could not prove
+                    # acceptance is never retried blindly: a second click could
+                    # duplicate a real bet.
+                    attempt_record.update(
+                        result="SUBMISSION_UNKNOWN",
+                        status="SUBMISSION_UNKNOWN",
+                        settled=False,
+                        resolved_at=local_now(),
+                        placement_signal=observation.signal,
                     )
-                    snapshot = latest or await self._read_fresh_score(
-                        browser, selected_match, placement_snapshot
+                    await REPOSITORY.save_bet(attempt_record)
+                    await REPOSITORY.log(
+                        "LIVE_SUBMISSION_UNKNOWN_NO_RETRY",
+                        (
+                            f"attempt={attempt_id}; signal={observation.signal}; "
+                            "no second click"
+                        ),
                     )
-                    odds_result = await self._wait_for_odds(snapshot, selected_match)
-                    if odds_result is None:
-                        return None
-                    snapshot, current_odds = odds_result
-                    continue
+                    self._stop_event.set()
+                    return None
+
             except LivePreparationError as error:
                 attempt_record.update(
                     result="NOT_PLACED",
