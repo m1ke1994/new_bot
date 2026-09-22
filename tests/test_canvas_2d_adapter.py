@@ -968,7 +968,7 @@ class FakeTransitionPage:
 
 
 class Canvas2DTransitionResetTests(unittest.IsolatedAsyncioTestCase):
-    async def test_live_transition_reload_clears_hook_and_cached_market_state(self):
+    async def test_live_transition_soft_reset_keeps_page_and_hook_but_clears_cached_market_state(self):
         page = FakeTransitionPage()
         page_id = id(page)
         HOOKED_PAGE_IDS.add(page_id)
@@ -993,11 +993,8 @@ class Canvas2DTransitionResetTests(unittest.IsolatedAsyncioTestCase):
         had_hook = await reset_canvas_2d_for_live_transition(page, logger)
 
         self.assertTrue(had_hook)
-        self.assertEqual(
-            page.reload_calls,
-            [{"wait_until": "domcontentloaded", "timeout": 30_000}],
-        )
-        self.assertNotIn(page_id, HOOKED_PAGE_IDS)
+        self.assertEqual(page.reload_calls, [])
+        self.assertIn(page_id, HOOKED_PAGE_IDS)
         self.assertNotIn(page_id, _LAST_MARKETS)
         self.assertNotIn(page_id, _LAST_DIAGNOSTIC_SIGNATURES)
         self.assertFalse(
