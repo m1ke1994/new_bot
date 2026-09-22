@@ -10,10 +10,12 @@ from .models import LiveDecision, LivePreparationError, LiveStatus, PlacementObs
 Logger = Callable[[str, str], Awaitable[Any]]
 Publisher = Callable[[LiveStatus, str], Awaitable[Any]]
 
+# Legacy root selectors are kept only as compatibility fallbacks.
 COUPON_SELECTOR = ".coupon-bets, .quick-coupon-main"
 # Legacy account selector is kept only as an optional compatibility check.
 ACCOUNT_SELECTOR = '.quick-coupon-main button[aria-label="Основной (RUB)"]'
 AMOUNT_SELECTOR = (
+    'input.ui-number-input__field[type="text"][inputmode="decimal"], '
     ".coupon-app input.ui-number-input__field, "
     '.quick-coupon-main input.ui-number-input__field[placeholder="Введите сумму ставки"]'
 )
@@ -22,6 +24,7 @@ CONFIRM_BUTTON_CLASS_SELECTOR = (
     ".ui-button--block.ui-button--uppercase.ui-button--rounded"
 )
 CONFIRM_SELECTOR = (
+    f"{CONFIRM_BUTTON_CLASS_SELECTOR}, "
     f".coupon-buttons {CONFIRM_BUTTON_CLASS_SELECTOR}, "
     f".coupon-app {CONFIRM_BUTTON_CLASS_SELECTOR}, "
     ".quick-coupon-main button.quick-coupon-put-bet-button"
@@ -29,7 +32,9 @@ CONFIRM_SELECTOR = (
 CONFIRM_TEXT = "Сделать ставку"
 BALANCE_SELECTOR = '[data-gtm="account-balance-value-desktop"]'
 BLOCKED_COUPON_SELECTOR = (
-    ".coupon-bet__lock, .quick-coupon-events-card__lock"
+    ".coupon-bet-lock__content, "
+    ".coupon-bet__lock, "
+    ".quick-coupon-events-card__lock"
 )
 BLOCKED_TEXT_SELECTOR = (
     ".coupon-bet-lock__text, .quick-coupon-events-card-lock__text"
@@ -132,6 +137,55 @@ class LiveExecutor:
         actual = before - after
         return abs(actual - expected) <= BALANCE_TOLERANCE
 
+    async def _visible_amount_input(self, page: Any) -> Any | None:
+        inputs = page.locator(AMOUNT_SELECTOR)
+        try:
+            for index in range(await inputs.count()):
+                candidate = inputs.nth(index)
+                if await candidate.is_visible():
+                    return candidate
+        except Exception:
+            return None
+        return None
+
+    async def _visible_confirm_button(self, page: Any) -> Any | None:
+        buttons = page.locator(CONFIRM_SELECTOR)
+        try:
+            for index in range(await buttons.count()):
+                candidate = buttons.nth(index)
+                if not await candidate.is_visible():
+                    continue
+                text = " ".join((await candidate.inner_text()).split())
+                if CONFIRM_TEXT in text:
+                    return candidate
+        except Exception:
+            return None
+        return None
+
+    async def _wait_for_coupon_surface(
+        self,
+        page: Any,
+        *,
+        timeout_seconds: float = 10.0,
+    ) -> str | None:
+        """Wait for the current coupon UI, without depending on a root wrapper.
+
+        The bookmaker changed the outer coupon container.  The stable signals
+        are the exact blocked-event text, the amount input, or the confirm
+        button itself.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while loop.time() < deadline:
+            if await self.blocked_event_exists(page):
+                return "BLOCKED"
+            if await self._visible_amount_input(page) is not None:
+                return "AMOUNT_INPUT"
+            if await self._visible_confirm_button(page) is not None:
+                return "CONFIRM_BUTTON"
+            await asyncio.sleep(0.10)
+        return None
+
     async def _confirmed_blocked_container(self, page: Any) -> Any | None:
         """Return only the visible coupon lock with its exact confirmed text."""
         try:
@@ -224,18 +278,25 @@ class LiveExecutor:
                     publish,
                 )
 
-                coupon = page.locator(COUPON_SELECTOR).first
-                await coupon.wait_for(state="visible", timeout=10_000)
+                coupon_signal = await self._wait_for_coupon_surface(page)
+                if coupon_signal is None:
+                    raise LivePreparationError(
+                        "LIVE_COUPON_NOT_READY",
+                        (
+                            "После клика по коэффициенту не появились признаки coupon: "
+                            "ни «Заблокированное событие», ни поле суммы, "
+                            "ни кнопка «Сделать ставку»."
+                        ),
+                    )
                 await self._publish(
                     decision.attempt_id,
                     LiveStatus.LIVE_COUPON_OPENED,
-                    "Coupon открыт",
+                    f"Coupon открыт; signal={coupon_signal}",
                     publish,
                 )
 
-                # LIVE rule: a confirmed bookmaker lock means this match is
-                # abandoned immediately. Do not touch amount/confirm controls.
-                if await self.blocked_event_exists(page):
+                # LIVE rule: exact bookmaker lock is handled before amount input.
+                if coupon_signal == "BLOCKED" or await self.blocked_event_exists(page):
                     await self._log(
                         "LIVE_BLOCKED_EVENT_DETECTED",
                         (
@@ -263,10 +324,11 @@ class LiveExecutor:
                             "Счёт «Основной (RUB)» не выбран.",
                         )
 
-                amount_input = page.locator(AMOUNT_SELECTOR).first
-                if await amount_input.count() == 0 or not await amount_input.is_visible():
+                amount_input = await self._visible_amount_input(page)
+                if amount_input is None:
                     raise LivePreparationError(
-                        "LIVE_AMOUNT_INPUT_NOT_FOUND", "Поле суммы в quick coupon не найдено."
+                        "LIVE_AMOUNT_INPUT_NOT_FOUND",
+                        "Поле суммы в coupon не найдено.",
                     )
                 expected_text = _amount_text(decision.amount)
                 await amount_input.fill("")
@@ -300,10 +362,11 @@ class LiveExecutor:
                     ),
                 )
 
-                confirm = page.locator(CONFIRM_SELECTOR).first
-                if await confirm.count() == 0 or not await confirm.is_visible():
+                confirm = await self._visible_confirm_button(page)
+                if confirm is None:
                     raise LivePreparationError(
-                        "LIVE_CONFIRM_BUTTON_NOT_FOUND", "Кнопка «Сделать ставку» не найдена."
+                        "LIVE_CONFIRM_BUTTON_NOT_FOUND",
+                        "Кнопка «Сделать ставку» не найдена.",
                     )
                 if await confirm.is_disabled() or CONFIRM_TEXT not in (await confirm.inner_text()):
                     raise LivePreparationError(
