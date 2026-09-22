@@ -12,6 +12,11 @@ Publisher = Callable[[LiveStatus, str], Awaitable[Any]]
 
 # Legacy root selectors are kept only as compatibility fallbacks.
 COUPON_SELECTOR = ".coupon-bets, .quick-coupon-main"
+COUPON_BET_SELECTOR = ".coupon-app .coupon-bets__bet"
+COUPON_FIRST_TEAM_SELECTOR = '[data-test="betting-coupon-bet-first-team"]'
+COUPON_SECOND_TEAM_SELECTOR = '[data-test="betting-coupon-bet-second-team"]'
+COUPON_MARKET_SELECTOR = '[data-test="betting-coupon-bet-market-name"]'
+COUPON_REMOVE_SELECTOR = 'button.coupon-bet-header__remove[aria-label="Удалить"]'
 # Legacy account selector is kept only as an optional compatibility check.
 ACCOUNT_SELECTOR = '.quick-coupon-main button[aria-label="Основной (RUB)"]'
 AMOUNT_SELECTOR = (
@@ -32,7 +37,6 @@ CONFIRM_SELECTOR = (
 CONFIRM_TEXT = "Сделать ставку"
 BALANCE_SELECTOR = '[data-gtm="account-balance-value-desktop"]'
 BLOCKED_COUPON_SELECTOR = (
-    ".coupon-bet-lock__content, "
     ".coupon-bet__lock, "
     ".quick-coupon-events-card__lock"
 )
@@ -208,6 +212,55 @@ class LiveExecutor:
     async def blocked_event_exists(self, page: Any) -> bool:
         return await self._confirmed_blocked_container(page) is not None
 
+    async def _verify_coupon_selection(self, page: Any, decision: LiveDecision) -> None:
+        """Check a Next Goal coupon before submitting real money."""
+        if decision.side.value not in {"TEAM_1", "TEAM_2"}:
+            return  # The shared executor also handles first-half draw.
+        bets = page.locator(COUPON_BET_SELECTOR)
+        visible = [
+            bets.nth(index)
+            for index in range(await bets.count())
+            if await bets.nth(index).is_visible()
+        ]
+        if len(visible) != 1:
+            raise LivePreparationError(
+                "LIVE_COUPON_SELECTION_UNKNOWN",
+                f"Ожидалась одна выбранная ставка в купоне, найдено: {len(visible)}.",
+            )
+        bet = visible[0]
+        side_selector = (
+            COUPON_FIRST_TEAM_SELECTOR
+            if decision.side.value == "TEAM_1"
+            else COUPON_SECOND_TEAM_SELECTOR
+        )
+        team = bet.locator(side_selector).first
+        market = bet.locator(COUPON_MARKET_SELECTOR).first
+        if await team.count() == 0 or await market.count() == 0:
+            raise LivePreparationError(
+                "LIVE_COUPON_SELECTION_UNKNOWN",
+                "В купоне нет названия выбранной команды или рынка.",
+            )
+        actual_team = " ".join((await team.inner_text()).casefold().split())
+        expected_team = " ".join(decision.team.casefold().split())
+        market_text = " ".join((await market.inner_text()).split())
+        side_number = 1 if decision.side.value == "TEAM_1" else 2
+        match = re.search(
+            r"Следующий\s+гол\s*:\s*Команда\s*([12])\s*[-–]\s*(\d+)-[а-яё]+\s+гол",
+            market_text,
+            re.I,
+        )
+        if (
+            actual_team != expected_team
+            or match is None
+            or int(match.group(1)) != side_number
+            or int(match.group(2)) != decision.goal_number
+        ):
+            raise LivePreparationError(
+                "LIVE_COUPON_SELECTION_MISMATCH",
+                f"Купон: {actual_team!r}, {market_text!r}; ожидались "
+                f"{decision.team!r}, команда {side_number}, гол №{decision.goal_number}.",
+            )
+
     async def remove_blocked_coupon(self, page: Any, attempt_id: str) -> bool:
         """Remove one rejected coupon exactly once for a placement attempt."""
         async with self._lock:
@@ -250,6 +303,26 @@ class LiveExecutor:
             self._recovered_blocked_attempts.add(attempt_id)
             await self._log("LIVE_BLOCKED_COUPON_REMOVED", f"attempt={attempt_id}")
             return True
+
+    async def _clear_accepted_coupon(self, page: Any, decision: LiveDecision) -> None:
+        """Clear a lingering selection after a confirmed debit, if it is still ours."""
+        if decision.side.value not in {"TEAM_1", "TEAM_2"}:
+            return
+        try:
+            bets = page.locator(COUPON_BET_SELECTOR)
+            if await bets.count() != 1 or not await bets.first.is_visible():
+                return
+            await self._verify_coupon_selection(page, decision)
+            remove = bets.first.locator(COUPON_REMOVE_SELECTOR).first
+            if await remove.count() and await remove.is_visible():
+                await remove.click(timeout=5_000)
+                await self._log("LIVE_ACCEPTED_COUPON_CLEARED", f"attempt={decision.attempt_id}")
+        except Exception as error:
+            # The debit has already confirmed the bet; cleanup cannot undo it.
+            await self._log(
+                "LIVE_ACCEPTED_COUPON_CLEANUP_FAILED",
+                f"attempt={decision.attempt_id}; {type(error).__name__}: {error}",
+            )
 
     async def prepare(
         self,
@@ -311,6 +384,8 @@ class LiveExecutor:
                         publish,
                     )
                     return
+
+                await self._verify_coupon_selection(page, decision)
 
                 # Keep the old account-control check only when that old DOM
                 # control still exists. The current site is validated by the
@@ -518,6 +593,7 @@ class LiveExecutor:
                             f"stake={decision.amount}"
                         ),
                     )
+                    await self._clear_accepted_coupon(page, decision)
                     await self._publish(
                         decision.attempt_id,
                         LiveStatus.BET_PLACED,

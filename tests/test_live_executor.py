@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from dataclasses import replace
 
 from backend.app.demo.models import Scorer
 from backend.app.live.executor import (
@@ -11,6 +12,11 @@ from backend.app.live.executor import (
     BLOCKED_REMOVE_FALLBACK_SELECTOR,
     BLOCKED_REMOVE_SELECTOR,
     BLOCKED_TEXT_SELECTOR,
+    COUPON_BET_SELECTOR,
+    COUPON_FIRST_TEAM_SELECTOR,
+    COUPON_MARKET_SELECTOR,
+    COUPON_REMOVE_SELECTOR,
+    COUPON_SECOND_TEAM_SELECTOR,
     CONFIRM_SELECTOR,
     COUPON_SELECTOR,
     LiveExecutor,
@@ -93,6 +99,17 @@ class FakePage:
         self.success = FakeLocator(count=0, visible=False)
         self.failure = FakeLocator(count=0, visible=False)
         self.blocked_coupon = FakeLocator(count=0, visible=False)
+        self.coupon_bet = FakeLocator()
+        self.coupon_team1 = FakeLocator(text="TEAM 1")
+        self.coupon_team2 = FakeLocator(text="TEAM 2")
+        self.coupon_market = FakeLocator(text="Следующий гол: Команда 2 - 4-й гол")
+        self.coupon_remove = FakeLocator(count=0, visible=False)
+        self.coupon_bet.children = {
+            COUPON_FIRST_TEAM_SELECTOR: self.coupon_team1,
+            COUPON_SECOND_TEAM_SELECTOR: self.coupon_team2,
+            COUPON_MARKET_SELECTOR: self.coupon_market,
+            COUPON_REMOVE_SELECTOR: self.coupon_remove,
+        }
         self.blocked_text = FakeLocator(
             text="Заблокированное событие",
             count=0,
@@ -119,6 +136,7 @@ class FakePage:
     def locator(self, selector):
         return {
             COUPON_SELECTOR: self.coupon,
+            COUPON_BET_SELECTOR: self.coupon_bet,
             ACCOUNT_SELECTOR: self.account,
             AMOUNT_SELECTOR: self.amount,
             CONFIRM_SELECTOR: self.confirm,
@@ -260,6 +278,19 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(executor.state(item.attempt_id), LiveStatus.ACTIVE)
         self.assertEqual(page.confirm.clicks, 1)
 
+    async def test_confirmed_bet_clears_lingering_coupon_with_remove_button(self):
+        executor, page, item = LiveExecutor(), FakePage(), decision(amount=42)
+        page.coupon_remove.present = 1
+        page.coupon_remove.visible = True
+        await executor.prepare(page, item)
+        page.balance.text = "958.00"
+
+        observation = await executor.wait_for_manual_confirmation(
+            page, item, asyncio.Event()
+        )
+        self.assertTrue(observation.placed)
+        self.assertEqual(page.coupon_remove.clicks, 1)
+
     async def test_missing_balance_debit_reloads_once_and_stays_unknown(self):
         executor, page, item = LiveExecutor(), FakePage(), decision(amount=42)
         await executor.prepare(page, item)
@@ -317,6 +348,36 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status, "LIVE_AMOUNT_VERIFICATION_FAILED")
         self.assertEqual(page.confirm.clicks, 0)
         self.assertTrue(executor.market_was_selected(item.attempt_id))
+
+    async def test_wrong_coupon_team_or_goal_never_submits(self):
+        for name, market in (
+            ("OTHER TEAM", "Следующий гол: Команда 2 - 4-й гол"),
+            ("TEAM 2", "Следующий гол: Команда 2 - 5-й гол"),
+            ("TEAM 2", "Следующий гол: Команда 1 - 4-й гол"),
+        ):
+            with self.subTest(name=name, market=market):
+                executor, page, item = LiveExecutor(), FakePage(), decision()
+                page.coupon_team2.text = name
+                page.coupon_market.text = market
+                with self.assertRaises(LivePreparationError) as raised:
+                    await executor.prepare(page, item)
+                self.assertEqual(raised.exception.status, "LIVE_COUPON_SELECTION_MISMATCH")
+                self.assertEqual(page.confirm.clicks, 0)
+
+    async def test_multiple_coupon_bets_never_submit(self):
+        executor, page, item = LiveExecutor(), FakePage(), decision()
+        page.coupon_bet.present = 2
+        with self.assertRaises(LivePreparationError) as raised:
+            await executor.prepare(page, item)
+        self.assertEqual(raised.exception.status, "LIVE_COUPON_SELECTION_UNKNOWN")
+        self.assertEqual(page.confirm.clicks, 0)
+
+    async def test_first_half_draw_shared_executor_is_unchanged(self):
+        executor, page = LiveExecutor(), FakePage()
+        item = replace(decision(), team="Ничья", side=Scorer.UNKNOWN, goal_number=0)
+        page.coupon_bet.present = 0
+        await executor.prepare(page, item)
+        self.assertEqual(page.confirm.clicks, 1)
 
     async def test_failed_market_click_does_not_claim_coupon_was_opened(self):
         class FailedMarket(FakeLocator):

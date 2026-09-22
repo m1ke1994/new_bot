@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from backend.app.browser.market import MarketNotAvailable
 from backend.app.demo.engine import (
-    LIVE_SCORE_ACCEPTED_SIGNAL,
     BlockedMatchSwitch,
     DemoEngine,
     ModeConflictError,
@@ -228,20 +227,27 @@ class LivePendingTests(unittest.IsolatedAsyncioTestCase):
             selected_team_scored=True,
         )
 
-    async def test_one_goal_after_confirm_click_is_live_acceptance_signal(self):
+    async def test_one_goal_after_confirm_click_does_not_confirm_acceptance(self):
         engine = DemoEngine(FakeManager())
         before = snapshot(1, 1)
         changed = snapshot(2, 1)
 
-        async def wait_forever(*_args, **_kwargs):
-            await asyncio.Event().wait()
+        finish_confirmation = asyncio.Event()
+
+        async def wait_for_balance(*_args, **_kwargs):
+            await finish_confirmation.wait()
+            return None
+
+        async def signal_goal(*_args, **_kwargs):
+            finish_confirmation.set()
+            return changed
 
         engine.live_executor.wait_for_manual_confirmation = AsyncMock(
-            side_effect=wait_forever
+            side_effect=wait_for_balance
         )
         engine.live_executor.manual_click_seen = AsyncMock(return_value=True)
         engine.live_executor.blocked_event_exists = AsyncMock(return_value=False)
-        engine._wait_for_pending_score_change = AsyncMock(return_value=changed)
+        engine._wait_for_pending_score_change = AsyncMock(side_effect=signal_goal)
 
         observation, latest = await engine._wait_for_live_confirmation_or_score(
             page=object(),
@@ -252,8 +258,7 @@ class LivePendingTests(unittest.IsolatedAsyncioTestCase):
             publish=AsyncMock(),
         )
 
-        self.assertTrue(observation.placed)
-        self.assertEqual(observation.signal, LIVE_SCORE_ACCEPTED_SIGNAL)
+        self.assertIsNone(observation)
         self.assertEqual(latest.score, Score(2, 1))
 
     async def test_coupon_lock_has_priority_over_score_acceptance_signal(self):
@@ -284,7 +289,7 @@ class LivePendingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observation.signal, BLOCKED_EVENT_SIGNAL)
         self.assertEqual(latest.score, Score(2, 1))
 
-    async def test_score_based_acceptance_keeps_original_bet_baseline(self):
+    async def test_balance_acceptance_after_goal_keeps_original_bet_baseline(self):
         initial = snapshot(1, 1)
         changed = snapshot(2, 1)
         odds = NextGoalOdds(
@@ -328,7 +333,7 @@ class LivePendingTests(unittest.IsolatedAsyncioTestCase):
                 engine._read_fresh_score = AsyncMock(return_value=initial)
                 engine._wait_for_live_confirmation_or_score = AsyncMock(
                     return_value=(
-                        PlacementObservation(True, LIVE_SCORE_ACCEPTED_SIGNAL),
+                        PlacementObservation(True, "balance debit confirmed"),
                         changed,
                     )
                 )

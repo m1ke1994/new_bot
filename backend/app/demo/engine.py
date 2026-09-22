@@ -128,7 +128,6 @@ DEMO_BLOCKED_MARKET_STATUSES = frozenset(
 
 DEMO_ACCEPTANCE_CONFIRMATIONS = 3
 DEMO_ACCEPTANCE_INTERVAL_SECONDS = 0.12
-LIVE_SCORE_ACCEPTED_SIGNAL = "SCORE_CHANGED_AFTER_CONFIRM"
 
 
 class MissedSelectedTeamGoal(RuntimeError):
@@ -3610,10 +3609,20 @@ class DemoEngine:
                             await REPOSITORY.log(
                                 error.status,
                                 (
-                                    f"{error}; blocked coupon was already confirmed, "
-                                    "continuing score-based recovery"
+                                    f"{error}; заблокированный исход остался в купоне; "
+                                    "повторная ставка остановлена"
                                 ),
                             )
+                            self._stop_event.set()
+                            await STATE.update(
+                                mode="LIVE",
+                                running=False,
+                                status=LiveStatus.ERROR.value,
+                                event=error.status,
+                                message="Не удалось удалить заблокированный исход из купона.",
+                                error=str(error),
+                            )
+                            return None
 
                         score_after_removal = await self._read_fresh_score(
                             browser,
@@ -3766,20 +3775,17 @@ class DemoEngine:
                 snapshot, current_odds = odds_result
                 continue
 
-            # ACCEPTED is the ordering boundary.  Keep the last score observed
-            # before confirmation as the bet baseline: a goal that appears just
-            # after acceptance must be settled normally instead of being hidden
-            # by a post-confirmation baseline refresh.
-            score_based_acceptance = (
-                observation.signal == LIVE_SCORE_ACCEPTED_SIGNAL
-            )
-            if score_based_acceptance:
+            # A score change does not prove that the coupon was accepted.
+            # When a goal occurred during submission, retain the score from
+            # before the click so the goal can still be settled after a
+            # confirmed debit; never silently consume it as the new baseline.
+            if latest is not None and latest.score != placement_snapshot.score:
                 await REPOSITORY.log(
-                    "LIVE_SCORE_ACCEPTANCE_CONFIRMED",
+                    "LIVE_SCORE_CHANGED_DURING_SUBMISSION",
                     (
                         f"attempt={attempt_id}; baseline={placement_snapshot.score.text()}; "
                         f"observed={(latest or placement_snapshot).score.text()}; "
-                        "exactly one score step after confirm click"
+                        "acceptance requires balance debit"
                     ),
                 )
             else:
@@ -3848,8 +3854,6 @@ class DemoEngine:
                     {confirmation_task, score_task},
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                if confirmation_task in done:
-                    return confirmation_task.result(), latest
                 if score_task in done:
                     changed = score_task.result()
                     if changed is None:
@@ -3865,9 +3869,8 @@ class DemoEngine:
                             retryable=True,
                         ), latest
 
-                    # Once the confirm button was clicked, an exact one-goal
-                    # scoreboard advance is an acceptance signal for LIVE,
-                    # unless the coupon itself explicitly says it is blocked.
+                    # A coupon lock takes priority. A goal after a click is
+                    # observed, but cannot confirm that the stake was accepted.
                     if await self.live_executor.blocked_event_exists(page):
                         confirmation_task.cancel()
                         with suppress(asyncio.CancelledError):
@@ -3878,28 +3881,12 @@ class DemoEngine:
                             retryable=True,
                         ), latest
 
-                    delta_team1 = changed.score.team1 - snapshot.score.team1
-                    delta_team2 = changed.score.team2 - snapshot.score.team2
-                    if (
-                        delta_team1 >= 0
-                        and delta_team2 >= 0
-                        and delta_team1 + delta_team2 == 1
-                    ):
-                        confirmation_task.cancel()
-                        with suppress(asyncio.CancelledError):
-                            await confirmation_task
-                        await REPOSITORY.log(
-                            "LIVE_SCORE_CHANGED_AFTER_CONFIRM",
-                            (
-                                f"{snapshot.score.text()} → {changed.score.text()}; "
-                                "exactly one goal after confirm click, treating bet as accepted"
-                            ),
-                        )
-                        return PlacementObservation(
-                            True,
-                            LIVE_SCORE_ACCEPTED_SIGNAL,
-                        ), latest
-
+                    if confirmation_task in done:
+                        return confirmation_task.result(), latest
+                    await REPOSITORY.log(
+                        "LIVE_SCORE_CHANGED_WHILE_AWAITING_DEBIT",
+                        f"{snapshot.score.text()} → {changed.score.text()}; waiting for balance",
+                    )
                     score_task = asyncio.create_task(
                         self._wait_for_pending_score_change(
                             browser,
@@ -3907,6 +3894,8 @@ class DemoEngine:
                             latest,
                         )
                     )
+                elif confirmation_task in done:
+                    return confirmation_task.result(), latest
             return None, latest
         finally:
             for task in (confirmation_task, score_task):
