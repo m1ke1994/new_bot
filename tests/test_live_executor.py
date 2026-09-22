@@ -5,6 +5,7 @@ from backend.app.demo.models import Scorer
 from backend.app.live.executor import (
     ACCOUNT_SELECTOR,
     AMOUNT_SELECTOR,
+    BALANCE_SELECTOR,
     BLOCKED_COUPON_SELECTOR,
     BLOCKED_EVENT_SIGNAL,
     BLOCKED_REMOVE_FALLBACK_SELECTOR,
@@ -87,6 +88,8 @@ class FakePage:
         self.account = FakeLocator(text="Основной (RUB)")
         self.amount = FakeLocator()
         self.confirm = FakeLocator(text="Сделать ставку")
+        self.balance = FakeLocator(text="1000.00")
+        self.reloads = 0
         self.success = FakeLocator(count=0, visible=False)
         self.failure = FakeLocator(count=0, visible=False)
         self.blocked_coupon = FakeLocator(count=0, visible=False)
@@ -119,10 +122,15 @@ class FakePage:
             ACCOUNT_SELECTOR: self.account,
             AMOUNT_SELECTOR: self.amount,
             CONFIRM_SELECTOR: self.confirm,
+            BALANCE_SELECTOR: self.balance,
             BLOCKED_COUPON_SELECTOR: self.blocked_coupon,
             BLOCKED_TEXT_SELECTOR: self.blocked_text,
             BLOCKED_REMOVE_SELECTOR: self.blocked_remove,
         }[selector]
+
+    async def reload(self, **_kwargs):
+        self.reloads += 1
+        return None
 
     def show_blocked_event(self):
         self.blocked_coupon.present = 1
@@ -218,26 +226,58 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
                 "LIVE_COUPON_OPENED",
                 "LIVE_AMOUNT_FILLED",
                 "LIVE_AMOUNT_VERIFIED",
+                "LIVE_BALANCE_BEFORE",
                 "TEST_AUTO_CONFIRM",
                 "AWAITING_PLACEMENT_RESULT",
             ],
         )
 
-    async def test_auto_click_then_disappearing_controls_activates_bet(self):
-        executor, page, item = LiveExecutor(), FakePage(), decision()
+    async def test_auto_click_balance_debit_activates_bet(self):
+        executor, page, item = LiveExecutor(), FakePage(), decision(amount=42)
         await executor.prepare(page, item)
-        page.confirm.present = 0
-        page.confirm.visible = False
-        page.amount.present = 0
-        page.amount.visible = False
+        page.balance.text = "958.00"
 
         observation = await executor.wait_for_manual_confirmation(
             page, item, asyncio.Event()
         )
 
         self.assertTrue(observation.placed)
+        self.assertEqual(observation.signal, "balance debit confirmed")
         self.assertEqual(executor.state(item.attempt_id), LiveStatus.ACTIVE)
         self.assertEqual(page.confirm.clicks, 1)
+
+    async def test_missing_balance_debit_reloads_once_and_stays_unknown(self):
+        executor, page, item = LiveExecutor(), FakePage(), decision(amount=42)
+        await executor.prepare(page, item)
+
+        observation = await executor.wait_for_manual_confirmation(
+            page, item, asyncio.Event()
+        )
+
+        self.assertIsNone(observation)
+        self.assertEqual(page.reloads, 1)
+        self.assertEqual(executor.state(item.attempt_id), LiveStatus.AWAITING_PLACEMENT_RESULT)
+        self.assertEqual(page.confirm.clicks, 1)
+
+    async def test_blocked_coupon_after_market_click_skips_amount_and_confirm(self):
+        executor, page, item = LiveExecutor(), FakePage(), decision()
+        original_click = item.coefficient_locator.on_click
+
+        def show_lock():
+            if original_click is not None:
+                original_click()
+            page.show_blocked_event()
+
+        item.coefficient_locator.on_click = show_lock
+        await executor.prepare(page, item)
+
+        self.assertEqual(page.amount.fills, [])
+        self.assertEqual(page.confirm.clicks, 0)
+        observation = await executor.wait_for_manual_confirmation(
+            page, item, asyncio.Event()
+        )
+        self.assertFalse(observation.placed)
+        self.assertEqual(observation.signal, BLOCKED_EVENT_SIGNAL)
 
     async def test_success_text_without_manual_click_is_not_accepted(self):
         executor, page, item = LiveExecutor(), FakePage(), decision()
