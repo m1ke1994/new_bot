@@ -10,19 +10,32 @@ from .models import LiveDecision, LivePreparationError, LiveStatus, PlacementObs
 Logger = Callable[[str, str], Awaitable[Any]]
 Publisher = Callable[[LiveStatus, str], Awaitable[Any]]
 
-COUPON_SELECTOR = ".quick-coupon-main"
+COUPON_SELECTOR = ".coupon-bets, .quick-coupon-main"
+# Legacy account selector is kept only as an optional compatibility check.
 ACCOUNT_SELECTOR = '.quick-coupon-main button[aria-label="Основной (RUB)"]'
 AMOUNT_SELECTOR = (
+    ".coupon-app input.ui-number-input__field, "
     '.quick-coupon-main input.ui-number-input__field[placeholder="Введите сумму ставки"]'
 )
-CONFIRM_SELECTOR = ".quick-coupon-main button.quick-coupon-put-bet-button"
+CONFIRM_SELECTOR = (
+    ".coupon-buttons button, "
+    ".quick-coupon-main button.quick-coupon-put-bet-button"
+)
 CONFIRM_TEXT = "Сделать ставку"
-BLOCKED_COUPON_SELECTOR = ".quick-coupon-events-card__lock"
-BLOCKED_TEXT_SELECTOR = ".quick-coupon-events-card-lock__text"
-BLOCKED_REMOVE_SELECTOR = ".quick-coupon-events-card-lock__remove"
+BALANCE_SELECTOR = '[data-gtm="account-balance-value-desktop"]'
+BLOCKED_COUPON_SELECTOR = (
+    ".coupon-bet__lock, .quick-coupon-events-card__lock"
+)
+BLOCKED_TEXT_SELECTOR = (
+    ".coupon-bet-lock__text, .quick-coupon-events-card-lock__text"
+)
+BLOCKED_REMOVE_SELECTOR = (
+    ".coupon-bet-lock-remove, .quick-coupon-events-card-lock__remove"
+)
 BLOCKED_REMOVE_FALLBACK_SELECTOR = 'button[aria-label="Удалить"]'
 BLOCKED_TEXT = "Заблокированное событие"
 BLOCKED_EVENT_SIGNAL = "BLOCKED_EVENT"
+BALANCE_TOLERANCE = Decimal("0.01")
 
 # ТЕСТОВЫЙ АККАУНТ:
 # автоподтверждение включено прямо в коде, ENV больше не требуется.
@@ -54,6 +67,7 @@ class LiveExecutor:
         self._confirm_handles: dict[str, Any] = {}
         self._market_selected: set[str] = set()
         self._recovered_blocked_attempts: set[str] = set()
+        self._balance_before: dict[str, Decimal] = {}
         self._lock = asyncio.Lock()
 
     async def _log(self, event: str, message: str) -> None:
@@ -86,6 +100,32 @@ class LiveExecutor:
             return await handle.get_attribute("data-autobet-manual-click") == "1"
         except Exception:
             return self.state(attempt_id) == LiveStatus.AWAITING_PLACEMENT_RESULT
+
+    async def _read_balance(self, page: Any) -> Decimal:
+        balance = page.locator(BALANCE_SELECTOR).first
+        if await balance.count() == 0 or not await balance.is_visible():
+            raise LivePreparationError(
+                "LIVE_BALANCE_NOT_FOUND",
+                "Баланс RUB не найден в header.",
+            )
+        raw = await balance.inner_text()
+        try:
+            return _parse_amount(raw)
+        except LivePreparationError as error:
+            raise LivePreparationError(
+                "LIVE_BALANCE_INVALID",
+                f"Не удалось прочитать баланс RUB: {raw!r}",
+            ) from error
+
+    @staticmethod
+    def _balance_debit_matches(
+        before: Decimal,
+        after: Decimal,
+        stake: float,
+    ) -> bool:
+        expected = Decimal(str(stake))
+        actual = before - after
+        return abs(actual - expected) <= BALANCE_TOLERANCE
 
     async def _confirmed_blocked_container(self, page: Any) -> Any | None:
         """Return only the visible coupon lock with its exact confirmed text."""
@@ -184,20 +224,39 @@ class LiveExecutor:
                 await self._publish(
                     decision.attempt_id,
                     LiveStatus.LIVE_COUPON_OPENED,
-                    "Quick coupon открыт",
+                    "Coupon открыт",
                     publish,
                 )
 
+                # LIVE rule: a confirmed bookmaker lock means this match is
+                # abandoned immediately. Do not touch amount/confirm controls.
+                if await self.blocked_event_exists(page):
+                    await self._log(
+                        "LIVE_BLOCKED_EVENT_DETECTED",
+                        (
+                            f"attempt={decision.attempt_id}; phase=after_market_click; "
+                            "coupon contains exact text 'Заблокированное событие'"
+                        ),
+                    )
+                    await self._publish(
+                        decision.attempt_id,
+                        LiveStatus.AWAITING_PLACEMENT_RESULT,
+                        "Coupon заблокирован; ставка не отправляется",
+                        publish,
+                    )
+                    return
+
+                # Keep the old account-control check only when that old DOM
+                # control still exists. The current site is validated by the
+                # real RUB balance in the header.
                 account = page.locator(ACCOUNT_SELECTOR).first
-                if await account.count() == 0 or not await account.is_visible():
-                    raise LivePreparationError(
-                        "LIVE_RUB_ACCOUNT_NOT_FOUND", "Счёт «Основной (RUB)» не найден в coupon."
-                    )
-                pressed = await account.get_attribute("aria-pressed")
-                if pressed is not None and pressed.lower() == "false":
-                    raise LivePreparationError(
-                        "LIVE_RUB_ACCOUNT_NOT_SELECTED", "Счёт «Основной (RUB)» не выбран."
-                    )
+                if await account.count() > 0 and await account.is_visible():
+                    pressed = await account.get_attribute("aria-pressed")
+                    if pressed is not None and pressed.lower() == "false":
+                        raise LivePreparationError(
+                            "LIVE_RUB_ACCOUNT_NOT_SELECTED",
+                            "Счёт «Основной (RUB)» не выбран.",
+                        )
 
                 amount_input = page.locator(AMOUNT_SELECTOR).first
                 if await amount_input.count() == 0 or not await amount_input.is_visible():
@@ -224,6 +283,16 @@ class LiveExecutor:
                     LiveStatus.LIVE_AMOUNT_VERIFIED,
                     f"Сумма подтверждена: {expected_text}",
                     publish,
+                )
+
+                balance_before = await self._read_balance(page)
+                self._balance_before[decision.attempt_id] = balance_before
+                await self._log(
+                    "LIVE_BALANCE_BEFORE",
+                    (
+                        f"attempt={decision.attempt_id}; "
+                        f"balance={balance_before}; stake={expected_text}"
+                    ),
                 )
 
                 confirm = page.locator(CONFIRM_SELECTOR).first
@@ -305,23 +374,17 @@ class LiveExecutor:
                 f"Coupon находится в неподходящем состоянии: {current_state.value}",
             )
 
-        # Единственный критерий успешной отправки:
-        # после клика одновременно исчезли:
-        # 1) input суммы;
-        # 2) кнопка «Сделать ставку».
-        #
-        # Никакие toast/modal/coupon-wrapper больше не используются
-        # для подтверждения размещения.
-        amount_input = page.locator(AMOUNT_SELECTOR).first
-        confirm = page.locator(CONFIRM_SELECTOR).first
-
         click_seen = current_state == LiveStatus.AWAITING_PLACEMENT_RESULT
+        reloaded_after_missing_debit = False
 
         while not stop_event.is_set():
             if await self.blocked_event_exists(page):
                 await self._log(
                     "LIVE_BLOCKED_EVENT_DETECTED",
-                    f"attempt={decision.attempt_id}; status={current_state.value}",
+                    (
+                        f"attempt={decision.attempt_id}; "
+                        f"status={self.state(decision.attempt_id).value}"
+                    ),
                 )
                 return PlacementObservation(
                     False,
@@ -335,43 +398,62 @@ class LiveExecutor:
                     await self._publish(
                         decision.attempt_id,
                         LiveStatus.AWAITING_PLACEMENT_RESULT,
-                        "Клик подтверждения обнаружен; ждём исчезновение кнопки и поля суммы",
+                        "Клик подтверждения обнаружен; проверяем списание баланса",
                         publish,
                     )
 
             if click_seen:
-                try:
-                    confirm_visible = (
-                        await confirm.count() > 0
-                        and await confirm.is_visible()
+                balance_before = self._balance_before.get(decision.attempt_id)
+                if balance_before is None:
+                    raise LivePreparationError(
+                        "LIVE_BALANCE_BEFORE_MISSING",
+                        "Нет сохранённого баланса перед отправкой ставки.",
                     )
-                except Exception:
-                    confirm_visible = False
 
+                # Give the header a short moment to receive the bookmaker update.
                 try:
-                    amount_visible = (
-                        await amount_input.count() > 0
-                        and await amount_input.is_visible()
-                    )
-                except Exception:
-                    amount_visible = False
+                    await asyncio.wait_for(stop_event.wait(), timeout=0.35)
+                    continue
+                except TimeoutError:
+                    pass
 
+                if await self.blocked_event_exists(page):
+                    await self._log(
+                        "LIVE_BLOCKED_EVENT_DETECTED",
+                        f"attempt={decision.attempt_id}; phase=after_confirm_click",
+                    )
+                    return PlacementObservation(
+                        False,
+                        BLOCKED_EVENT_SIGNAL,
+                        retryable=True,
+                    )
+
+                balance_after = await self._read_balance(page)
+                debit = balance_before - balance_after
                 await self._log(
-                    "LIVE_PLACEMENT_CHECK",
+                    "LIVE_BALANCE_AFTER",
                     (
-                        f"attempt={decision.attempt_id}; "
-                        f"confirm_visible={confirm_visible}; "
-                        f"amount_visible={amount_visible}"
+                        f"attempt={decision.attempt_id}; before={balance_before}; "
+                        f"after={balance_after}; debit={debit}; stake={decision.amount}"
                     ),
                 )
 
-                # ГЛАВНЫЙ И ЕДИНСТВЕННЫЙ ТРИГГЕР:
-                # оба элемента исчезли -> ставка считается размещённой.
-                if not confirm_visible and not amount_visible:
+                if self._balance_debit_matches(
+                    balance_before,
+                    balance_after,
+                    decision.amount,
+                ):
+                    await self._log(
+                        "LIVE_BALANCE_DEBIT_CONFIRMED",
+                        (
+                            f"attempt={decision.attempt_id}; debit={debit}; "
+                            f"stake={decision.amount}"
+                        ),
+                    )
                     await self._publish(
                         decision.attempt_id,
                         LiveStatus.BET_PLACED,
-                        "Кнопка «Сделать ставку» и поле суммы исчезли; ставка размещена",
+                        "Баланс уменьшился на сумму шага; ставка размещена",
                         publish,
                     )
                     await self._publish(
@@ -382,13 +464,53 @@ class LiveExecutor:
                     )
                     return PlacementObservation(
                         True,
-                        "confirm button and amount input disappeared",
+                        "balance debit confirmed",
                     )
 
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=0.25)
-            except TimeoutError:
-                pass
+                if not reloaded_after_missing_debit:
+                    await self._log(
+                        "LIVE_BALANCE_DEBIT_NOT_CONFIRMED",
+                        (
+                            f"attempt={decision.attempt_id}; before={balance_before}; "
+                            f"after={balance_after}; expected_stake={decision.amount}; "
+                            "checking lock then reloading once"
+                        ),
+                    )
+                    if await self.blocked_event_exists(page):
+                        return PlacementObservation(
+                            False,
+                            BLOCKED_EVENT_SIGNAL,
+                            retryable=True,
+                        )
+                    reloaded_after_missing_debit = True
+                    try:
+                        await page.reload(
+                            wait_until="domcontentloaded",
+                            timeout=30_000,
+                        )
+                        balance_locator = page.locator(BALANCE_SELECTOR).first
+                        await balance_locator.wait_for(
+                            state="visible",
+                            timeout=15_000,
+                        )
+                    except Exception as error:
+                        await self._log(
+                            "LIVE_BALANCE_RELOAD_FAILED",
+                            f"attempt={decision.attempt_id}; {type(error).__name__}: {error}",
+                        )
+                        return None
+                    continue
+
+                debit_after_reload = balance_before - balance_after
+                await self._log(
+                    "LIVE_BALANCE_UNCHANGED_AFTER_RELOAD",
+                    (
+                        f"attempt={decision.attempt_id}; before={balance_before}; "
+                        f"after_reload={balance_after}; debit={debit_after_reload}; "
+                        "placement remains unknown; no second click"
+                    ),
+                )
+                return None
 
         return None
 
@@ -406,3 +528,4 @@ class LiveExecutor:
         self._confirm_handles.clear()
         self._market_selected.clear()
         self._recovered_blocked_attempts.clear()
+        self._balance_before.clear()
