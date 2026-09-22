@@ -2648,10 +2648,21 @@ class Canvas2DCoefficientLocator:
         await canvas.click(position=self._position(box), **kwargs)
 
 
-def _clear_page_runtime_state(page: Page) -> None:
-    """Forget Canvas mappings/locks that belong to the current document."""
+def _clear_page_runtime_state(
+    page: Page,
+    *,
+    preserve_hook: bool = False,
+) -> None:
+    """Forget cached Canvas mappings/locks for the current document.
+
+    preserve_hook=True is used during UPCOMING -> LIVE. The bookmaker SPA
+    must keep the same document/page alive; only our stale market mapping and
+    lock latches are discarded. Reloading this match page can temporarily
+    leave the scoreboard with empty numeric text and stall the strategy.
+    """
     page_id = id(page)
-    HOOKED_PAGE_IDS.discard(page_id)
+    if not preserve_hook:
+        HOOKED_PAGE_IDS.discard(page_id)
     _LAST_MARKETS.pop(page_id, None)
     _LAST_DIAGNOSTIC_SIGNATURES.pop(page_id, None)
 
@@ -2673,15 +2684,14 @@ async def reset_canvas_2d_for_live_transition(
     page: Page,
     logger: Logger | None = None,
 ) -> bool:
-    """Return the match page to native Canvas before UPCOMING -> LIVE hydration.
+    """Soft-reset Canvas state before UPCOMING -> LIVE without reloading SPA.
 
-    Canvas/Path2D wrappers cannot be safely restored in-place because the
-    bookmaker may retain references to wrapped prototype methods. A document
-    reload is the deterministic unhook boundary: the new document starts with
-    native browser prototypes and the hook is installed again only after LIVE
-    market rendering is ready.
+    The previous implementation reloaded the match document to get native
+    Canvas prototypes. On the bookmaker SPA this can leave scoreboard values
+    temporarily empty, causing the match-start loop to stall. Keep the current
+    page/document intact and clear only cached market/lock state.
 
-    Returns True when the old document had our hook installed.
+    Returns True when the hook is already present in the live document.
     """
     had_hook = False
     try:
@@ -2700,25 +2710,24 @@ async def reset_canvas_2d_for_live_transition(
         logger,
         "CANVAS_2D_LIVE_TRANSITION_RESET_STARTED",
         (
-            "Preparing UPCOMING -> LIVE transition on native Canvas; "
+            "Soft Canvas transition reset; bookmaker SPA page will NOT reload; "
             f"hook_present={str(had_hook).lower()}"
         ),
     )
 
-    _clear_page_runtime_state(page)
-    await page.reload(wait_until="domcontentloaded", timeout=30_000)
-    _clear_page_runtime_state(page)
+    _clear_page_runtime_state(page, preserve_hook=True)
+    if had_hook:
+        HOOKED_PAGE_IDS.add(id(page))
 
     await _log(
         logger,
         "CANVAS_2D_LIVE_TRANSITION_RESET_COMPLETED",
         (
-            "Match document reloaded without Canvas hook; "
-            "bookmaker may hydrate LIVE markets using native Canvas/Path2D"
+            "Canvas market/lock caches cleared without page.reload(); "
+            "scoreboard and SPA document remain intact for UPCOMING -> LIVE"
         ),
     )
     return had_hook
-
 
 async def ensure_canvas_2d_hook(page: Page) -> bool:
     """Install instrumentation only in the already-rendered current document.
