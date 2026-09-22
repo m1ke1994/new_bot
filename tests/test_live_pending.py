@@ -1,10 +1,17 @@
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from backend.app.browser.market import MarketNotAvailable
-from backend.app.demo.engine import BlockedMatchSwitch, DemoEngine, ModeConflictError
+from backend.app.demo.engine import (
+    LIVE_SCORE_ACCEPTED_SIGNAL,
+    BlockedMatchSwitch,
+    DemoEngine,
+    ModeConflictError,
+)
 from backend.app.demo.history import DemoRepository
 from backend.app.demo.models import (
     NextGoalOdds,
@@ -220,6 +227,129 @@ class LivePendingTests(unittest.IsolatedAsyncioTestCase):
             snapshot(1, 2),
             selected_team_scored=True,
         )
+
+    async def test_one_goal_after_confirm_click_is_live_acceptance_signal(self):
+        engine = DemoEngine(FakeManager())
+        before = snapshot(1, 1)
+        changed = snapshot(2, 1)
+
+        async def wait_forever(*_args, **_kwargs):
+            await asyncio.Event().wait()
+
+        engine.live_executor.wait_for_manual_confirmation = AsyncMock(
+            side_effect=wait_forever
+        )
+        engine.live_executor.manual_click_seen = AsyncMock(return_value=True)
+        engine.live_executor.blocked_event_exists = AsyncMock(return_value=False)
+        engine._wait_for_pending_score_change = AsyncMock(return_value=changed)
+
+        observation, latest = await engine._wait_for_live_confirmation_or_score(
+            page=object(),
+            browser=object(),
+            selected_match={"match_id": "match"},
+            snapshot=before,
+            decision=SimpleNamespace(attempt_id="attempt"),
+            publish=AsyncMock(),
+        )
+
+        self.assertTrue(observation.placed)
+        self.assertEqual(observation.signal, LIVE_SCORE_ACCEPTED_SIGNAL)
+        self.assertEqual(latest.score, Score(2, 1))
+
+    async def test_coupon_lock_has_priority_over_score_acceptance_signal(self):
+        engine = DemoEngine(FakeManager())
+        before = snapshot(1, 1)
+        changed = snapshot(2, 1)
+
+        async def wait_forever(*_args, **_kwargs):
+            await asyncio.Event().wait()
+
+        engine.live_executor.wait_for_manual_confirmation = AsyncMock(
+            side_effect=wait_forever
+        )
+        engine.live_executor.manual_click_seen = AsyncMock(return_value=True)
+        engine.live_executor.blocked_event_exists = AsyncMock(return_value=True)
+        engine._wait_for_pending_score_change = AsyncMock(return_value=changed)
+
+        observation, latest = await engine._wait_for_live_confirmation_or_score(
+            page=object(),
+            browser=object(),
+            selected_match={"match_id": "match"},
+            snapshot=before,
+            decision=SimpleNamespace(attempt_id="attempt"),
+            publish=AsyncMock(),
+        )
+
+        self.assertFalse(observation.placed)
+        self.assertEqual(observation.signal, BLOCKED_EVENT_SIGNAL)
+        self.assertEqual(latest.score, Score(2, 1))
+
+    async def test_score_based_acceptance_keeps_original_bet_baseline(self):
+        initial = snapshot(1, 1)
+        changed = snapshot(2, 1)
+        odds = NextGoalOdds(
+            1.80,
+            2.03,
+            next_goal_number=3,
+            team1_locator=object(),
+            team2_locator=object(),
+        )
+        selection = TeamSelection(
+            "TEAM 2",
+            Scorer.TEAM_2,
+            2.03,
+            "TEAM 1",
+            1.80,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = DemoRepository(Path(directory))
+            sequence = await repository.save_sequence(
+                current_step=2,
+                status="ACTIVE",
+                current_match_id="match",
+                selected_team="TEAM 2",
+            )
+            with patch("backend.app.demo.engine.REPOSITORY", repository):
+                engine = DemoEngine(FakeManager())
+                engine._mode = "LIVE"
+                engine._pending_live_bet = PendingLiveBet(
+                    "match_TEAM_2_step2",
+                    "match",
+                    "TEAM 2",
+                    Scorer.TEAM_2,
+                    2,
+                    42,
+                    3,
+                )
+                engine.live_executor.prepare = AsyncMock()
+                engine.live_executor.manual_click_seen = AsyncMock(return_value=True)
+                engine.live_executor.blocked_event_exists = AsyncMock(return_value=False)
+                engine._read_fresh_score = AsyncMock(return_value=initial)
+                engine._wait_for_live_confirmation_or_score = AsyncMock(
+                    return_value=(
+                        PlacementObservation(True, LIVE_SCORE_ACCEPTED_SIGNAL),
+                        changed,
+                    )
+                )
+
+                result = await engine._prepare_live_until_placed(
+                    browser=object(),
+                    selected_match={"match_id": "match"},
+                    selection=selection,
+                    match_name="TEAM 1 — TEAM 2",
+                    cycle_id=sequence["sequence_id"],
+                    step=2,
+                    amount=42,
+                    snapshot=initial,
+                    current_odds=odds,
+                    record={"mode": "LIVE"},
+                )
+
+        self.assertIsNotNone(result)
+        _record, accepted_baseline, _odds, _selected, _opponent = result
+        self.assertEqual(accepted_baseline.score, Score(1, 1))
+        self.assertEqual(engine._active_live_bet.score_before, Score(1, 1))
 
     def test_score_updates_only_goal_number_of_pending_decision(self):
         pending = PendingLiveBet(
