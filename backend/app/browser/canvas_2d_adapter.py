@@ -2629,11 +2629,18 @@ class Canvas2DCoefficientLocator:
         page: Page,
         region: dict[str, Any],
         canvas_shape: dict[str, Any],
+        *,
+        side: int | None = None,
+        goal_number: int | None = None,
+        expected_odds: float | None = None,
     ) -> None:
         self.page = page
         self.region = dict(region)
         self.canvas_width = max(1.0, float(canvas_shape.get("width") or 1.0))
         self.canvas_height = max(1.0, float(canvas_shape.get("height") or 1.0))
+        self.side = side
+        self.goal_number = goal_number
+        self.expected_odds = expected_odds
         self.last_click: dict[str, Any] | None = None
 
     def _position(self, box: dict[str, float]) -> dict[str, float]:
@@ -2653,6 +2660,50 @@ class Canvas2DCoefficientLocator:
             timeout=int(kwargs.pop("timeout", 10_000)),
         )
         await canvas.scroll_into_view_if_needed()
+        current_odds: float | None = None
+        if self.side in (1, 2) and self.goal_number is not None:
+            # Scrolling and the bookmaker's live redraw can invalidate the
+            # rectangle captured while reading the market. Use the latest
+            # frame, and never click a different price under the old decision.
+            snapshot = await capture_canvas_2d_snapshot(self.page)
+            mapping = map_next_goal_snapshot(snapshot, self.goal_number)
+            if mapping is None:
+                raise hybrid_market.MarketNotAvailable(
+                    "Рынок следующего гола изменился перед Canvas-кликом.",
+                    status="CANVAS_CLICK_MARKET_STALE",
+                    details={"source": "CANVAS_2D", "goal": self.goal_number},
+                )
+            current_odds = mapping.team1_odds if self.side == 1 else mapping.team2_odds
+            if self.expected_odds is not None and abs(current_odds - self.expected_odds) > 0.001:
+                raise hybrid_market.MarketNotAvailable(
+                    "Коэффициент изменился перед Canvas-кликом; рынок нужно перечитать.",
+                    status="CANVAS_CLICK_ODDS_CHANGED",
+                    details={
+                        "source": "CANVAS_2D",
+                        "goal": self.goal_number,
+                        "expected_odds": self.expected_odds,
+                        "current_odds": current_odds,
+                    },
+                )
+            lock_state = _detect_multilayer_lock_state(
+                snapshot,
+                source_canvas_id=mapping.source_canvas_id,
+                team1_region=mapping.team1_region,
+                team2_region=mapping.team2_region,
+                team1_click_region=mapping.team1_click_region,
+                team2_click_region=mapping.team2_click_region,
+            )
+            if self.side in lock_state["locked_sides"]:
+                raise hybrid_market.MarketNotAvailable(
+                    "Исход заблокирован перед Canvas-кликом.",
+                    status="CANVAS_CLICK_MARKET_LOCKED",
+                    details={"source": "CANVAS_2D", "goal": self.goal_number, "side": self.side},
+                )
+            self.region = dict(
+                mapping.team1_click_region if self.side == 1 else mapping.team2_click_region
+            )
+            self.canvas_width = max(1.0, float(mapping.canvas.get("width") or 1.0))
+            self.canvas_height = max(1.0, float(mapping.canvas.get("height") or 1.0))
         box = await canvas.bounding_box()
         if box is None:
             raise hybrid_market.MarketNotAvailable(
@@ -2663,6 +2714,9 @@ class Canvas2DCoefficientLocator:
         position = self._position(box)
         self.last_click = {
             "region": self.region,
+            "goal": self.goal_number,
+            "side": self.side,
+            "odds_at_click": current_odds,
             "canvas_size": {"width": self.canvas_width, "height": self.canvas_height},
             "canvas_box": {"width": box["width"], "height": box["height"]},
             "position": position,
@@ -3056,11 +3110,17 @@ async def read_next_goal_odds(
                         page,
                         cached.team1_click_region,
                         cached.canvas,
+                        side=1,
+                        goal_number=next_goal_number,
+                        expected_odds=cached.team1_odds,
                     ),
                     team2_locator=Canvas2DCoefficientLocator(
                         page,
                         cached.team2_click_region,
                         cached.canvas,
+                        side=2,
+                        goal_number=next_goal_number,
+                        expected_odds=cached.team2_odds,
                     ),
                     locked_sides=lock_state["locked_sides"],
                     lock_markers=lock_state["markers"],
@@ -3202,11 +3262,17 @@ async def read_next_goal_odds(
             page,
             mapping.team1_click_region,
             mapping.canvas,
+            side=1,
+            goal_number=next_goal_number,
+            expected_odds=mapping.team1_odds,
         ),
         team2_locator=Canvas2DCoefficientLocator(
             page,
             mapping.team2_click_region,
             mapping.canvas,
+            side=2,
+            goal_number=next_goal_number,
+            expected_odds=mapping.team2_odds,
         ),
         locked_sides=lock_state["locked_sides"],
         lock_markers=lock_state["markers"],

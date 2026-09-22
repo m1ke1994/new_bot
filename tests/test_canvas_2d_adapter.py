@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 
 from backend.app.browser.canvas_2d_adapter import (
     CANVAS_2D_HOOK_SCRIPT,
+    Canvas2DCoefficientLocator,
     _CachedMarket,
     HOOKED_PAGE_IDS,
     _LAST_DIAGNOSTIC_SIGNATURES,
@@ -910,6 +911,69 @@ class Canvas2DAdapterTests(unittest.TestCase):
 
 
 class Canvas2DAdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_click_uses_fresh_canvas_mapping_after_market_moves(self):
+        class Canvas:
+            def __init__(self):
+                self.position = None
+
+            async def wait_for(self, **_kwargs):
+                pass
+
+            async def scroll_into_view_if_needed(self):
+                pass
+
+            async def bounding_box(self):
+                return {"x": 50, "y": 30, "width": 500, "height": 250}
+
+            async def click(self, *, position):
+                self.position = position
+
+        canvas = Canvas()
+        page = type("Page", (), {"locator": lambda self, _selector: type("Locator", (), {"first": canvas})()})()
+        old_region = {"x": 50, "y": 10, "width": 10, "height": 10}
+        locator = Canvas2DCoefficientLocator(
+            page, old_region, {"width": 1000, "height": 500},
+            side=2, goal_number=3, expected_odds=2.04,
+        )
+        snapshot = Canvas2DAdapterTests().snapshot()
+        snapshot["rects"] = [rect(555, 120, 130, 44)]
+        snapshot["texts"] = [
+            text("Команда 1 - 3-й гол", 30, 120, width=150),
+            text("1.935", 260, 120, width=55),
+            text("Команда 2 - 3-й гол", 340, 120, width=160),
+            text("2.04", 610, 120, width=45),
+        ]
+
+        with patch(
+            "backend.app.browser.canvas_2d_adapter.capture_canvas_2d_snapshot",
+            return_value=snapshot,
+        ):
+            await locator.click()
+
+        self.assertEqual(canvas.position, {"x": 310.0, "y": 71.0})
+        self.assertEqual(locator.last_click["odds_at_click"], 2.04)
+
+    async def test_click_skips_changed_coefficient(self):
+        canvas = AsyncMock()
+        page = type("Page", (), {"locator": lambda self, _selector: type("Locator", (), {"first": canvas})()})()
+        locator = Canvas2DCoefficientLocator(
+            page, {"x": 1, "y": 1, "width": 1, "height": 1},
+            {"width": 1000, "height": 500},
+            side=2, goal_number=3, expected_odds=2.04,
+        )
+        snapshot = Canvas2DAdapterTests().snapshot()
+        snapshot["texts"][-1]["text"] = "2.05"
+
+        with patch(
+            "backend.app.browser.canvas_2d_adapter.capture_canvas_2d_snapshot",
+            return_value=snapshot,
+        ):
+            with self.assertRaises(Exception) as raised:
+                await locator.click()
+
+        self.assertEqual(raised.exception.status, "CANVAS_CLICK_ODDS_CHANGED")
+        canvas.click.assert_not_awaited()
+
     async def test_read_lock_state_passes_goal_as_market_context(self):
         page = type("Page", (), {"url": "https://example.test/match-1"})()
         region = {"x": 10.0, "y": 20.0, "width": 30.0, "height": 40.0}
