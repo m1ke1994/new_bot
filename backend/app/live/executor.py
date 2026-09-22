@@ -17,8 +17,13 @@ AMOUNT_SELECTOR = (
     ".coupon-app input.ui-number-input__field, "
     '.quick-coupon-main input.ui-number-input__field[placeholder="Введите сумму ставки"]'
 )
+CONFIRM_BUTTON_CLASS_SELECTOR = (
+    "button.ui-button.ui-button--size-m.ui-button--theme-accent"
+    ".ui-button--block.ui-button--uppercase.ui-button--rounded"
+)
 CONFIRM_SELECTOR = (
-    ".coupon-buttons button, "
+    f".coupon-buttons {CONFIRM_BUTTON_CLASS_SELECTOR}, "
+    f".coupon-app {CONFIRM_BUTTON_CLASS_SELECTOR}, "
     ".quick-coupon-main button.quick-coupon-put-bet-button"
 )
 CONFIRM_TEXT = "Сделать ставку"
