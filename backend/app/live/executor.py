@@ -21,8 +21,8 @@ COUPON_REMOVE_SELECTOR = 'button.coupon-bet-header__remove[aria-label="Удал�
 # Legacy account selector is kept only as an optional compatibility check.
 ACCOUNT_SELECTOR = '.quick-coupon-main button[aria-label="Основной (RUB)"]'
 AMOUNT_SELECTOR = (
-    'input.ui-number-input__field[type="text"][inputmode="decimal"], '
-    ".coupon-app input.ui-number-input__field, "
+    '.coupon-app .coupon-amount input.ui-number-input__field[type="text"][inputmode="decimal"], '
+    ".coupon-app .coupon-amount input.ui-number-input__field, "
     '.quick-coupon-main input.ui-number-input__field[placeholder="Введите сумму ставки"]'
 )
 CONFIRM_BUTTON_CLASS_SELECTOR = (
@@ -178,22 +178,36 @@ class LiveExecutor:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + CONFIRM_WAIT_SECONDS
         state = "NOT_FOUND"
+        empty_since: float | None = None
         while True:
             if await self.blocked_event_exists(page):
                 return None, "BLOCKED"
-            candidate = await self._visible_confirm_button(page)
+            empty_coupon = page.locator(EMPTY_COUPON_SELECTOR).first
+            if await empty_coupon.count() and await empty_coupon.is_visible():
+                if empty_since is None:
+                    empty_since = loop.time()
+                if loop.time() - empty_since >= 0.5:
+                    return None, "EMPTY_COUPON"
+            else:
+                empty_since = None
+            candidate = None if empty_since is not None else await self._visible_confirm_button(page)
             if candidate is not None:
                 if not await candidate.is_disabled():
                     return candidate, "READY"
                 state = "DISABLED"
             if loop.time() >= deadline:
-                return None, state
+                return None, "EMPTY_COUPON" if empty_since is not None else state
             await asyncio.sleep(0.10)
 
     async def _log_confirm_diagnostics(self, page: Any, attempt_id: str, state: str) -> None:
         try:
             buttons = page.locator(CONFIRM_FALLBACK_SELECTOR)
             count = await buttons.count()
+            bets = page.locator(COUPON_BET_SELECTOR)
+            bet_count = 0
+            for index in range(await bets.count()):
+                if await bets.nth(index).is_visible():
+                    bet_count += 1
             details = []
             for index in range(min(count, 4)):
                 button = buttons.nth(index)
@@ -206,7 +220,8 @@ class LiveExecutor:
                 )
             await self._log(
                 "LIVE_CONFIRM_BUTTON_DIAGNOSTICS",
-                f"attempt={attempt_id}; state={state}; coupon_buttons={count}; samples={details}",
+                f"attempt={attempt_id}; state={state}; coupon_bets={bet_count}; "
+                f"coupon_buttons={count}; samples={details}",
             )
         except Exception as error:
             await self._log(
@@ -450,6 +465,10 @@ class LiveExecutor:
                     return
 
                 await self._verify_coupon_selection(page, decision)
+                await self._log(
+                    "LIVE_COUPON_SELECTION_VERIFIED",
+                    f"attempt={decision.attempt_id}; team={decision.team}; goal={decision.goal_number}",
+                )
 
                 # Keep the old account-control check only when that old DOM
                 # control still exists. The current site is validated by the
@@ -516,6 +535,11 @@ class LiveExecutor:
                     return
                 if confirm is None:
                     await self._log_confirm_diagnostics(page, decision.attempt_id, confirm_state)
+                    if confirm_state == "EMPTY_COUPON":
+                        raise LivePreparationError(
+                            "LIVE_COUPON_LOST_BEFORE_CONFIRM",
+                            "Исход исчез из купона до подтверждения. Ставка не отправлена.",
+                        )
                     if confirm_state == "DISABLED":
                         raise LivePreparationError(
                             "LIVE_CONFIRM_BUTTON_NOT_READY",

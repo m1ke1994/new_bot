@@ -263,6 +263,7 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
             [
                 "LIVE_MARKET_SELECTED",
                 "LIVE_COUPON_OPENED",
+                "LIVE_COUPON_SELECTION_VERIFIED",
                 "LIVE_AMOUNT_FILLED",
                 "LIVE_AMOUNT_VERIFIED",
                 "LIVE_BALANCE_BEFORE",
@@ -323,6 +324,26 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
                 await executor.prepare(page, item)
 
         self.assertEqual(raised.exception.status, "LIVE_CONFIRM_BUTTON_NOT_READY")
+        self.assertEqual(page.confirm.clicks, 0)
+
+    async def test_coupon_disappears_after_amount_fill_without_submission(self):
+        executor, page, item = LiveExecutor(), FakePage(), decision()
+        original_fill = page.amount.fill
+
+        async def fill(value):
+            await original_fill(value)
+            if value:
+                page.empty_coupon.present = 1
+                page.empty_coupon.visible = True
+                page.coupon_bet.present = 0
+                page.confirm.present = 0
+
+        page.amount.fill = fill
+
+        with self.assertRaises(LivePreparationError) as raised:
+            await executor.prepare(page, item)
+
+        self.assertEqual(raised.exception.status, "LIVE_COUPON_LOST_BEFORE_CONFIRM")
         self.assertEqual(page.confirm.clicks, 0)
 
     async def test_auto_click_balance_debit_activates_bet(self):
