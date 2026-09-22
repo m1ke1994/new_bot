@@ -13,6 +13,7 @@ Publisher = Callable[[LiveStatus, str], Awaitable[Any]]
 # Legacy root selectors are kept only as compatibility fallbacks.
 COUPON_SELECTOR = ".coupon-bets, .quick-coupon-main"
 COUPON_BET_SELECTOR = ".coupon-app .coupon-bets__bet"
+EMPTY_COUPON_SELECTOR = ".coupon-app .coupon-main-tab--no-bets"
 COUPON_FIRST_TEAM_SELECTOR = '[data-test="betting-coupon-bet-first-team"]'
 COUPON_SECOND_TEAM_SELECTOR = '[data-test="betting-coupon-bet-second-team"]'
 COUPON_MARKET_SELECTOR = '[data-test="betting-coupon-bet-market-name"]'
@@ -180,6 +181,7 @@ class LiveExecutor:
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_seconds
+        empty_coupon_seen = False
         while loop.time() < deadline:
             if await self.blocked_event_exists(page):
                 return "BLOCKED"
@@ -187,8 +189,11 @@ class LiveExecutor:
                 return "AMOUNT_INPUT"
             if await self._visible_confirm_button(page) is not None:
                 return "CONFIRM_BUTTON"
+            empty_coupon = page.locator(EMPTY_COUPON_SELECTOR).first
+            if await empty_coupon.count() and await empty_coupon.is_visible():
+                empty_coupon_seen = True
             await asyncio.sleep(0.10)
-        return None
+        return "EMPTY_COUPON" if empty_coupon_seen else None
 
     async def _confirmed_blocked_container(self, page: Any) -> Any | None:
         """Return only the visible coupon lock with its exact confirmed text."""
@@ -344,6 +349,12 @@ class LiveExecutor:
             try:
                 await decision.coefficient_locator.click()
                 self._market_selected.add(decision.attempt_id)
+                click_details = getattr(decision.coefficient_locator, "last_click", None)
+                if click_details is not None:
+                    await self._log(
+                        "LIVE_CANVAS_CLICK_TARGET",
+                        f"attempt={decision.attempt_id}; {click_details}",
+                    )
                 await self._publish(
                     decision.attempt_id,
                     LiveStatus.LIVE_MARKET_SELECTED,
@@ -352,6 +363,12 @@ class LiveExecutor:
                 )
 
                 coupon_signal = await self._wait_for_coupon_surface(page)
+                if coupon_signal == "EMPTY_COUPON":
+                    raise LivePreparationError(
+                        "LIVE_COUPON_EMPTY_AFTER_CLICK",
+                        "После Canvas-клика купон остался пустым: исход не добавлен. "
+                        "Ставка не отправлена; повторный клик без проверки не выполняется.",
+                    )
                 if coupon_signal is None:
                     raise LivePreparationError(
                         "LIVE_COUPON_NOT_READY",

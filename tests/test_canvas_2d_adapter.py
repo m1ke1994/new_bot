@@ -92,6 +92,22 @@ class Canvas2DAdapterTests(unittest.TestCase):
             {"x": 555.0, "y": 88.0, "width": 130.0, "height": 44.0},
         )
 
+    def test_without_button_rect_click_uses_outcome_label_and_odds(self):
+        snapshot = self.snapshot()
+        snapshot["rects"] = []
+
+        mapping = map_next_goal_snapshot(snapshot, 3)
+
+        self.assertIsNotNone(mapping)
+        assert mapping is not None
+        self.assertEqual(mapping.team2_click_region["x"], 340.0)
+        click_center = (
+            mapping.team2_click_region["x"]
+            + mapping.team2_click_region["width"] / 2
+        )
+        self.assertLess(click_center, 610.0)
+        self.assertGreater(click_center, 340.0)
+
     def test_rejects_row_for_different_goal_number(self):
         self.assertIsNone(map_next_goal_snapshot(self.snapshot(), 4))
 

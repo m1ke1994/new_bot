@@ -1,6 +1,7 @@
 import asyncio
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 from backend.app.demo.models import Scorer
 from backend.app.live.executor import (
@@ -16,6 +17,7 @@ from backend.app.live.executor import (
     COUPON_FIRST_TEAM_SELECTOR,
     COUPON_MARKET_SELECTOR,
     COUPON_REMOVE_SELECTOR,
+    EMPTY_COUPON_SELECTOR,
     COUPON_SECOND_TEAM_SELECTOR,
     CONFIRM_SELECTOR,
     COUPON_SELECTOR,
@@ -104,6 +106,7 @@ class FakePage:
         self.coupon_team2 = FakeLocator(text="TEAM 2")
         self.coupon_market = FakeLocator(text="Следующий гол: Команда 2 - 4-й гол")
         self.coupon_remove = FakeLocator(count=0, visible=False)
+        self.empty_coupon = FakeLocator(count=0, visible=False)
         self.coupon_bet.children = {
             COUPON_FIRST_TEAM_SELECTOR: self.coupon_team1,
             COUPON_SECOND_TEAM_SELECTOR: self.coupon_team2,
@@ -137,6 +140,7 @@ class FakePage:
         return {
             COUPON_SELECTOR: self.coupon,
             COUPON_BET_SELECTOR: self.coupon_bet,
+            EMPTY_COUPON_SELECTOR: self.empty_coupon,
             ACCOUNT_SELECTOR: self.account,
             AMOUNT_SELECTOR: self.amount,
             CONFIRM_SELECTOR: self.confirm,
@@ -370,6 +374,21 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(LivePreparationError) as raised:
             await executor.prepare(page, item)
         self.assertEqual(raised.exception.status, "LIVE_COUPON_SELECTION_UNKNOWN")
+        self.assertEqual(page.confirm.clicks, 0)
+
+    async def test_visible_empty_coupon_does_not_count_as_selected_bet(self):
+        executor, page, item = LiveExecutor(), FakePage(), decision()
+        page.empty_coupon.present = 1
+        page.empty_coupon.visible = True
+        page.amount.present = 0
+        page.confirm.present = 0
+
+        signal = await executor._wait_for_coupon_surface(page, timeout_seconds=0.02)
+        self.assertEqual(signal, "EMPTY_COUPON")
+        with patch.object(executor, "_wait_for_coupon_surface", return_value=signal):
+            with self.assertRaises(LivePreparationError) as raised:
+                await executor.prepare(page, item)
+        self.assertEqual(raised.exception.status, "LIVE_COUPON_EMPTY_AFTER_CLICK")
         self.assertEqual(page.confirm.clicks, 0)
 
     async def test_first_half_draw_shared_executor_is_unchanged(self):

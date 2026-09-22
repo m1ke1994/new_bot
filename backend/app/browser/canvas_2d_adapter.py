@@ -1243,6 +1243,7 @@ def _button_region(
     *,
     canvas_width: float,
     canvas_height: float,
+    label_regions: list[dict[str, Any]] | None = None,
 ) -> dict[str, float]:
     cx = _center_x(odds_region)
     cy = _center_y(odds_region)
@@ -1278,8 +1279,19 @@ def _button_region(
     pad_x = max(18.0, text_width * 0.55)
     pad_y = max(10.0, text_height * 0.60)
     x = max(0.0, float(odds_region.get("x") or 0.0) - pad_x)
+    if label_regions:
+        # When the bookmaker does not draw a button rectangle, the odds text
+        # alone sits near the far edge of the outcome. Include its same-row
+        # label so the click lands inside the full selection cell.
+        label_x = min(float(label.get("x") or 0.0) for label in label_regions)
+        if 0 < float(odds_region.get("x") or 0.0) - label_x < canvas_width * 0.36:
+            x = max(0.0, label_x)
     y = max(0.0, float(odds_region.get("y") or 0.0) - pad_y)
-    width = min(canvas_width - x, text_width + pad_x * 2.0)
+    right = min(
+        canvas_width,
+        float(odds_region.get("x") or 0.0) + text_width + pad_x,
+    )
+    width = right - x
     height = min(canvas_height - y, text_height + pad_y * 2.0)
     return {
         "x": x,
@@ -1410,23 +1422,23 @@ def _map_next_goal_layer(
         team2_text, team2_odds = middle[-1]
         center = (_center_y(team1_text) + _center_y(team2_text)) / 2.0
 
-        side1_parts = [
-            str(item.get("text") or "")
+        side1_labels = [
+            item
             for item in row
             if float(item.get("x") or 0.0) < float(team1_text.get("x") or 0.0)
             and abs(_center_y(item) - center) <= tolerance
             and _parse_odds(str(item.get("text") or "")) is None
         ]
-        side2_parts = [
-            str(item.get("text") or "")
+        side2_labels = [
+            item
             for item in row
             if width * 0.30 < float(item.get("x") or 0.0) < float(team2_text.get("x") or 0.0)
             and abs(_center_y(item) - center) <= tolerance
             and _parse_odds(str(item.get("text") or "")) is None
         ]
 
-        goal1 = _goal_from_text(" ".join(side1_parts), 1)
-        goal2 = _goal_from_text(" ".join(side2_parts), 2)
+        goal1 = _goal_from_text(" ".join(str(item.get("text") or "") for item in side1_labels), 1)
+        goal2 = _goal_from_text(" ".join(str(item.get("text") or "") for item in side2_labels), 2)
         if goal1 != expected_goal_number or goal2 != expected_goal_number:
             continue
 
@@ -1438,12 +1450,14 @@ def _map_next_goal_layer(
                 rects,
                 canvas_width=width,
                 canvas_height=height,
+                label_regions=side1_labels,
             ),
             _button_region(
                 team2_text,
                 rects,
                 canvas_width=width,
                 canvas_height=height,
+                label_regions=side2_labels,
             ),
             dict(team1_text),
             dict(team2_text),
@@ -2620,6 +2634,7 @@ class Canvas2DCoefficientLocator:
         self.region = dict(region)
         self.canvas_width = max(1.0, float(canvas_shape.get("width") or 1.0))
         self.canvas_height = max(1.0, float(canvas_shape.get("height") or 1.0))
+        self.last_click: dict[str, Any] | None = None
 
     def _position(self, box: dict[str, float]) -> dict[str, float]:
         center_x = float(self.region["x"]) + float(self.region["width"]) / 2.0
@@ -2645,7 +2660,15 @@ class Canvas2DCoefficientLocator:
                 status="CANVAS_NOT_READY",
                 details={"source": "CANVAS_2D"},
             )
-        await canvas.click(position=self._position(box), **kwargs)
+        position = self._position(box)
+        self.last_click = {
+            "region": self.region,
+            "canvas_size": {"width": self.canvas_width, "height": self.canvas_height},
+            "canvas_box": {"width": box["width"], "height": box["height"]},
+            "position": position,
+            "page_position": {"x": box["x"] + position["x"], "y": box["y"] + position["y"]},
+        }
+        await canvas.click(position=position, **kwargs)
 
 
 def _clear_page_runtime_state(
