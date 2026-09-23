@@ -35,6 +35,7 @@ from backend.app.browser.market import (
     read_next_goal_odds,
 )
 from backend.app.browser.match import MatchBrowser
+from backend.app.browser.navigation import NavigationLoadError
 from backend.app.browser.scoreboard import ScoreReadError
 from backend.app.live.executor import BLOCKED_EVENT_SIGNAL, LiveExecutor
 from backend.app.live.models import (
@@ -512,6 +513,26 @@ class DemoEngine:
                 await self._process_next_match(page)
             except asyncio.CancelledError:
                 raise
+            except NavigationLoadError as error:
+                await REPOSITORY.log(
+                    "NAVIGATION_FAILED",
+                    f"{type(error).__name__}: {error}",
+                )
+                recover_navigation = getattr(
+                    self.browser_manager,
+                    "recover_navigation",
+                    None,
+                )
+                if callable(recover_navigation):
+                    await recover_navigation(error)
+                else:
+                    await self.browser_manager.ensure_page()
+                self._authorized_generation = -1
+                self._auth_status = "UNKNOWN"
+                await self._recover(
+                    "NAVIGATION_RECOVERING",
+                    "Навигация прервана; браузерная страница восстановлена, повторяем вход",
+                )
             except RecoverableDemoError as error:
                 await self._recover(error.status, str(error))
             except (PlaywrightTimeoutError, ScoreReadError) as error:
@@ -567,6 +588,13 @@ class DemoEngine:
         await STATE.update(auth={"status": status})
         if not result.get("ok"):
             return False
+        navigation_succeeded = getattr(
+            self.browser_manager,
+            "navigation_succeeded",
+            None,
+        )
+        if callable(navigation_succeeded):
+            await navigation_succeeded()
         self._authorized_generation = generation
         self._auth_status = status
         if status == "AUTH_TIMEOUT":

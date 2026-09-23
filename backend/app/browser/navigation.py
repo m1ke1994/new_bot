@@ -12,6 +12,18 @@ class NavigationLoadError(RuntimeError):
     """Raised when the target page did not become a usable DOM document."""
 
 
+def _page_diagnostics(page: Any) -> str:
+    try:
+        closed = page.is_closed()
+    except Exception:
+        closed = "unknown"
+    try:
+        current_url = str(page.url or "about:blank")
+    except Exception:
+        current_url = "<unavailable>"
+    return f"current_url={current_url!r}; page_closed={closed}"
+
+
 def _same_target(current_url: str, target_url: str) -> bool:
     """Accept the requested URL (or one of its descendants) after redirects."""
     try:
@@ -61,6 +73,32 @@ async def _document_is_usable(page: Any, target_url: str) -> bool:
     )
 
 
+def _is_transient_navigation_abort(error: Exception) -> bool:
+    message = str(error).lower()
+    return "err_aborted" in message or "frame was detached" in message
+
+
+async def _wait_for_redirected_document(
+    page: Any,
+    target_url: str,
+    *,
+    timeout_ms: int = 2_000,
+    poll_ms: int = 100,
+) -> bool:
+    """Allow a bookmaker redirect to attach its replacement main frame."""
+    deadline = asyncio.get_running_loop().time() + (timeout_ms / 1000)
+    while asyncio.get_running_loop().time() < deadline:
+        if await _document_is_usable(page, target_url):
+            return True
+        try:
+            if page.is_closed():
+                return False
+            await page.wait_for_timeout(poll_ms)
+        except Exception:
+            await asyncio.sleep(poll_ms / 1000)
+    return await _document_is_usable(page, target_url)
+
+
 async def _stop_incomplete_navigation(page: Any) -> None:
     try:
         await page.evaluate("() => window.stop()")
@@ -106,6 +144,11 @@ async def goto_with_retry(
             # In that case continuing is safer than starting another navigation.
             if await _document_is_usable(page, url):
                 return None
+            if (
+                _is_transient_navigation_abort(error)
+                and await _wait_for_redirected_document(page, url)
+            ):
+                return None
             last_error = error
 
         if attempt < attempts:
@@ -123,5 +166,6 @@ async def goto_with_retry(
                 await asyncio.sleep(retry_delay_ms / 1000)
 
     raise NavigationLoadError(
-        f"Страница не загрузилась после {attempts} попыток: {type(last_error).__name__}: {last_error}"
+        f"Страница не загрузилась после {attempts} попыток: "
+        f"{type(last_error).__name__}: {last_error}; {_page_diagnostics(page)}"
     ) from last_error

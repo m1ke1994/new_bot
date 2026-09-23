@@ -21,6 +21,7 @@ class BrowserManager:
         self._context_closed = True
         self._logger: Logger | None = None
         self.generation = 0
+        self._navigation_recovery_stage = 0
 
     def set_logger(self, logger: Logger) -> None:
         self._logger = logger
@@ -33,6 +34,7 @@ class BrowserManager:
         self._context_closed = True
         self.context = None
         self.page = None
+        self._navigation_recovery_stage = 0
 
     def _context_is_alive(self) -> bool:
         if self.context is None or self._context_closed:
@@ -97,6 +99,61 @@ class BrowserManager:
                 return await self._ensure_page_locked()
             except Exception as error:
                 return await self._recover_page_locked(error)
+
+    async def recover_navigation(self, error: Exception) -> Page:
+        """Replace a detached page first, then restart the context if it repeats."""
+        async with self.lock:
+            if not self._context_is_alive():
+                self._navigation_recovery_stage = 0
+                return await self._recover_page_locked(error)
+
+            if self._navigation_recovery_stage >= 1:
+                self._navigation_recovery_stage = 0
+                await self._log(
+                    "NAVIGATION_CONTEXT_RESTART",
+                    (
+                        "Новая вкладка также не загрузила сайт; "
+                        f"перезапускаем persistent Chromium: {type(error).__name__}: {error}"
+                    ),
+                )
+                return await self._recover_page_locked(error)
+
+            assert self.context is not None
+            old_page = self.page
+            old_url = self._page_url(old_page) if old_page is not None else "<none>"
+            try:
+                new_page = await self.context.new_page()
+                await new_page.bring_to_front()
+            except Exception as replacement_error:
+                self._navigation_recovery_stage = 0
+                await self._log(
+                    "NAVIGATION_PAGE_REPLACE_FAILED",
+                    f"{type(replacement_error).__name__}: {replacement_error}",
+                )
+                return await self._recover_page_locked(replacement_error)
+
+            self.page = new_page
+            self.generation += 1
+            self._navigation_recovery_stage = 1
+            if old_page is not None and old_page is not new_page:
+                try:
+                    await old_page.close()
+                except Exception:
+                    pass
+            await self._log(
+                "NAVIGATION_PAGE_REPLACED",
+                (
+                    f"Сбойная вкладка заменена: old_url={old_url or 'about:blank'}; "
+                    f"new_url={self._page_url(new_page) or 'about:blank'}; "
+                    f"reason={type(error).__name__}: {error}"
+                ),
+            )
+            return new_page
+
+    async def navigation_succeeded(self) -> None:
+        """Reset escalation after the target site produced a usable document."""
+        async with self.lock:
+            self._navigation_recovery_stage = 0
 
     @staticmethod
     def _page_url(page: Page) -> str:
@@ -200,6 +257,7 @@ class BrowserManager:
         # hydration on some bookmaker builds.
         self.context = context
         self.generation += 1
+        self._navigation_recovery_stage = 0
         self._context_closed = False
         context.on("close", lambda *_: self._mark_context_closed())
         self.page = self._select_reusable_page(list(context.pages))
@@ -243,6 +301,7 @@ class BrowserManager:
             self.page = None
             self.playwright = None
             self._context_closed = True
+            self._navigation_recovery_stage = 0
             if context is not None:
                 try:
                     await context.close()

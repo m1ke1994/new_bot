@@ -12,6 +12,7 @@ class FakeNavigationPage:
         self.wait_calls = []
         self.ready_state = "complete"
         self.has_body = True
+        self.evaluate_failures = 0
 
     def is_closed(self):
         return False
@@ -28,6 +29,9 @@ class FakeNavigationPage:
         if "window.stop" in expression and "readyState" not in expression:
             self.stop_calls += 1
             return None
+        if self.evaluate_failures > 0:
+            self.evaluate_failures -= 1
+            raise RuntimeError("execution context was destroyed")
         return {"readyState": self.ready_state, "hasBody": self.has_body}
 
     async def wait_for_timeout(self, timeout):
@@ -60,6 +64,18 @@ class NavigationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page.goto_calls, 1)
         self.assertEqual(page.stop_calls, 0)
 
+    async def test_aborted_redirect_is_accepted_after_replacement_frame_attaches(self):
+        page = FakeNavigationPage(
+            [RuntimeError("net::ERR_ABORTED; maybe frame was detached")]
+        )
+        page.url = "https://example.test/ru"
+        page.evaluate_failures = 1
+
+        await goto_with_retry(page, "https://example.test/ru", attempts=1)
+
+        self.assertEqual(page.goto_calls, 1)
+        self.assertEqual(page.stop_calls, 0)
+
     async def test_raises_after_all_attempts_fail(self):
         page = FakeNavigationPage([RuntimeError("first"), RuntimeError("second")])
 
@@ -68,3 +84,11 @@ class NavigationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(page.goto_calls, 2)
 
+    async def test_final_error_contains_page_diagnostics(self):
+        page = FakeNavigationPage([RuntimeError("aborted")])
+
+        with self.assertRaises(NavigationLoadError) as caught:
+            await goto_with_retry(page, "https://example.test/ru", attempts=1)
+
+        self.assertIn("current_url='about:blank'", str(caught.exception))
+        self.assertIn("page_closed=False", str(caught.exception))

@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from backend.app.browser.manager import BrowserManager
+from backend.app.browser.navigation import NavigationLoadError
 from backend.app.demo.engine import (
     BrowserStartError,
     DemoEngine,
@@ -24,6 +25,7 @@ class FakeBrowserManager:
         self.open = False
         self.page = FakePage(closed=True)
         self.start_error = None
+        self.navigation_recovery_errors = []
 
     def set_logger(self, logger):
         self.logger = logger
@@ -41,6 +43,15 @@ class FakeBrowserManager:
             self.generation += 1
             self.page = FakePage()
         return self.page
+
+    async def recover_navigation(self, error):
+        self.navigation_recovery_errors.append(error)
+        self.generation += 1
+        self.page = FakePage()
+        return self.page
+
+    async def navigation_succeeded(self):
+        return None
 
     def close_runtime(self):
         self.open = False
@@ -78,6 +89,7 @@ class ReusablePage:
         self.closed = False
         self.front_calls = 0
         self.evaluate_calls = 0
+        self.close_calls = 0
 
     def is_closed(self):
         return self.closed
@@ -88,6 +100,10 @@ class ReusablePage:
     async def evaluate(self, expression):
         self.evaluate_calls += 1
         return "loading"
+
+    async def close(self):
+        self.close_calls += 1
+        self.closed = True
 
 
 class ReusableContext:
@@ -171,6 +187,83 @@ class DemoLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(manager.page, site)
         self.assertEqual(site.front_calls, 1)
         self.assertEqual(site.evaluate_calls, 1)
+
+    async def test_navigation_abort_replaces_failed_page_in_same_context(self):
+        manager = BrowserManager()
+        failed = ReusablePage("about:blank")
+        context = ReusableContext([failed])
+        manager.context = context
+        manager.page = failed
+        manager._context_closed = False
+        manager.generation = 1
+
+        replacement = await manager.recover_navigation(
+            RuntimeError("net::ERR_ABORTED; maybe frame was detached")
+        )
+
+        self.assertIs(manager.page, replacement)
+        self.assertIsNot(replacement, failed)
+        self.assertEqual(failed.close_calls, 1)
+        self.assertEqual(replacement.front_calls, 1)
+        self.assertEqual(manager.generation, 2)
+        self.assertEqual(manager._navigation_recovery_stage, 1)
+
+    async def test_repeated_navigation_abort_restarts_context(self):
+        manager = BrowserManager()
+        failed = ReusablePage("about:blank")
+        manager.context = ReusableContext([failed])
+        manager.page = failed
+        manager._context_closed = False
+        manager._navigation_recovery_stage = 1
+        replacement = ReusablePage("about:blank")
+
+        async def restart_context(error):
+            manager.page = replacement
+            manager.generation += 1
+            return replacement
+
+        manager._recover_page_locked = restart_context
+
+        page = await manager.recover_navigation(RuntimeError("frame was detached"))
+
+        self.assertIs(page, replacement)
+        self.assertEqual(manager._navigation_recovery_stage, 0)
+
+    async def test_successful_navigation_resets_recovery_escalation(self):
+        manager = BrowserManager()
+        manager._navigation_recovery_stage = 1
+
+        await manager.navigation_succeeded()
+
+        self.assertEqual(manager._navigation_recovery_stage, 0)
+
+    async def test_worker_replaces_page_after_navigation_load_error(self):
+        manager = FakeBrowserManager()
+        with tempfile.TemporaryDirectory() as directory:
+            repository = DemoRepository(Path(directory))
+            with patch("backend.app.demo.engine.REPOSITORY", repository):
+                engine = DemoEngine(manager)
+                authorization_calls = 0
+
+                async def authorize_once_after_recovery(page):
+                    nonlocal authorization_calls
+                    authorization_calls += 1
+                    if authorization_calls == 1:
+                        raise NavigationLoadError("net::ERR_ABORTED; frame was detached")
+                    engine._stop_event.set()
+                    return False
+
+                engine._ensure_authorized = authorize_once_after_recovery
+                engine._recover = AsyncMock()
+
+                await engine._run()
+
+                events = [item["event"] for item in await repository.logs()]
+
+        self.assertEqual(authorization_calls, 2)
+        self.assertEqual(len(manager.navigation_recovery_errors), 1)
+        self.assertIn("NAVIGATION_FAILED", events)
+        engine._recover.assert_awaited_once()
 
     async def test_demo_stop_does_not_stop_browser(self):
         manager = FakeBrowserManager()
