@@ -2622,7 +2622,7 @@ async def read_next_goal_lock_state(
 
 
 class Canvas2DCoefficientLocator:
-    """Click one Canvas outcome using a draw-call-derived internal rectangle."""
+    """Click the freshly drawn coefficient with trusted browser mouse events."""
 
     def __init__(
         self,
@@ -2661,6 +2661,7 @@ class Canvas2DCoefficientLocator:
         )
         await canvas.scroll_into_view_if_needed()
         current_odds: float | None = None
+        click_target = "cached-outcome-region"
         if self.side in (1, 2) and self.goal_number is not None:
             # Scrolling and the bookmaker's live redraw can invalidate the
             # rectangle captured while reading the market. Use the latest
@@ -2699,9 +2700,15 @@ class Canvas2DCoefficientLocator:
                     status="CANVAS_CLICK_MARKET_LOCKED",
                     details={"source": "CANVAS_2D", "goal": self.goal_number, "side": self.side},
                 )
-            self.region = dict(
-                mapping.team1_click_region if self.side == 1 else mapping.team2_click_region
+            odds_text_region = (
+                mapping.team1_text_region if self.side == 1 else mapping.team2_text_region
             )
+            self.region = _project_region_to_visible_canvas(
+                odds_text_region,
+                source_layer=mapping.source_canvas,
+                snapshot=snapshot,
+            )
+            click_target = "fresh-odds-text-center"
             self.canvas_width = max(1.0, float(mapping.canvas.get("width") or 1.0))
             self.canvas_height = max(1.0, float(mapping.canvas.get("height") or 1.0))
         box = await canvas.bounding_box()
@@ -2712,17 +2719,27 @@ class Canvas2DCoefficientLocator:
                 details={"source": "CANVAS_2D"},
             )
         position = self._position(box)
+        page_position = {
+            "x": box["x"] + position["x"],
+            "y": box["y"] + position["y"],
+        }
         self.last_click = {
             "region": self.region,
+            "target": click_target,
+            "method": "page.mouse.move+down+up",
             "goal": self.goal_number,
             "side": self.side,
             "odds_at_click": current_odds,
             "canvas_size": {"width": self.canvas_width, "height": self.canvas_height},
             "canvas_box": {"width": box["width"], "height": box["height"]},
             "position": position,
-            "page_position": {"x": box["x"] + position["x"], "y": box["y"] + position["y"]},
+            "page_position": page_position,
         }
-        await canvas.click(position=position, **kwargs)
+        button = str(kwargs.pop("button", "left"))
+        await self.page.mouse.move(page_position["x"], page_position["y"], steps=3)
+        await self.page.mouse.down(button=button)
+        await self.page.wait_for_timeout(80)
+        await self.page.mouse.up(button=button)
 
 
 def _clear_page_runtime_state(

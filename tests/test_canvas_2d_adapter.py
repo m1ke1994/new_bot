@@ -913,9 +913,6 @@ class Canvas2DAdapterTests(unittest.TestCase):
 class Canvas2DAdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_click_uses_fresh_canvas_mapping_after_market_moves(self):
         class Canvas:
-            def __init__(self):
-                self.position = None
-
             async def wait_for(self, **_kwargs):
                 pass
 
@@ -925,11 +922,30 @@ class Canvas2DAdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
             async def bounding_box(self):
                 return {"x": 50, "y": 30, "width": 500, "height": 250}
 
-            async def click(self, *, position):
-                self.position = position
+        class Mouse:
+            def __init__(self):
+                self.calls = []
+
+            async def move(self, x, y, **kwargs):
+                self.calls.append(("move", x, y, kwargs))
+
+            async def down(self, **kwargs):
+                self.calls.append(("down", kwargs))
+
+            async def up(self, **kwargs):
+                self.calls.append(("up", kwargs))
 
         canvas = Canvas()
-        page = type("Page", (), {"locator": lambda self, _selector: type("Locator", (), {"first": canvas})()})()
+        mouse = Mouse()
+        page = type(
+            "Page",
+            (),
+            {
+                "mouse": mouse,
+                "locator": lambda self, _selector: type("Locator", (), {"first": canvas})(),
+                "wait_for_timeout": AsyncMock(),
+            },
+        )()
         old_region = {"x": 50, "y": 10, "width": 10, "height": 10}
         locator = Canvas2DCoefficientLocator(
             page, old_region, {"width": 1000, "height": 500},
@@ -950,12 +966,29 @@ class Canvas2DAdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
         ):
             await locator.click()
 
-        self.assertEqual(canvas.position, {"x": 310.0, "y": 71.0})
+        self.assertEqual(
+            mouse.calls,
+            [
+                ("move", 366.25, 94.5, {"steps": 3}),
+                ("down", {"button": "left"}),
+                ("up", {"button": "left"}),
+            ],
+        )
+        page.wait_for_timeout.assert_awaited_once_with(80)
+        self.assertEqual(locator.last_click["target"], "fresh-odds-text-center")
+        self.assertEqual(locator.last_click["method"], "page.mouse.move+down+up")
         self.assertEqual(locator.last_click["odds_at_click"], 2.04)
 
     async def test_click_skips_changed_coefficient(self):
         canvas = AsyncMock()
-        page = type("Page", (), {"locator": lambda self, _selector: type("Locator", (), {"first": canvas})()})()
+        page = type(
+            "Page",
+            (),
+            {
+                "mouse": AsyncMock(),
+                "locator": lambda self, _selector: type("Locator", (), {"first": canvas})(),
+            },
+        )()
         locator = Canvas2DCoefficientLocator(
             page, {"x": 1, "y": 1, "width": 1, "height": 1},
             {"width": 1000, "height": 500},
@@ -972,7 +1005,7 @@ class Canvas2DAdapterAsyncTests(unittest.IsolatedAsyncioTestCase):
                 await locator.click()
 
         self.assertEqual(raised.exception.status, "CANVAS_CLICK_ODDS_CHANGED")
-        canvas.click.assert_not_awaited()
+        page.mouse.down.assert_not_awaited()
 
     async def test_read_lock_state_passes_goal_as_market_context(self):
         page = type("Page", (), {"url": "https://example.test/match-1"})()
