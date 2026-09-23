@@ -57,6 +57,14 @@ BLOCKED_REMOVE_FALLBACK_SELECTOR = 'button[aria-label="Удалить"]'
 BLOCKED_TEXT = "Заблокированное событие"
 BLOCKED_EVENT_SIGNAL = "BLOCKED_EVENT"
 BALANCE_TOLERANCE = Decimal("0.01")
+SUCCESS_MODAL_SELECTOR = '.modal__content[data-test="modal-content"]'
+SUCCESS_MODAL_TITLE_SELECTOR = '[data-test="betting-coupon-success-modal-title"]'
+SUCCESS_MODAL_INFO_SELECTOR = '[data-test="betting-coupon-success-modal-info"]'
+SUCCESS_MODAL_CONTINUE_SELECTOR = (
+    'button[data-test="betting-coupon-modal-control-contune"]'
+)
+SUCCESS_MODAL_TITLE = "Ваша ставка принята!"
+SUCCESS_MODAL_WAIT_SECONDS = 2.0
 
 # ТЕСТОВЫЙ АККАУНТ:
 # автоподтверждение включено прямо в коде, ENV больше не требуется.
@@ -278,6 +286,124 @@ class LiveExecutor:
 
     async def blocked_event_exists(self, page: Any) -> bool:
         return await self._confirmed_blocked_container(page) is not None
+
+    async def _confirmed_success_modal(self, page: Any) -> Any | None:
+        """Return only the visible modal with the exact accepted-bet title."""
+        try:
+            modals = page.locator(SUCCESS_MODAL_SELECTOR)
+            expected = " ".join(SUCCESS_MODAL_TITLE.casefold().split())
+            for index in range(await modals.count()):
+                modal = modals.nth(index)
+                if not await modal.is_visible():
+                    continue
+                title = modal.locator(SUCCESS_MODAL_TITLE_SELECTOR).first
+                if await title.count() == 0 or not await title.is_visible():
+                    continue
+                actual = " ".join((await title.inner_text()).casefold().split())
+                if actual == expected:
+                    return modal
+        except Exception:
+            return None
+        return None
+
+    async def _wait_for_success_modal(
+        self,
+        page: Any,
+        stop_event: asyncio.Event,
+    ) -> Any | None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + SUCCESS_MODAL_WAIT_SECONDS
+        while not stop_event.is_set() and loop.time() < deadline:
+            modal = await self._confirmed_success_modal(page)
+            if modal is not None:
+                return modal
+            await asyncio.sleep(0.10)
+        return await self._confirmed_success_modal(page)
+
+    async def _accept_success_modal(
+        self,
+        modal: Any,
+        decision: LiveDecision,
+    ) -> str:
+        """Record the accepted coupon and dismiss its blocking modal."""
+        coupon_text = ""
+        try:
+            info = modal.locator(SUCCESS_MODAL_INFO_SELECTOR).first
+            if await info.count() and await info.is_visible():
+                coupon_text = " ".join((await info.inner_text()).split())
+        except Exception:
+            coupon_text = ""
+        coupon_match = re.search(r"(?:Купон\s*№\s*)?(\d{5,})", coupon_text, re.I)
+        coupon_id = coupon_match.group(1) if coupon_match else "unknown"
+        await self._log(
+            "LIVE_SUCCESS_MODAL_DETECTED",
+            f"attempt={decision.attempt_id}; coupon_id={coupon_id}",
+        )
+
+        try:
+            continue_button = modal.locator(SUCCESS_MODAL_CONTINUE_SELECTOR).first
+            if await continue_button.count() == 0 or not await continue_button.is_visible():
+                raise RuntimeError("Кнопка «Продолжить» не найдена в success-modal")
+            if await continue_button.is_disabled():
+                raise RuntimeError("Кнопка «Продолжить» недоступна")
+            await continue_button.click(timeout=5_000)
+            try:
+                await modal.wait_for(state="hidden", timeout=5_000)
+            except Exception:
+                # The click itself is sufficient; Vue can remove the modal
+                # between locator resolution and the hidden-state waiter.
+                pass
+            await self._log(
+                "LIVE_SUCCESS_MODAL_CONTINUE_CLICKED",
+                f"attempt={decision.attempt_id}; coupon_id={coupon_id}",
+            )
+        except Exception as error:
+            # The exact success title already proves acceptance. A modal
+            # cleanup failure must never cause a duplicate real-money click.
+            await self._log(
+                "LIVE_SUCCESS_MODAL_CONTINUE_FAILED",
+                (
+                    f"attempt={decision.attempt_id}; coupon_id={coupon_id}; "
+                    f"{type(error).__name__}: {error}"
+                ),
+            )
+        return coupon_id
+
+    async def _publish_accepted_placement(
+        self,
+        decision: LiveDecision,
+        publish: Publisher | None,
+        message: str,
+    ) -> None:
+        await self._publish(
+            decision.attempt_id,
+            LiveStatus.BET_PLACED,
+            message,
+            publish,
+        )
+        await self._publish(
+            decision.attempt_id,
+            LiveStatus.ACTIVE,
+            "LIVE-ставка активна",
+            publish,
+        )
+
+    async def _finish_success_modal_placement(
+        self,
+        modal: Any,
+        decision: LiveDecision,
+        publish: Publisher | None,
+    ) -> PlacementObservation:
+        coupon_id = await self._accept_success_modal(modal, decision)
+        await self._publish_accepted_placement(
+            decision,
+            publish,
+            f"Букмекер подтвердил принятие ставки; coupon_id={coupon_id}",
+        )
+        return PlacementObservation(
+            True,
+            f"success modal confirmed; coupon_id={coupon_id}",
+        )
 
     async def _verify_coupon_selection(self, page: Any, decision: LiveDecision) -> None:
         """Check a Next Goal coupon before submitting real money."""
@@ -627,8 +753,28 @@ class LiveExecutor:
 
         click_seen = current_state == LiveStatus.AWAITING_PLACEMENT_RESULT
         reloaded_after_missing_debit = False
+        success_modal_waited = False
 
         while not stop_event.is_set():
+            if not click_seen:
+                click_seen = await self.manual_click_seen(decision.attempt_id)
+                if click_seen:
+                    await self._publish(
+                        decision.attempt_id,
+                        LiveStatus.AWAITING_PLACEMENT_RESULT,
+                        "Клик подтверждения обнаружен; проверяем списание баланса",
+                        publish,
+                    )
+
+            if click_seen:
+                modal = await self._confirmed_success_modal(page)
+                if modal is not None:
+                    return await self._finish_success_modal_placement(
+                        modal,
+                        decision,
+                        publish,
+                    )
+
             if await self.blocked_event_exists(page):
                 await self._log(
                     "LIVE_BLOCKED_EVENT_DETECTED",
@@ -643,17 +789,27 @@ class LiveExecutor:
                     retryable=True,
                 )
 
-            if not click_seen:
-                click_seen = await self.manual_click_seen(decision.attempt_id)
-                if click_seen:
-                    await self._publish(
-                        decision.attempt_id,
-                        LiveStatus.AWAITING_PLACEMENT_RESULT,
-                        "Клик подтверждения обнаружен; проверяем списание баланса",
-                        publish,
-                    )
-
             if click_seen:
+                if not success_modal_waited:
+                    success_modal_waited = True
+                    modal = await self._wait_for_success_modal(page, stop_event)
+                    if modal is not None:
+                        return await self._finish_success_modal_placement(
+                            modal,
+                            decision,
+                            publish,
+                        )
+                    if await self.blocked_event_exists(page):
+                        await self._log(
+                            "LIVE_BLOCKED_EVENT_DETECTED",
+                            f"attempt={decision.attempt_id}; phase=success_modal_wait",
+                        )
+                        return PlacementObservation(
+                            False,
+                            BLOCKED_EVENT_SIGNAL,
+                            retryable=True,
+                        )
+
                 balance_before = self._balance_before.get(decision.attempt_id)
                 if balance_before is None:
                     raise LivePreparationError(
@@ -702,17 +858,10 @@ class LiveExecutor:
                         ),
                     )
                     await self._clear_accepted_coupon(page, decision)
-                    await self._publish(
-                        decision.attempt_id,
-                        LiveStatus.BET_PLACED,
+                    await self._publish_accepted_placement(
+                        decision,
+                        publish,
                         "Баланс уменьшился на сумму шага; ставка размещена",
-                        publish,
-                    )
-                    await self._publish(
-                        decision.attempt_id,
-                        LiveStatus.ACTIVE,
-                        "LIVE-ставка активна",
-                        publish,
                     )
                     return PlacementObservation(
                         True,

@@ -22,6 +22,10 @@ from backend.app.live.executor import (
     CONFIRM_SELECTOR,
     CONFIRM_FALLBACK_SELECTOR,
     COUPON_SELECTOR,
+    SUCCESS_MODAL_CONTINUE_SELECTOR,
+    SUCCESS_MODAL_INFO_SELECTOR,
+    SUCCESS_MODAL_SELECTOR,
+    SUCCESS_MODAL_TITLE_SELECTOR,
     LiveExecutor,
 )
 from backend.app.live.models import LiveDecision, LivePreparationError, LiveStatus
@@ -102,6 +106,37 @@ class FakePage:
         self.reloads = 0
         self.success = FakeLocator(count=0, visible=False)
         self.failure = FakeLocator(count=0, visible=False)
+        self.success_modal = FakeLocator(count=0, visible=False)
+        self.success_title = FakeLocator(
+            text="Ваша ставка принята!",
+            count=0,
+            visible=False,
+        )
+        self.success_info = FakeLocator(
+            text="Купон № 87729189649",
+            count=0,
+            visible=False,
+        )
+
+        def close_success_modal():
+            self.success_modal.present = 0
+            self.success_modal.visible = False
+            self.success_title.present = 0
+            self.success_title.visible = False
+            self.success_info.present = 0
+            self.success_info.visible = False
+
+        self.success_continue = FakeLocator(
+            text="Продолжить",
+            count=0,
+            visible=False,
+            on_click=close_success_modal,
+        )
+        self.success_modal.children = {
+            SUCCESS_MODAL_TITLE_SELECTOR: self.success_title,
+            SUCCESS_MODAL_INFO_SELECTOR: self.success_info,
+            SUCCESS_MODAL_CONTINUE_SELECTOR: self.success_continue,
+        }
         self.blocked_coupon = FakeLocator(count=0, visible=False)
         self.coupon_bet = FakeLocator()
         self.coupon_team1 = FakeLocator(text="TEAM 1")
@@ -151,6 +186,7 @@ class FakePage:
             BLOCKED_COUPON_SELECTOR: self.blocked_coupon,
             BLOCKED_TEXT_SELECTOR: self.blocked_text,
             BLOCKED_REMOVE_SELECTOR: self.blocked_remove,
+            SUCCESS_MODAL_SELECTOR: self.success_modal,
         }[selector]
 
     async def reload(self, **_kwargs):
@@ -164,6 +200,16 @@ class FakePage:
         self.blocked_text.visible = True
         self.blocked_remove.present = 1
         self.blocked_remove.visible = True
+
+    def show_success_modal(self):
+        self.success_modal.present = 1
+        self.success_modal.visible = True
+        self.success_title.present = 1
+        self.success_title.visible = True
+        self.success_info.present = 1
+        self.success_info.visible = True
+        self.success_continue.present = 1
+        self.success_continue.visible = True
 
     def get_by_text(self, pattern):
         return self.failure if "не принята" in pattern.pattern else self.success
@@ -359,6 +405,34 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observation.signal, "balance debit confirmed")
         self.assertEqual(executor.state(item.attempt_id), LiveStatus.ACTIVE)
         self.assertEqual(page.confirm.clicks, 1)
+
+    async def test_success_modal_confirms_bet_and_clicks_continue(self):
+        events = []
+
+        async def log(event, message):
+            events.append((event, message))
+
+        executor, page, item = LiveExecutor(log), FakePage(), decision(amount=10)
+        await executor.prepare(page, item)
+        page.show_success_modal()
+
+        observation = await executor.wait_for_manual_confirmation(
+            page,
+            item,
+            asyncio.Event(),
+        )
+
+        self.assertTrue(observation.placed)
+        self.assertIn("coupon_id=87729189649", observation.signal)
+        self.assertEqual(page.success_continue.clicks, 1)
+        self.assertFalse(page.success_modal.visible)
+        self.assertEqual(page.reloads, 0)
+        self.assertEqual(executor.state(item.attempt_id), LiveStatus.ACTIVE)
+        self.assertIn("LIVE_SUCCESS_MODAL_DETECTED", [event for event, _ in events])
+        self.assertIn(
+            "LIVE_SUCCESS_MODAL_CONTINUE_CLICKED",
+            [event for event, _ in events],
+        )
 
     async def test_confirmed_bet_clears_lingering_coupon_with_remove_button(self):
         executor, page, item = LiveExecutor(), FakePage(), decision(amount=42)
