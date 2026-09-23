@@ -98,6 +98,83 @@ class BrowserManager:
             except Exception as error:
                 return await self._recover_page_locked(error)
 
+    @staticmethod
+    def _page_url(page: Page) -> str:
+        try:
+            return str(page.url or "")
+        except Exception:
+            return ""
+
+    @classmethod
+    def _select_reusable_page(
+        cls,
+        pages: list[Page],
+        preferred: Page | None = None,
+    ) -> Page | None:
+        """Prefer the current real site tab, then the newest non-blank tab."""
+        open_pages: list[Page] = []
+        for page in pages:
+            try:
+                if not page.is_closed():
+                    open_pages.append(page)
+            except Exception:
+                continue
+        if preferred in open_pages and cls._page_url(preferred) not in {"", "about:blank"}:
+            return preferred
+        for page in reversed(open_pages):
+            if cls._page_url(page) not in {"", "about:blank"}:
+                return page
+        if preferred in open_pages:
+            return preferred
+        return open_pages[-1] if open_pages else None
+
+    async def prepare_session_page(self) -> Page:
+        """Select and stabilize the persistent tab before a new worker starts."""
+        async with self.lock:
+            if not self._context_is_alive():
+                if self.context is not None:
+                    page = await self._recover_page_locked()
+                else:
+                    page = await self._launch_locked(recovered=True)
+            else:
+                try:
+                    page = await self._ensure_page_locked()
+                except Exception as error:
+                    page = await self._recover_page_locked(error)
+
+            try:
+                await page.bring_to_front()
+            except Exception as error:
+                if page.is_closed():
+                    page = await self._recover_page_locked(error)
+                    await page.bring_to_front()
+
+            ready_state = "unknown"
+            try:
+                # stop() clears a navigation left in progress when a previous
+                # worker was cancelled, while preserving cookies/profile state.
+                ready_state = await page.evaluate(
+                    """
+                    () => {
+                      const state = document.readyState;
+                      if (state === 'loading') window.stop();
+                      return state;
+                    }
+                    """
+                )
+            except Exception as error:
+                # Execution context destruction is normal while Chromium is in
+                # the middle of a redirect. goto_with_retry() will settle it.
+                await self._log(
+                    "BROWSER_SESSION_PAGE_BUSY",
+                    f"{type(error).__name__}: {error}",
+                )
+            await self._log(
+                "BROWSER_SESSION_PAGE_READY",
+                f"url={self._page_url(page) or 'about:blank'}; ready_state={ready_state}",
+            )
+            return page
+
     async def _launch_locked(self, *, recovered: bool) -> Page:
         PROFILE_DIR.mkdir(parents=True, exist_ok=True)
         if self.playwright is None:
@@ -125,7 +202,9 @@ class BrowserManager:
         self.generation += 1
         self._context_closed = False
         context.on("close", lambda *_: self._mark_context_closed())
-        self.page = context.pages[0] if context.pages else await context.new_page()
+        self.page = self._select_reusable_page(list(context.pages))
+        if self.page is None:
+            self.page = await context.new_page()
 
         await self._log(
             "CANVAS_2D_HOOK_DEFERRED",
@@ -142,12 +221,19 @@ class BrowserManager:
         return self.page
 
     async def _ensure_page_locked(self) -> Page:
-        if self.page is not None and not self.page.is_closed():
-            return self.page
         assert self.context is not None
-        open_pages = [page for page in self.context.pages if not page.is_closed()]
-        self.page = open_pages[0] if open_pages else await self.context.new_page()
-        await self._log("BROWSER_PAGE_RECOVERED", self.page.url or "about:blank")
+        selected = self._select_reusable_page(list(self.context.pages), self.page)
+        if selected is None:
+            selected = await self.context.new_page()
+        if selected is not self.page:
+            previous_url = self._page_url(self.page) if self.page is not None else "<none>"
+            self.page = selected
+            await self._log(
+                "BROWSER_PAGE_RECOVERED",
+                f"{previous_url} -> {self._page_url(self.page) or 'about:blank'}",
+            )
+        else:
+            self.page = selected
         return self.page
 
     async def stop(self) -> dict[str, str]:

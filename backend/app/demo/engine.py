@@ -380,7 +380,15 @@ class DemoEngine:
             )
             try:
                 await REPOSITORY.log("BROWSER_STARTING", "Проверяем Playwright/browser/context/page")
-                await self.browser_manager.ensure_page()
+                prepare_session_page = getattr(
+                    self.browser_manager,
+                    "prepare_session_page",
+                    None,
+                )
+                if callable(prepare_session_page):
+                    await prepare_session_page()
+                else:
+                    await self.browser_manager.ensure_page()
             except Exception as error:
                 trace = traceback.format_exc()
                 await REPOSITORY.log(

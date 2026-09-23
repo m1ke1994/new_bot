@@ -72,6 +72,35 @@ class StaleContext:
         self.close_calls += 1
 
 
+class ReusablePage:
+    def __init__(self, url):
+        self.url = url
+        self.closed = False
+        self.front_calls = 0
+        self.evaluate_calls = 0
+
+    def is_closed(self):
+        return self.closed
+
+    async def bring_to_front(self):
+        self.front_calls += 1
+
+    async def evaluate(self, expression):
+        self.evaluate_calls += 1
+        return "loading"
+
+
+class ReusableContext:
+    def __init__(self, pages):
+        self.pages = pages
+        self.browser = None
+
+    async def new_page(self):
+        page = ReusablePage("about:blank")
+        self.pages.append(page)
+        return page
+
+
 class DemoLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_filter_settings_are_saved_restored_and_published_to_state(self):
         manager = FakeBrowserManager()
@@ -127,6 +156,21 @@ class DemoLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(page, replacement)
         self.assertEqual(stale_context.close_calls, 1)
         self.assertEqual(manager.generation, 1)
+
+    async def test_browser_manager_prefers_real_site_tab_over_about_blank(self):
+        manager = BrowserManager()
+        blank = ReusablePage("about:blank")
+        site = ReusablePage("https://example.test/ru/live")
+        manager.context = ReusableContext([blank, site])
+        manager.page = blank
+        manager._context_closed = False
+
+        page = await manager.prepare_session_page()
+
+        self.assertIs(page, site)
+        self.assertIs(manager.page, site)
+        self.assertEqual(site.front_calls, 1)
+        self.assertEqual(site.evaluate_calls, 1)
 
     async def test_demo_stop_does_not_stop_browser(self):
         manager = FakeBrowserManager()

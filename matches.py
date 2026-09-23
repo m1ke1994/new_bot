@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from playwright.async_api import Locator, Page
 
 from auth import authorize
+from backend.app.browser.navigation import goto_with_retry
 from xbet_config import RUNTIME_CONFIG, SELECTORS, URL_CONFIG, build_match_url
 
 
@@ -147,10 +148,12 @@ async def open_matches_page(page: Page):
 
     log(f"Открываем: {MATCHES_URL}")
 
-    await page.goto(
+    await goto_with_retry(
+        page,
         MATCHES_URL,
-        wait_until="domcontentloaded",
-        timeout=60_000,
+        timeout_ms=60_000,
+        attempts=2,
+        logger=log,
     )
 
     # Do not pay an unconditional 3-second delay. find_league_container() and

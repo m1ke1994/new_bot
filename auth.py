@@ -6,6 +6,7 @@ from typing import Any
 
 from playwright.async_api import Page
 
+from backend.app.browser.navigation import goto_with_retry
 from xbet_config import SELECTORS, TEXTS, URL_CONFIG
 
 
@@ -91,10 +92,12 @@ async def open_site(page: Page, url: str = SITE_URL) -> None:
         raise RuntimeError("XBET_URL отсутствует в .env")
 
     log(f"Открываем сайт: {url}")
-    await page.goto(
+    await goto_with_retry(
+        page,
         url,
-        wait_until="domcontentloaded",
-        timeout=PAGE_TIMEOUT,
+        timeout_ms=PAGE_TIMEOUT,
+        attempts=2,
+        logger=log,
     )
     # domcontentloaded is enough. The auth poll below observes the header as
     # soon as Vue renders it, instead of paying an unconditional 3-second wait.
