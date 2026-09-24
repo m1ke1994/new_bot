@@ -15,6 +15,11 @@ class FrontendControlTests(unittest.TestCase):
         self.assertIn("Заблокированные события", self.source)
         self.assertIn("item.result === 'MISSED_SELECTED_TEAM_GOAL'", self.source)
 
+    def test_max_three_checkbox_explicitly_applies_to_demo_and_live(self):
+        self.assertIn("max_three_steps_enabled", self.source)
+        self.assertIn("DEMO и LIVE", self.source)
+        self.assertIn("NOT_PLACED шаг не расходуют", self.source)
+
     def test_removed_tactics_are_not_exposed(self):
         router = ROUTER.read_text(encoding="utf-8")
         self.assertNotIn("/forks", router)

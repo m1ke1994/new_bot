@@ -127,6 +127,13 @@ DEMO_BLOCKED_MARKET_STATUSES = frozenset(
     {"MARKET_LOCKED", "MARKET_NOT_FOUND", "ODDS_NOT_FOUND"}
 )
 
+# These preparation failures prove that no selection reached the coupon and
+# therefore no real bet could have been submitted.  They may be retried after
+# a fresh scoreboard/market check without risking a duplicate stake.
+DEFINITELY_UNPLACED_PREPARATION_STATUSES = frozenset(
+    {"LIVE_COUPON_EMPTY_AFTER_CLICK"}
+)
+
 DEMO_ACCEPTANCE_CONFIRMATIONS = 3
 DEMO_ACCEPTANCE_INTERVAL_SECONDS = 0.12
 
@@ -1632,7 +1639,8 @@ class DemoEngine:
                 await REPOSITORY.log(
                     "MATCH_CONSECUTIVE_LOSSES",
                     (
-                        f"match={match_name}; losses_in_match={losses_in_current_match}; "
+                        f"mode={self._mode}; match={match_name}; "
+                        f"accepted_losses_in_match={losses_in_current_match}; "
                         f"step={step}; max_three_steps_enabled="
                         f"{str(self._config.max_three_steps_enabled).lower()}"
                     ),
@@ -1669,12 +1677,11 @@ class DemoEngine:
                 self._current_series = None
                 break
 
-            if (
-                result == "LOSE"
-                and self._config.max_three_steps_enabled
-                and not max_three_switch_used
-                and losses_in_current_match >= 3
-                and step < self._config.max_steps
+            if self._max_three_switch_ready(
+                result=result,
+                switch_already_used=max_three_switch_used,
+                accepted_losses_in_current_match=losses_in_current_match,
+                step=step,
             ):
                 await self._switch_match_after_three_losses(
                     selected_match=selected_match,
@@ -2873,7 +2880,7 @@ class DemoEngine:
         step: int,
         losses_in_current_match: int,
     ) -> int:
-        """Use the one allowed max-three switch for this betting sequence."""
+        """Use the one allowed DEMO/LIVE max-three switch for this sequence."""
         if step >= self._config.max_steps:
             raise ValueError("Cannot switch match after the final configured step")
         current_sequence = await REPOSITORY.get_sequence()
@@ -2892,7 +2899,8 @@ class DemoEngine:
         await REPOSITORY.log(
             "MAX_3_STEPS_LIMIT_REACHED",
             (
-                f"match={match_name}; losses_in_match={losses_in_current_match}; "
+                f"mode={self._mode}; match={match_name}; "
+                f"accepted_losses_in_match={losses_in_current_match}; "
                 f"last_lost_step={step}; next_step={next_step}; "
                 f"next_stake={float(self._config.stakes[next_step - 1]):g}"
             ),
@@ -2928,6 +2936,29 @@ class DemoEngine:
         self._pending_live_bet = None
         self._current_series = None
         return next_step
+
+    def _max_three_switch_ready(
+        self,
+        *,
+        result: str,
+        switch_already_used: bool,
+        accepted_losses_in_current_match: int,
+        step: int,
+    ) -> bool:
+        """Apply max-three equally in DEMO and LIVE after accepted losses only.
+
+        The caller increments ``accepted_losses_in_current_match`` only after a
+        real DEMO bet or a balance-confirmed LIVE bet settles as LOSE. Coupon
+        locks, empty coupons and every NOT_PLACED attempt stay on the same step
+        and never consume this limit.
+        """
+        return bool(
+            result == "LOSE"
+            and self._config.max_three_steps_enabled
+            and not switch_already_used
+            and accepted_losses_in_current_match >= 3
+            and step < self._config.max_steps
+        )
 
     async def _finish_demo_missed_selected_team_goal(
         self,
@@ -3835,9 +3866,118 @@ class DemoEngine:
                     settled=True,
                     resolved_at=local_now(),
                     error=str(error),
+                    placement_signal=error.status,
                 )
                 await REPOSITORY.save_bet(attempt_record)
                 await REPOSITORY.log(error.status, str(error))
+
+                if error.status in DEFINITELY_UNPLACED_PREPARATION_STATUSES:
+                    latest_snapshot = await self._read_fresh_score(
+                        browser,
+                        selected_match,
+                        placement_snapshot,
+                    )
+                    blocked_recovery_score = placement_snapshot.score
+                    blocked_recovery_record = attempt_record
+
+                    if selected_team_scored_between(
+                        placement_snapshot.score,
+                        latest_snapshot.score,
+                        selection.selected_side,
+                    ):
+                        await REPOSITORY.log(
+                            "NEXT_GOAL_EMPTY_COUPON_SELECTED_TEAM_SCORED",
+                            (
+                                f"{placement_snapshot.score.text()} → "
+                                f"{latest_snapshot.score.text()}; selected team "
+                                "scored without an accepted bet"
+                            ),
+                        )
+                        return await self._finish_missed_selected_team_goal(
+                            attempt_record=attempt_record,
+                            selected_match=selected_match,
+                            cycle_id=cycle_id,
+                            step=step,
+                            amount=amount,
+                            score_after_removal=latest_snapshot,
+                            placement_signal=error.status,
+                            explanation=(
+                                "Ставка не принята: купон остался пустым, после "
+                                "чего выбранная команда забила"
+                            ),
+                        )
+
+                    if latest_snapshot.score != placement_snapshot.score:
+                        await REPOSITORY.log(
+                            "NEXT_GOAL_EMPTY_COUPON_OPPONENT_SCORED",
+                            (
+                                f"{placement_snapshot.score.text()} → "
+                                f"{latest_snapshot.score.text()}; opponent scored, "
+                                f"keep step={step} stake={amount:g}"
+                            ),
+                        )
+                    else:
+                        await REPOSITORY.log(
+                            "NEXT_GOAL_EMPTY_COUPON_SCORE_UNCHANGED",
+                            (
+                                f"score={latest_snapshot.score.text()}; "
+                                f"keep step={step} stake={amount:g}"
+                            ),
+                        )
+
+                    await REPOSITORY.discard_unaccepted_bet(attempt_id)
+                    snapshot = latest_snapshot
+                    self._pending_live_bet = self._pending_live_bet.with_score(
+                        snapshot.score
+                    )
+                    await REPOSITORY.log(
+                        "NEXT_GOAL_EMPTY_COUPON_STEP_PRESERVED",
+                        (
+                            f"step={step}; stake={amount:g}; "
+                            f"next_goal={self._pending_live_bet.target_goal_number}"
+                        ),
+                    )
+                    await self._publish_pending_bet(
+                        selection,
+                        match_name,
+                        step,
+                        snapshot,
+                    )
+                    await self._sleep_or_stop(CONFIG.ocr_retry_delay)
+                    try:
+                        odds_result = await self._wait_for_odds(
+                            snapshot,
+                            selected_match,
+                            blocked_attempt_score=blocked_recovery_score,
+                            blocked_selected_side=selection.selected_side,
+                        )
+                    except MissedSelectedTeamGoal as missed:
+                        return await self._finish_missed_selected_team_goal(
+                            attempt_record=blocked_recovery_record,
+                            selected_match=selected_match,
+                            cycle_id=cycle_id,
+                            step=step,
+                            amount=amount,
+                            score_after_removal=missed.snapshot,
+                            placement_signal=error.status,
+                            explanation=(
+                                "Ставка не принята: купон остался пустым, пока "
+                                "бот ожидал новый рынок выбранная команда забила"
+                            ),
+                        )
+                    if odds_result is None:
+                        return None
+                    snapshot, current_odds = odds_result
+                    retrying_blocked_attempt = True
+                    await REPOSITORY.log(
+                        "LIVE_EMPTY_COUPON_RETRYING_SAME_MATCH",
+                        (
+                            f"step={step}; stake={amount:g}; "
+                            f"next_goal={self._pending_live_bet.target_goal_number}"
+                        ),
+                    )
+                    continue
+
                 if self.live_executor.market_was_selected(attempt_id):
                     await STATE.update(
                         mode="LIVE",

@@ -1099,7 +1099,7 @@ onBeforeUnmount(() => {
 
               <input v-model="strategyConfig.max_three_steps_enabled" type="checkbox" :disabled="state.running || actionPending" @change="saveMatchFilters">
 
-              <span class="filter-copy"><strong>max 3 шага</strong><small>Только в первом матче: после 3 проигрышей перейти на второй матч; во втором идти догоном до WIN или конца ряда</small></span>
+              <span class="filter-copy"><strong>max 3 шага</strong><small>DEMO и LIVE: после 3 принятых проигранных ставок перейти на второй матч с шага 4; блокировки и NOT_PLACED шаг не расходуют</small></span>
 
               <span class="filter-state">{{ strategyConfig.max_three_steps_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
 

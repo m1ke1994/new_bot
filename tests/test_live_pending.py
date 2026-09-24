@@ -20,7 +20,11 @@ from backend.app.demo.models import (
     TeamSelection,
 )
 from backend.app.live.executor import BLOCKED_EVENT_SIGNAL
-from backend.app.live.models import PendingLiveBet, PlacementObservation
+from backend.app.live.models import (
+    LivePreparationError,
+    PendingLiveBet,
+    PlacementObservation,
+)
 
 
 def snapshot(score1, score2):
@@ -41,6 +45,173 @@ class FakeManager:
 
 
 class LivePendingTests(unittest.IsolatedAsyncioTestCase):
+    async def _run_empty_coupon_recovery(
+        self,
+        latest_score: ScoreboardSnapshot,
+        *,
+        selected_team_scored: bool,
+    ):
+        initial = snapshot(1, 1)
+        initial_odds = NextGoalOdds(
+            1.80,
+            2.03,
+            next_goal_number=3,
+            team1_locator=object(),
+            team2_locator=object(),
+        )
+        next_goal = latest_score.score.team1 + latest_score.score.team2 + 1
+        retry_odds = NextGoalOdds(
+            1.82,
+            2.04,
+            next_goal_number=next_goal,
+            team1_locator=object(),
+            team2_locator=object(),
+        )
+        selection = TeamSelection(
+            "TEAM 2",
+            Scorer.TEAM_2,
+            2.03,
+            "TEAM 1",
+            1.80,
+        )
+        empty_coupon = LivePreparationError(
+            "LIVE_COUPON_EMPTY_AFTER_CLICK",
+            "Coupon remained empty after Canvas click",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = DemoRepository(Path(directory))
+            sequence = await repository.save_sequence(
+                current_step=3,
+                status="ACTIVE",
+                current_match_id="match",
+                selected_team="TEAM 2",
+            )
+            with patch("backend.app.demo.engine.REPOSITORY", repository):
+                engine = DemoEngine(FakeManager())
+                engine._mode = "LIVE"
+                engine._pending_live_bet = PendingLiveBet(
+                    "match_TEAM_2_step3",
+                    "match",
+                    "TEAM 2",
+                    Scorer.TEAM_2,
+                    3,
+                    288,
+                    3,
+                )
+                engine._sleep_or_stop = AsyncMock()
+                engine._publish_pending_bet = AsyncMock()
+                engine.live_executor.prepare = AsyncMock(
+                    side_effect=(
+                        [empty_coupon]
+                        if selected_team_scored
+                        else [empty_coupon, None]
+                    )
+                )
+                engine.live_executor.market_was_selected = Mock(return_value=True)
+                engine.live_executor.manual_click_seen = AsyncMock(return_value=True)
+                engine.live_executor.blocked_event_exists = AsyncMock(
+                    return_value=False
+                )
+                engine._read_fresh_score = AsyncMock(
+                    side_effect=[latest_score, latest_score, latest_score]
+                )
+                engine._wait_for_odds = AsyncMock(
+                    return_value=(latest_score, retry_odds)
+                )
+                engine._wait_for_live_confirmation_or_score = AsyncMock(
+                    return_value=(
+                        PlacementObservation(True, "accepted"),
+                        latest_score,
+                    )
+                )
+
+                result = await engine._prepare_live_until_placed(
+                    browser=object(),
+                    selected_match={"match_id": "match"},
+                    selection=selection,
+                    match_name="TEAM 1 — TEAM 2",
+                    cycle_id=sequence["sequence_id"],
+                    step=3,
+                    amount=288,
+                    snapshot=initial,
+                    current_odds=initial_odds,
+                    record={"mode": "LIVE"},
+                )
+
+                history = await repository.history(mode="LIVE")
+                final_sequence = await repository.get_sequence()
+                logs = await repository.logs()
+
+        decisions = [
+            call.args[1]
+            for call in engine.live_executor.prepare.await_args_list
+        ]
+        self.assertFalse(engine._stop_event.is_set())
+
+        if selected_team_scored:
+            self.assertIsInstance(result, BlockedMatchSwitch)
+            self.assertEqual(len(decisions), 1)
+            self.assertEqual(result.step, 1)
+            self.assertEqual(final_sequence["current_step"], 1)
+            self.assertEqual(final_sequence["status"], "WAITING_FOR_MATCH")
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["result"], "MISSED_SELECTED_TEAM_GOAL")
+            self.assertEqual(
+                history[0]["placement_signal"],
+                "LIVE_COUPON_EMPTY_AFTER_CLICK",
+            )
+            engine._wait_for_odds.assert_not_awaited()
+        else:
+            self.assertNotIsInstance(result, BlockedMatchSwitch)
+            self.assertIsNotNone(result)
+            self.assertEqual(len(decisions), 2)
+            self.assertEqual([item.strategy_step for item in decisions], [3, 3])
+            self.assertEqual([item.amount for item in decisions], [288, 288])
+            self.assertEqual([item.goal_number for item in decisions], [3, next_goal])
+            self.assertEqual(final_sequence["current_step"], 3)
+            self.assertEqual(final_sequence["selected_team"], "TEAM 2")
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["result"], "ACTIVE")
+            self.assertEqual(history[0]["step"], 3)
+            self.assertEqual(history[0]["next_goal_number"], next_goal)
+            self.assertIn(
+                "LIVE_EMPTY_COUPON_RETRYING_SAME_MATCH",
+                [item["event"] for item in logs],
+            )
+
+        return logs
+
+    async def test_empty_coupon_without_score_change_retries_same_step(self):
+        logs = await self._run_empty_coupon_recovery(
+            snapshot(1, 1),
+            selected_team_scored=False,
+        )
+        self.assertIn(
+            "NEXT_GOAL_EMPTY_COUPON_SCORE_UNCHANGED",
+            [item["event"] for item in logs],
+        )
+
+    async def test_empty_coupon_opponent_goal_retries_same_step(self):
+        logs = await self._run_empty_coupon_recovery(
+            snapshot(2, 1),
+            selected_team_scored=False,
+        )
+        self.assertIn(
+            "NEXT_GOAL_EMPTY_COUPON_OPPONENT_SCORED",
+            [item["event"] for item in logs],
+        )
+
+    async def test_empty_coupon_selected_team_goal_switches_match_at_step_one(self):
+        logs = await self._run_empty_coupon_recovery(
+            snapshot(1, 2),
+            selected_team_scored=True,
+        )
+        self.assertIn(
+            "NEXT_GOAL_EMPTY_COUPON_SELECTED_TEAM_SCORED",
+            [item["event"] for item in logs],
+        )
+
     async def _run_blocked_recovery(
         self,
         latest_score: ScoreboardSnapshot,
