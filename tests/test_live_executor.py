@@ -528,6 +528,49 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status, "LIVE_COUPON_SELECTION_UNKNOWN")
         self.assertEqual(page.confirm.clicks, 0)
 
+    async def test_waits_for_coupon_selection_card_after_amount_input(self):
+        events = []
+
+        async def log(event, _message):
+            events.append(event)
+
+        executor, page, item = LiveExecutor(log), FakePage(), decision()
+        page.coupon_bet.present = 0
+
+        async def render_selection():
+            await asyncio.sleep(0.02)
+            page.coupon_bet.present = 1
+
+        render_task = asyncio.create_task(render_selection())
+        signal = await executor._wait_for_coupon_selection(
+            page,
+            item,
+            timeout_seconds=0.20,
+        )
+        await render_task
+
+        self.assertEqual(signal, "VERIFIED")
+        self.assertIn("LIVE_COUPON_SELECTION_RENDER_WAIT", events)
+        self.assertIn("LIVE_COUPON_SELECTION_RENDERED", events)
+
+    async def test_missing_coupon_selection_is_definitely_not_submitted(self):
+        executor, page, item = LiveExecutor(), FakePage(), decision()
+        page.coupon_bet.present = 0
+
+        with self.assertRaises(LivePreparationError) as raised:
+            await executor._wait_for_coupon_selection(
+                page,
+                item,
+                timeout_seconds=0.02,
+            )
+
+        self.assertEqual(
+            raised.exception.status,
+            "LIVE_COUPON_SELECTION_NOT_RENDERED",
+        )
+        self.assertEqual(page.amount.fills, [])
+        self.assertEqual(page.confirm.clicks, 0)
+
     async def test_visible_empty_coupon_does_not_count_as_selected_bet(self):
         executor, page, item = LiveExecutor(), FakePage(), decision()
         page.empty_coupon.present = 1

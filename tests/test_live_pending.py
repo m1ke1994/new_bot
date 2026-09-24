@@ -50,6 +50,7 @@ class LivePendingTests(unittest.IsolatedAsyncioTestCase):
         latest_score: ScoreboardSnapshot,
         *,
         selected_team_scored: bool,
+        preparation_status: str = "LIVE_COUPON_EMPTY_AFTER_CLICK",
     ):
         initial = snapshot(1, 1)
         initial_odds = NextGoalOdds(
@@ -75,8 +76,8 @@ class LivePendingTests(unittest.IsolatedAsyncioTestCase):
             1.80,
         )
         empty_coupon = LivePreparationError(
-            "LIVE_COUPON_EMPTY_AFTER_CLICK",
-            "Coupon remained empty after Canvas click",
+            preparation_status,
+            "Coupon did not contain a rendered selection after Canvas click",
         )
 
         with tempfile.TemporaryDirectory() as directory:
@@ -159,7 +160,7 @@ class LivePendingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(history[0]["result"], "MISSED_SELECTED_TEAM_GOAL")
             self.assertEqual(
                 history[0]["placement_signal"],
-                "LIVE_COUPON_EMPTY_AFTER_CLICK",
+                preparation_status,
             )
             engine._wait_for_odds.assert_not_awaited()
         else:
@@ -209,6 +210,17 @@ class LivePendingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(
             "NEXT_GOAL_EMPTY_COUPON_SELECTED_TEAM_SCORED",
+            [item["event"] for item in logs],
+        )
+
+    async def test_unrendered_coupon_selection_retries_same_step(self):
+        logs = await self._run_empty_coupon_recovery(
+            snapshot(1, 1),
+            selected_team_scored=False,
+            preparation_status="LIVE_COUPON_SELECTION_NOT_RENDERED",
+        )
+        self.assertIn(
+            "LIVE_EMPTY_COUPON_RETRYING_SAME_MATCH",
             [item["event"] for item in logs],
         )
 

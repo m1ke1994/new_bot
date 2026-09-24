@@ -131,7 +131,10 @@ DEMO_BLOCKED_MARKET_STATUSES = frozenset(
 # therefore no real bet could have been submitted.  They may be retried after
 # a fresh scoreboard/market check without risking a duplicate stake.
 DEFINITELY_UNPLACED_PREPARATION_STATUSES = frozenset(
-    {"LIVE_COUPON_EMPTY_AFTER_CLICK"}
+    {
+        "LIVE_COUPON_EMPTY_AFTER_CLICK",
+        "LIVE_COUPON_SELECTION_NOT_RENDERED",
+    }
 )
 
 DEMO_ACCEPTANCE_CONFIRMATIONS = 3

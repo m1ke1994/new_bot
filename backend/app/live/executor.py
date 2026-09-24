@@ -42,6 +42,7 @@ CONFIRM_SELECTOR = (
 )
 CONFIRM_TEXT = "Сделать ставку"
 CONFIRM_WAIT_SECONDS = 5.0
+COUPON_SELECTION_WAIT_SECONDS = 10.0
 BALANCE_SELECTOR = '[data-gtm="account-balance-value-desktop"]'
 BLOCKED_COUPON_SELECTOR = (
     ".coupon-bet__lock, "
@@ -454,6 +455,96 @@ class LiveExecutor:
                 f"{decision.team!r}, команда {side_number}, гол №{decision.goal_number}.",
             )
 
+    async def _wait_for_coupon_selection(
+        self,
+        page: Any,
+        decision: LiveDecision,
+        *,
+        timeout_seconds: float = COUPON_SELECTION_WAIT_SECONDS,
+    ) -> str:
+        """Wait until the selected outcome finishes rendering inside coupon.
+
+        The amount input can become visible before Vue mounts the coupon bet
+        card.  Treating that short intermediate state as a malformed coupon
+        stopped LIVE even though no stake had been filled or submitted.
+        """
+        if decision.side.value not in {"TEAM_1", "TEAM_2"}:
+            return "VERIFIED"
+
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        deadline = started_at + timeout_seconds
+        wait_logged = False
+        last_count = 0
+        last_details = "карточка исхода отсутствует"
+
+        while loop.time() < deadline:
+            if await self.blocked_event_exists(page):
+                return "BLOCKED"
+
+            try:
+                bets = page.locator(COUPON_BET_SELECTOR)
+                visible = [
+                    bets.nth(index)
+                    for index in range(await bets.count())
+                    if await bets.nth(index).is_visible()
+                ]
+                last_count = len(visible)
+
+                # Multiple selections are not a render delay. Submitting in
+                # this state could place an unintended accumulator.
+                if last_count > 1:
+                    raise LivePreparationError(
+                        "LIVE_COUPON_SELECTION_UNKNOWN",
+                        f"Ожидалась одна выбранная ставка в купоне, найдено: {last_count}.",
+                    )
+
+                if last_count == 1:
+                    try:
+                        await self._verify_coupon_selection(page, decision)
+                    except LivePreparationError as error:
+                        if error.status != "LIVE_COUPON_SELECTION_UNKNOWN":
+                            raise
+                        # The card exists, but its team/market children can be
+                        # mounted one render tick later.
+                        last_details = str(error)
+                    else:
+                        waited_ms = int((loop.time() - started_at) * 1000)
+                        if wait_logged:
+                            await self._log(
+                                "LIVE_COUPON_SELECTION_RENDERED",
+                                f"attempt={decision.attempt_id}; waited_ms={waited_ms}",
+                            )
+                        return "VERIFIED"
+                else:
+                    last_details = "карточка исхода отсутствует"
+            except LivePreparationError:
+                raise
+            except Exception as error:
+                # Coupon children can be replaced while Vue is rendering.
+                # Retry only before any amount or confirmation interaction.
+                last_details = f"{type(error).__name__}: {error}"
+
+            if not wait_logged:
+                wait_logged = True
+                await self._log(
+                    "LIVE_COUPON_SELECTION_RENDER_WAIT",
+                    (
+                        f"attempt={decision.attempt_id}; amount/confirm surface is visible, "
+                        "waiting for selected outcome card"
+                    ),
+                )
+            await asyncio.sleep(0.10)
+
+        raise LivePreparationError(
+            "LIVE_COUPON_SELECTION_NOT_RENDERED",
+            (
+                "Coupon открылся, но выбранный исход не отрисовался за "
+                f"{timeout_seconds:g} сек.; visible_bets={last_count}; {last_details}. "
+                "Сумма не вводилась, ставка не отправлялась."
+            ),
+        )
+
     async def remove_blocked_coupon(self, page: Any, attempt_id: str) -> bool:
         """Remove one rejected coupon exactly once for a placement attempt."""
         async with self._lock:
@@ -590,7 +681,19 @@ class LiveExecutor:
                     )
                     return
 
-                await self._verify_coupon_selection(page, decision)
+                selection_signal = await self._wait_for_coupon_selection(page, decision)
+                if selection_signal == "BLOCKED":
+                    await self._log(
+                        "LIVE_BLOCKED_EVENT_DETECTED",
+                        f"attempt={decision.attempt_id}; phase=waiting_coupon_selection",
+                    )
+                    await self._publish(
+                        decision.attempt_id,
+                        LiveStatus.AWAITING_PLACEMENT_RESULT,
+                        "Coupon заблокирован; ставка не отправляется",
+                        publish,
+                    )
+                    return
                 await self._log(
                     "LIVE_COUPON_SELECTION_VERIFIED",
                     f"attempt={decision.attempt_id}; team={decision.team}; goal={decision.goal_number}",
