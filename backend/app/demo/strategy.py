@@ -175,7 +175,7 @@ def can_create_initial_bet(score: Score, *, has_active_bet: bool = False) -> boo
 
 def select_team_with_higher_odds(team1: str, team2: str, odds: NextGoalOdds) -> TeamSelection:
     if odds.team1 == odds.team2:
-        raise ValueError("Equal odds do not select a team")
+        return TeamSelection(team1, Scorer.TEAM_1, odds.team1, team2, odds.team2)
     if odds.team1 > odds.team2:
         return TeamSelection(team1, Scorer.TEAM_1, odds.team1, team2, odds.team2)
     return TeamSelection(team2, Scorer.TEAM_2, odds.team2, team1, odds.team1)

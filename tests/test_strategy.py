@@ -156,13 +156,18 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(result.selected_side, Scorer.TEAM_1)
         self.assertEqual(result.other_team, "Олимпиакос")
 
-    def test_equal_odds_are_rejected(self):
-        with self.assertRaises(ValueError):
-            select_team_with_higher_odds(
-                "A",
-                "B",
-                NextGoalOdds(team1=2.0, team2=2.0),
-            )
+    def test_equal_odds_select_first_team(self):
+        result = select_team_with_higher_odds(
+            "A",
+            "B",
+            NextGoalOdds(team1=2.0, team2=2.0),
+        )
+
+        self.assertEqual(result.selected_team, "A")
+        self.assertEqual(result.selected_side, Scorer.TEAM_1)
+        self.assertEqual(result.selected_odds, 2.0)
+        self.assertEqual(result.other_team, "B")
+        self.assertEqual(result.other_odds, 2.0)
 
     def test_selected_side_stays_fixed_when_later_odds_reverse(self):
         selection = select_team_with_higher_odds(
