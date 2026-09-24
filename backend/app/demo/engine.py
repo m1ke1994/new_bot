@@ -634,6 +634,7 @@ class DemoEngine:
             else set()
         )
         logged_blocked_skips: set[str] = set()
+        logged_completed_skips: set[str] = set()
         await STATE.update(
             selected_team=None,
             selected_side=None,
@@ -713,6 +714,9 @@ class DemoEngine:
                 await self._sleep_or_stop(CONFIG.league_retry_interval)
                 continue
             allowed_matches = []
+            completed_match_ids = await REPOSITORY.completed_next_goal_match_ids(
+                mode=self._mode,
+            )
             for item in matches:
                 excluded_team = excluded_team_in_match(
                     item["team1"],
@@ -725,6 +729,18 @@ class DemoEngine:
                         f"{item['team1']} — {item['team2']}: match excluded by team filter "
                         f"({excluded_team})",
                     )
+                    continue
+                match_id = next_goal_match_identity(item)
+                if match_id and match_id in completed_match_ids:
+                    if match_id not in logged_completed_skips:
+                        await REPOSITORY.log(
+                            "NEXT_GOAL_COMPLETED_MATCH_SKIPPED",
+                            (
+                                f"match_id={match_id}; "
+                                "selected team already scored in this match"
+                            ),
+                        )
+                        logged_completed_skips.add(match_id)
                     continue
                 allowed_matches.append(item)
             matches = allowed_matches
@@ -1630,10 +1646,25 @@ class DemoEngine:
                 )
                 self._current_series.status = "FINISHED"
                 await REPOSITORY.add_cycle(
-                    {"cycle_id": cycle_id, "match": match_name, "mode": self._mode, "strategy_type": StrategyType.NEXT_GOAL.value, "result": "WIN", "steps": step}
+                    {
+                        "cycle_id": cycle_id,
+                        "match": match_name,
+                        "match_id": next_goal_match_identity(selected_match),
+                        "mode": self._mode,
+                        "strategy_type": StrategyType.NEXT_GOAL.value,
+                        "result": "WIN",
+                        "steps": step,
+                    }
                 )
                 await REPOSITORY.log("STRATEGY_CYCLE_WON", match_name)
                 await REPOSITORY.reset_sequence()
+                await REPOSITORY.log(
+                    "NEXT_GOAL_WIN_NEXT_MATCH_STEP_ONE",
+                    (
+                        f"match_id={next_goal_match_identity(selected_match)}; "
+                        "selected team scored; next match starts at step=1"
+                    ),
+                )
                 await STATE.update(stats=await REPOSITORY.stats(), sequence=await REPOSITORY.get_sequence())
                 self._current_series = None
                 break
@@ -3244,7 +3275,12 @@ class DemoEngine:
         placement_signal: str = BLOCKED_EVENT_SIGNAL,
         explanation: str = "Ставка не принята: выбранная команда забила во время блокировки",
     ) -> BlockedMatchSwitch:
-        """Record a selected-team goal missed before activation and switch matches."""
+        """Finish the match when our team scores before coupon activation.
+
+        The unaccepted step is never advanced.  A selected-team goal completes
+        the current chase, so the next eligible match starts a fresh sequence
+        from step one.
+        """
         match_id = next_goal_match_identity(selected_match)
         blocked_record = await REPOSITORY.save_bet(
             {
@@ -3263,17 +3299,22 @@ class DemoEngine:
                 "explanation": explanation,
             }
         )
-        await REPOSITORY.add_blocked_match(cycle_id, match_id)
         await REPOSITORY.log(
-            "NEXT_GOAL_BLOCKED_MATCH_BLACKLISTED",
-            f"[NEXT_GOAL][BLOCKED] match added to blocked_match_ids: {match_id}",
+            "NEXT_GOAL_SELECTED_TEAM_GOAL_MATCH_COMPLETED",
+            f"match_id={match_id}; unaccepted_step={step}",
         )
-        sequence = await REPOSITORY.save_sequence(
-            current_step=step,
-            status="WAITING_NEXT_MATCH",
-            current_match_id=None,
-            selected_team=None,
+        await REPOSITORY.add_cycle(
+            {
+                "cycle_id": cycle_id,
+                "match": str(attempt_record.get("match") or match_id),
+                "match_id": match_id,
+                "mode": str(attempt_record.get("mode") or self._mode).upper(),
+                "strategy_type": StrategyType.NEXT_GOAL.value,
+                "result": "MISSED_SELECTED_TEAM_GOAL",
+                "steps": max(step - 1, 0),
+            }
         )
+        sequence = await REPOSITORY.reset_sequence()
         self._pending_live_bet = None
         self._active_live_bet = None
         await REPOSITORY.log(
@@ -3281,8 +3322,11 @@ class DemoEngine:
             "[NEXT_GOAL][BLOCKED] MISSED_SELECTED_TEAM_GOAL",
         )
         await REPOSITORY.log(
-            "NEXT_GOAL_BLOCKED_STEP_PRESERVED",
-            f"[NEXT_GOAL][BLOCKED] preserving step={step} stake={amount:g}",
+            "NEXT_GOAL_SELECTED_TEAM_GOAL_SERIES_RESET",
+            (
+                f"unaccepted_step={step}; unaccepted_stake={amount:g}; "
+                f"next_step=1; next_stake={float(self._config.stakes[0]):g}"
+            ),
         )
         await REPOSITORY.log(
             "NEXT_GOAL_BLOCKED_MATCH_SKIPPED",
@@ -3295,13 +3339,20 @@ class DemoEngine:
         await STATE.update(
             status=DemoStatus.WAITING_NEXT_MATCH.value,
             event="MISSED_SELECTED_TEAM_GOAL",
-            message=f"Пропущен гол выбранной команды — продолжаем шаг {step} в другом матче",
+            message=(
+                "Выбранная команда забила — текущий матч завершён; "
+                "следующий матч начнётся с шага 1"
+            ),
             bet={**blocked_record, "max_steps": self._config.max_steps},
             sequence=sequence,
             budget=self._budget.snapshot(),
             stats=await REPOSITORY.stats(),
         )
-        return BlockedMatchSwitch(match_id=match_id, step=step, amount=amount)
+        return BlockedMatchSwitch(
+            match_id=match_id,
+            step=1,
+            amount=float(self._config.stakes[0]),
+        )
 
     async def _finish_live_blocked_coupon_switch(
         self,

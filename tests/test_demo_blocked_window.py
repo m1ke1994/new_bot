@@ -367,7 +367,7 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(window.blocked_score_before, Score(4, 0))
         self.assertEqual(reader.await_count, 3)
 
-    async def test_demo_missed_result_preserves_progress_and_blacklists_match(self):
+    async def test_demo_selected_goal_resets_progress_for_next_match(self):
         with tempfile.TemporaryDirectory() as directory:
             repository = DemoRepository(Path(directory))
             sequence = await repository.save_sequence(
@@ -400,9 +400,9 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history[0]["result"], "MISSED_SELECTED_TEAM_GOAL")
         self.assertEqual(history[0]["placement_signal"], "DEMO_MARKET_BLOCKED")
         self.assertEqual(history[0]["budget_change"], 0)
-        self.assertEqual(saved_sequence["current_step"], 3)
-        self.assertEqual(saved_sequence["cumulative_losses"], "65.00")
-        self.assertIn("match", saved_sequence["blocked_match_ids"])
+        self.assertEqual(saved_sequence["current_step"], 1)
+        self.assertEqual(saved_sequence["cumulative_losses"], "0.00")
+        self.assertEqual(saved_sequence["blocked_match_ids"], [])
         self.assertEqual(budget_after, budget_before)
         self.assertEqual(engine.live_executor._states, {})
 
@@ -465,9 +465,9 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["step"] for item in history], [1, 2])
         self.assertEqual(history[1]["amount"], 45)
         self.assertEqual(history[1]["budget_change"], 0)
-        self.assertEqual(saved_sequence["current_step"], 2)
-        self.assertEqual(saved_sequence["status"], "WAITING_NEXT_MATCH")
-        self.assertIn("match", saved_sequence["blocked_match_ids"])
+        self.assertEqual(saved_sequence["current_step"], 1)
+        self.assertEqual(saved_sequence["status"], "WAITING_FOR_MATCH")
+        self.assertEqual(saved_sequence["blocked_match_ids"], [])
         self.assertEqual(
             budget_after["current_budget"],
             budget_before["current_budget"] - 20,
@@ -604,8 +604,8 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([item["step"] for item in history], [1, 2])
         self.assertEqual(engine._wait_for_odds.await_count, 1)
-        self.assertEqual(sequence["current_step"], 2)
-        self.assertEqual(sequence["status"], "WAITING_NEXT_MATCH")
+        self.assertEqual(sequence["current_step"], 1)
+        self.assertEqual(sequence["status"], "WAITING_FOR_MATCH")
         events = [item["event"] for item in logs]
         started = events.index("NEXT_STEP_PROTECTION_STARTED")
         changed = events.index("NEXT_STEP_SCORE_CHANGED_NO_ACTIVE_BET")
@@ -794,8 +794,8 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
             ["LOSE", "LOSE", "MISSED_SELECTED_TEAM_GOAL"],
         )
         self.assertEqual([item["step"] for item in history], [1, 2, 3])
-        self.assertEqual(sequence["current_step"], 3)
-        self.assertEqual(sequence["status"], "WAITING_NEXT_MATCH")
+        self.assertEqual(sequence["current_step"], 1)
+        self.assertEqual(sequence["status"], "WAITING_FOR_MATCH")
 
     async def test_multi_goal_delta_uses_selected_side_total(self):
         with tempfile.TemporaryDirectory() as directory:

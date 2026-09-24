@@ -282,6 +282,30 @@ class DemoRepository:
                 result.add(str(match_id))
         return result
 
+    async def completed_next_goal_match_ids(self, *, mode: str) -> set[str]:
+        """Return matches that must not be selected for a new next-goal cycle.
+
+        A match is complete for this strategy when the selected team scored:
+        either an accepted bet settled as WIN or the goal happened while the
+        next coupon was still unaccepted.  LOSE and NOT_PLACED records are not
+        terminal, because the same match and strategy step must continue.
+        """
+        expected_mode = mode.strip().upper()
+        terminal_results = {"WIN", "MISSED_SELECTED_TEAM_GOAL"}
+        result: set[str] = set()
+        for item in await self.history(5000, mode=expected_mode):
+            if (
+                str(item.get("strategy_type") or "NEXT_GOAL").upper()
+                != "NEXT_GOAL"
+            ):
+                continue
+            if str(item.get("result") or "").upper() not in terminal_results:
+                continue
+            match_id = item.get("match_id")
+            if match_id:
+                result.add(str(match_id))
+        return result
+
     async def verified_active_live_bet(self) -> dict[str, Any] | None:
         for item in reversed(await self.history(5000, mode="LIVE")):
             if item.get("result") == "ACTIVE" and item.get("placement_confirmed_at"):

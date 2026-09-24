@@ -250,7 +250,7 @@ class NextGoalBlockedSwitchTests(unittest.IsolatedAsyncioTestCase):
             "opened": list(SwitchingLeagueBrowser.opened_match_ids),
         }
 
-    async def test_step_three_blocked_switches_match_without_consuming_step(self):
+    async def test_selected_goal_resets_step_before_switching_match(self):
         result = await self._run_scenario(
             ["MISSED", "ACCEPTED_LOSE"],
             start_step=3,
@@ -258,13 +258,13 @@ class NextGoalBlockedSwitchTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result["opened"], ["A", "B"])
-        self.assertEqual([item["step"] for item in result["history"]], [3, 3])
-        self.assertEqual([item["amount"] for item in result["history"]], [96, 96])
+        self.assertEqual([item["step"] for item in result["history"]], [3, 1])
+        self.assertEqual([item["amount"] for item in result["history"]], [96, 20])
         self.assertEqual(result["history"][0]["result"], "MISSED_SELECTED_TEAM_GOAL")
         self.assertEqual(result["history"][0]["budget_change"], 0)
-        self.assertIn("A", result["sequence"]["blocked_match_ids"])
+        self.assertEqual(result["sequence"]["blocked_match_ids"], [])
 
-    async def test_selected_goal_on_first_step_switches_and_preserves_first_step(self):
+    async def test_selected_goal_on_first_step_starts_new_sequence(self):
         result = await self._run_scenario(
             ["MISSED"],
             start_step=1,
@@ -276,7 +276,7 @@ class NextGoalBlockedSwitchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["history"][0]["step"], 1)
         self.assertEqual(result["history"][0]["amount"], 20)
         self.assertEqual(result["sequence"]["current_step"], 1)
-        self.assertEqual(result["sequence"]["status"], "WAITING_NEXT_MATCH")
+        self.assertEqual(result["sequence"]["status"], "WAITING_FOR_MATCH")
 
     async def test_selected_goal_on_last_step_does_not_exhaust_sequence(self):
         result = await self._run_scenario(
@@ -288,8 +288,8 @@ class NextGoalBlockedSwitchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["history"][0]["result"], "MISSED_SELECTED_TEAM_GOAL")
         self.assertEqual(result["history"][0]["step"], 3)
         self.assertEqual(result["history"][0]["amount"], 102)
-        self.assertEqual(result["sequence"]["current_step"], 3)
-        self.assertEqual(result["sequence"]["status"], "WAITING_NEXT_MATCH")
+        self.assertEqual(result["sequence"]["current_step"], 1)
+        self.assertEqual(result["sequence"]["status"], "WAITING_FOR_MATCH")
 
     async def test_real_live_blocked_signal_removes_coupon_and_returns_switch(self):
         selected_match = MATCHES[0]
@@ -378,10 +378,11 @@ class NextGoalBlockedSwitchTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(history[0]["settled"])
         self.assertEqual(history[0]["amount"], 96)
         self.assertEqual(history[0]["budget_change"], 0)
-        self.assertEqual(sequence["current_step"], 3)
-        self.assertEqual(sequence["cumulative_losses"], "44.00")
+        self.assertEqual(result.step, 1)
+        self.assertEqual(sequence["current_step"], 1)
+        self.assertEqual(sequence["cumulative_losses"], "0.00")
         self.assertEqual(budget_after, budget_before)
-        self.assertIn("A", sequence["blocked_match_ids"])
+        self.assertEqual(sequence["blocked_match_ids"], [])
         engine.live_executor.remove_blocked_coupon.assert_awaited_once()
         engine.live_executor.prepare.assert_awaited_once()
         engine._wait_for_odds.assert_not_awaited()
@@ -538,10 +539,11 @@ class NextGoalBlockedSwitchTests(unittest.IsolatedAsyncioTestCase):
         if selected_team_scored:
             self.assertIsInstance(result, BlockedMatchSwitch)
             self.assertEqual(len(decisions), 1)
-            self.assertEqual(final_sequence["current_step"], 2)
-            self.assertEqual(final_sequence["status"], "WAITING_NEXT_MATCH")
+            self.assertEqual(result.step, 1)
+            self.assertEqual(final_sequence["current_step"], 1)
+            self.assertEqual(final_sequence["status"], "WAITING_FOR_MATCH")
             self.assertIsNone(final_sequence["selected_team"])
-            self.assertIn("A", final_sequence["blocked_match_ids"])
+            self.assertEqual(final_sequence["blocked_match_ids"], [])
             self.assertEqual(len(history), 1)
             self.assertEqual(history[0]["result"], "MISSED_SELECTED_TEAM_GOAL")
             engine._wait_for_odds.assert_not_awaited()
@@ -600,6 +602,16 @@ class NextGoalBlockedSwitchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(
             "NEXT_GOAL_BLOCKED_SELECTED_TEAM_SCORED",
+            [item["event"] for item in logs],
+        )
+
+    async def test_both_teams_scoring_during_unaccepted_step_resets_to_step_one(self):
+        logs = await self._run_confirmed_blocked_recovery(
+            snapshot(MATCHES[0], 3, 1),
+            selected_team_scored=True,
+        )
+        self.assertIn(
+            "NEXT_GOAL_SELECTED_TEAM_GOAL_SERIES_RESET",
             [item["event"] for item in logs],
         )
 
@@ -741,9 +753,9 @@ class NextGoalBlockedSwitchTests(unittest.IsolatedAsyncioTestCase):
             [item["result"] for item in result["history"]],
             ["MISSED_SELECTED_TEAM_GOAL", "MISSED_SELECTED_TEAM_GOAL", "LOSE"],
         )
-        self.assertEqual([item["step"] for item in result["history"]], [3, 3, 3])
-        self.assertEqual([item["amount"] for item in result["history"]], [96, 96, 96])
-        self.assertEqual(result["sequence"]["current_step"], 4)
+        self.assertEqual([item["step"] for item in result["history"]], [3, 1, 1])
+        self.assertEqual([item["amount"] for item in result["history"]], [96, 20, 20])
+        self.assertEqual(result["sequence"]["current_step"], 2)
 
     async def test_blocked_then_win_resets_step_and_blocked_matches(self):
         result = await self._run_scenario(
@@ -757,9 +769,25 @@ class NextGoalBlockedSwitchTests(unittest.IsolatedAsyncioTestCase):
             [item["result"] for item in result["history"]],
             ["MISSED_SELECTED_TEAM_GOAL", "WIN"],
         )
-        self.assertEqual([item["amount"] for item in result["history"]], [464, 464])
+        self.assertEqual([item["amount"] for item in result["history"]], [464, 20])
         self.assertEqual(result["sequence"]["current_step"], 1)
         self.assertEqual(result["sequence"]["blocked_match_ids"], [])
+
+    async def test_accepted_win_skips_current_match_and_next_starts_at_step_one(self):
+        result = await self._run_scenario(
+            ["ACCEPTED_WIN", "ACCEPTED_LOSE"],
+            start_step=1,
+            stakes=[20, 45, 102],
+        )
+
+        self.assertEqual(result["opened"], ["A", "B"])
+        self.assertEqual(
+            [item["result"] for item in result["history"]],
+            ["WIN", "LOSE"],
+        )
+        self.assertEqual([item["step"] for item in result["history"]], [1, 1])
+        self.assertEqual([item["amount"] for item in result["history"]], [20, 20])
+        self.assertEqual(result["sequence"]["current_step"], 2)
 
     async def test_blocked_attempt_never_changes_budget_or_loss_statistics(self):
         result = await self._run_scenario(
