@@ -23,6 +23,7 @@ from backend.app.live.executor import (
     CONFIRM_SELECTOR,
     CONFIRM_FALLBACK_SELECTOR,
     COUPON_SELECTOR,
+    SUCCESS_MODAL_CLOSE_SELECTOR,
     SUCCESS_MODAL_CONTINUE_SELECTOR,
     SUCCESS_MODAL_INFO_SELECTOR,
     SUCCESS_MODAL_SELECTOR,
@@ -138,10 +139,17 @@ class FakePage:
             visible=False,
             on_click=close_success_modal,
         )
+        self.success_close = FakeLocator(
+            text="",
+            count=0,
+            visible=False,
+            on_click=close_success_modal,
+        )
         self.success_modal.children = {
             SUCCESS_MODAL_TITLE_SELECTOR: self.success_title,
             SUCCESS_MODAL_INFO_SELECTOR: self.success_info,
             SUCCESS_MODAL_CONTINUE_SELECTOR: self.success_continue,
+            SUCCESS_MODAL_CLOSE_SELECTOR: self.success_close,
         }
         self.blocked_coupon = FakeLocator(count=0, visible=False)
         self.coupon_bet = FakeLocator()
@@ -216,6 +224,8 @@ class FakePage:
         self.success_info.visible = True
         self.success_continue.present = 1
         self.success_continue.visible = True
+        self.success_close.present = 1
+        self.success_close.visible = True
 
     def get_by_text(self, pattern):
         return self.failure if "не принята" in pattern.pattern else self.success
@@ -456,6 +466,63 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("LIVE_SUCCESS_MODAL_DETECTED", [event for event, _ in events])
         self.assertIn(
             "LIVE_SUCCESS_MODAL_CONTINUE_CLICKED",
+            [event for event, _ in events],
+        )
+
+    async def test_success_modal_falls_back_to_close_control_when_continue_missing(self):
+        events = []
+
+        async def log(event, message):
+            events.append((event, message))
+
+        executor, page, item = LiveExecutor(log), FakePage(), decision(amount=10)
+        await executor.prepare(page, item)
+        page.show_success_modal()
+        page.success_continue.present = 0
+        page.success_continue.visible = False
+
+        observation = await executor.wait_for_manual_confirmation(
+            page,
+            item,
+            asyncio.Event(),
+        )
+
+        self.assertTrue(observation.placed)
+        self.assertEqual(page.success_continue.clicks, 0)
+        self.assertEqual(page.success_close.clicks, 1)
+        self.assertFalse(page.success_modal.visible)
+        self.assertIn(
+            "LIVE_SUCCESS_MODAL_CLOSE_CLICKED",
+            [event for event, _ in events],
+        )
+
+    async def test_success_modal_uses_close_control_if_continue_does_not_hide_modal(self):
+        events = []
+
+        async def log(event, message):
+            events.append((event, message))
+
+        executor, page, item = LiveExecutor(log), FakePage(), decision(amount=10)
+        await executor.prepare(page, item)
+        page.show_success_modal()
+        page.success_continue.on_click = None
+
+        observation = await executor.wait_for_manual_confirmation(
+            page,
+            item,
+            asyncio.Event(),
+        )
+
+        self.assertTrue(observation.placed)
+        self.assertEqual(page.success_continue.clicks, 1)
+        self.assertEqual(page.success_close.clicks, 1)
+        self.assertFalse(page.success_modal.visible)
+        self.assertIn(
+            "LIVE_SUCCESS_MODAL_CONTINUE_DID_NOT_CLOSE",
+            [event for event, _ in events],
+        )
+        self.assertIn(
+            "LIVE_SUCCESS_MODAL_CLOSE_CLICKED",
             [event for event, _ in events],
         )
 
