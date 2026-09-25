@@ -1345,9 +1345,27 @@ class DemoEngine:
                 if isinstance(placement, BlockedMatchSwitch):
                     self._current_series = None
                     return
-                active_record, snapshot, current_odds, selected_odd, opponent_odd, selection = placement
+                if len(placement) == 5:
+                    (
+                        active_record,
+                        snapshot,
+                        current_odds,
+                        selected_odd,
+                        opponent_odd,
+                    ) = placement
+                else:
+                    (
+                        active_record,
+                        snapshot,
+                        current_odds,
+                        selected_odd,
+                        opponent_odd,
+                        selection,
+                    ) = placement
                 side_label = (
-                    "Команда 1" if selection.selected_side == Scorer.TEAM_1 else "Команда 2"
+                    "Команда 1"
+                    if selection.selected_side == Scorer.TEAM_1
+                    else "Команда 2"
                 )
                 score_before = snapshot.score
                 created_at = active_record["created_at"]
@@ -3344,7 +3362,8 @@ class DemoEngine:
     ) -> bool:
         """Enable score-aware recovery only for a definitive unaccepted coupon."""
         return bool(
-            self._config.strategy_type == StrategyType.NEXT_GOAL
+            self._mode != "LIVE"
+            and self._config.strategy_type == StrategyType.NEXT_GOAL
             and self._config.blocked_events_switch_enabled
             and observation is not None
             and not observation.placed
