@@ -1,5 +1,6 @@
 import asyncio
 import re
+import time
 from collections.abc import Awaitable, Callable
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -751,6 +752,26 @@ class LiveExecutor:
                 f"attempt={decision.attempt_id}; {type(error).__name__}: {error}",
             )
 
+    @staticmethod
+    def _submission_deadline_reached(decision: LiveDecision) -> bool:
+        deadline = decision.submission_deadline_monotonic
+        return deadline is not None and time.monotonic() >= deadline
+
+    def _raise_if_submission_deadline_reached(
+        self,
+        decision: LiveDecision,
+        *,
+        phase: str,
+    ) -> None:
+        if self._submission_deadline_reached(decision):
+            raise LivePreparationError(
+                "LIVE_RUN_TIME_LIMIT_REACHED",
+                (
+                    "Лимит времени работы истёк до отправки новой ставки; "
+                    f"phase={phase}; step={decision.strategy_step}"
+                ),
+            )
+
     async def prepare(
         self,
         page: Any,
@@ -767,6 +788,10 @@ class LiveExecutor:
                 raise LivePreparationError(
                     "LIVE_MARKET_ELEMENT_MISSING", "DOM-элемент выбранного коэффициента отсутствует."
                 )
+            self._raise_if_submission_deadline_reached(
+                decision,
+                phase="before_market_click",
+            )
 
             try:
                 await decision.coefficient_locator.click()
@@ -962,6 +987,10 @@ class LiveExecutor:
                         f"attempt={decision.attempt_id} "
                         f"step={decision.strategy_step} amount={expected_text}"
                     ),
+                )
+                self._raise_if_submission_deadline_reached(
+                    decision,
+                    phase="before_confirm_click",
                 )
                 self._submission_attempted.add(decision.attempt_id)
                 await self._log(
