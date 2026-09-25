@@ -13,6 +13,7 @@ from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 from auth import authorize
 from backend.app.browser.canvas_2d_adapter import (
     read_next_goal_lock_state,
+    read_next_goal_odds,
     reset_canvas_2d_for_live_transition,
 )
 from backend.app.browser.canvas_vision import load_latest_analysis
@@ -32,7 +33,6 @@ from backend.app.browser.market import (
     MarketReadError,
     market_canvas_debug,
     read_first_half_draw_market,
-    read_next_goal_odds,
 )
 from backend.app.browser.match import MatchBrowser
 from backend.app.browser.navigation import NavigationLoadError
