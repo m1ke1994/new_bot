@@ -20,6 +20,14 @@ class FrontendControlTests(unittest.TestCase):
         self.assertIn("DEMO и LIVE", self.source)
         self.assertIn("NOT_PLACED шаг не расходуют", self.source)
 
+    def test_runtime_limit_controls_offer_only_supported_durations(self):
+        self.assertIn("run_time_limit_enabled", self.source)
+        self.assertIn("run_duration_hours", self.source)
+        self.assertIn("Время работы бота", self.source)
+        self.assertIn('v-for="hours in [3, 6, 12, 24]"', self.source)
+        self.assertIn("runTimeRemaining", self.source)
+        self.assertIn("уже ACCEPTED ставки", self.source)
+
     def test_removed_tactics_are_not_exposed(self):
         router = ROUTER.read_text(encoding="utf-8")
         self.assertNotIn("/forks", router)
