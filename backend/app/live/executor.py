@@ -69,6 +69,10 @@ SUCCESS_MODAL_INFO_SELECTOR = '[data-test="betting-coupon-success-modal-info"]'
 SUCCESS_MODAL_CONTINUE_SELECTOR = (
     'button[data-test="betting-coupon-modal-control-contune"]'
 )
+SUCCESS_MODAL_CLOSE_SELECTOR = (
+    'button[data-test="modal-control"][data-original-title="Закрыть"], '
+    'button[data-test="modal-control"]'
+)
 SUCCESS_MODAL_TITLE = "Ваша ставка принята!"
 SUCCESS_MODAL_WAIT_SECONDS = 2.0
 
@@ -362,7 +366,7 @@ class LiveExecutor:
         modal: Any,
         decision: LiveDecision,
     ) -> str:
-        """Record the accepted coupon and dismiss its blocking modal quickly."""
+        """Record the accepted coupon and always dismiss its blocking modal."""
         coupon_text = ""
         try:
             info = modal.locator(SUCCESS_MODAL_INFO_SELECTOR).first
@@ -370,57 +374,92 @@ class LiveExecutor:
                 coupon_text = " ".join((await info.inner_text()).split())
         except Exception:
             coupon_text = ""
-        coupon_match = re.search(r"(?:Купон\s*№\s*)?(\d{5,})", coupon_text, re.I)
+        coupon_match = re.search(r"(?:Купон\\s*№\\s*)?(\\d{5,})", coupon_text, re.I)
         coupon_id = coupon_match.group(1) if coupon_match else "unknown"
         await self._log(
             "LIVE_SUCCESS_MODAL_DETECTED",
             f"attempt={decision.attempt_id}; coupon_id={coupon_id}",
         )
 
+        async def modal_hidden() -> bool:
+            try:
+                return not await modal.is_visible()
+            except Exception:
+                return True
+
+        async def wait_hidden(timeout_seconds: float = 0.45) -> bool:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + timeout_seconds
+            while loop.time() < deadline:
+                if await modal_hidden():
+                    return True
+                await asyncio.sleep(0.04)
+            return await modal_hidden()
+
+        # Preferred path: the green «Продолжить» button.
+        continue_error: Exception | None = None
         try:
             continue_button = modal.locator(SUCCESS_MODAL_CONTINUE_SELECTOR).first
-            if await continue_button.count() == 0 or not await continue_button.is_visible():
-                raise RuntimeError("Кнопка «Продолжить» не найдена в success-modal")
-            if await continue_button.is_disabled():
-                raise RuntimeError("Кнопка «Продолжить» недоступна")
-
-            # The exact success modal already proves acceptance. Avoid waiting
-            # several seconds for Playwright actionability on a Vue button that
-            # may be re-rendered; trigger its native click immediately.
-            await continue_button.evaluate("button => button.click()")
-
-            hidden = False
-            for _ in range(12):
-                try:
-                    if not await modal.is_visible():
-                        hidden = True
-                        break
-                except Exception:
-                    hidden = True
-                    break
-                await asyncio.sleep(0.05)
-
-            if hidden:
+            if (
+                await continue_button.count()
+                and await continue_button.is_visible()
+                and not await continue_button.is_disabled()
+            ):
+                await continue_button.evaluate("button => button.click()")
+                if await wait_hidden():
+                    await self._log(
+                        "LIVE_SUCCESS_MODAL_CONTINUE_CLICKED",
+                        f"attempt={decision.attempt_id}; coupon_id={coupon_id}",
+                    )
+                    return coupon_id
                 await self._log(
-                    "LIVE_SUCCESS_MODAL_CONTINUE_CLICKED",
-                    f"attempt={decision.attempt_id}; coupon_id={coupon_id}",
+                    "LIVE_SUCCESS_MODAL_CONTINUE_DID_NOT_CLOSE",
+                    (
+                        f"attempt={decision.attempt_id}; coupon_id={coupon_id}; "
+                        "falling back to modal close control"
+                    ),
+                )
+            else:
+                continue_error = RuntimeError(
+                    "Кнопка «Продолжить» отсутствует, скрыта или недоступна"
+                )
+        except Exception as error:
+            continue_error = error
+
+        # Fallback path: exact X button from the bookmaker modal DOM.
+        try:
+            close_button = modal.locator(SUCCESS_MODAL_CLOSE_SELECTOR).first
+            if await close_button.count() == 0 or not await close_button.is_visible():
+                raise RuntimeError("Кнопка закрытия success-modal не найдена")
+            if await close_button.is_disabled():
+                raise RuntimeError("Кнопка закрытия success-modal недоступна")
+
+            await close_button.evaluate("button => button.click()")
+            if await wait_hidden():
+                await self._log(
+                    "LIVE_SUCCESS_MODAL_CLOSE_CLICKED",
+                    (
+                        f"attempt={decision.attempt_id}; coupon_id={coupon_id}; "
+                        "fallback=modal-control"
+                    ),
                 )
             else:
                 await self._log(
                     "LIVE_SUCCESS_MODAL_STILL_VISIBLE",
                     (
                         f"attempt={decision.attempt_id}; coupon_id={coupon_id}; "
-                        "native continue click was sent but modal is still visible"
+                        "continue/close controls were triggered but modal stayed visible"
                     ),
                 )
-        except Exception as error:
-            # Acceptance is already proven; cleanup failure must never trigger
-            # a duplicate real-money confirmation click.
+        except Exception as close_error:
+            # Acceptance itself is already proven by the exact success title.
+            # Modal cleanup failure must never create a second real-money click.
             await self._log(
-                "LIVE_SUCCESS_MODAL_CONTINUE_FAILED",
+                "LIVE_SUCCESS_MODAL_CLOSE_FAILED",
                 (
                     f"attempt={decision.attempt_id}; coupon_id={coupon_id}; "
-                    f"{type(error).__name__}: {error}"
+                    f"continue_error={type(continue_error).__name__ if continue_error else 'none'}; "
+                    f"close_error={type(close_error).__name__}: {close_error}"
                 ),
             )
         return coupon_id
