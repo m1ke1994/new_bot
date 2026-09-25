@@ -195,6 +195,68 @@ class LeagueTeamFilterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(browser.skipped_unclassified[0]["id"], "nearest")
         write_front.assert_awaited_once_with([later])
 
+    async def test_open_match_does_not_wait_for_spa_navigation_inside_click(self):
+        href = "/ru/live/fifa/2860561-fc-25-3x3-conference-league/123-test"
+        target_url = "https://example.test" + href
+        match = {
+            "number": 1,
+            "match_id": "123",
+            "team1": "Lille",
+            "team2": "Eintracht",
+            "href": href,
+            "url": target_url,
+            "is_upcoming": True,
+            "period": "",
+        }
+
+        link = AsyncMock()
+        link.first = link
+        page = AsyncMock()
+        page.url = target_url
+        page.locator.return_value = link
+        browser = LeagueBrowser(page, exclude_teams_enabled=False)
+
+        with patch.object(browser, "revalidate_upcoming", AsyncMock(return_value=match)):
+            opened = await browser.open_match(match)
+
+        link.click.assert_awaited_once_with(timeout=5_000, no_wait_after=True)
+        page.wait_for_url.assert_awaited_once()
+        page.goto.assert_not_awaited()
+        self.assertEqual(opened["url"], target_url)
+
+    async def test_open_match_falls_back_to_direct_url_when_spa_route_stalls(self):
+        href = "/ru/live/fifa/2860561-fc-25-3x3-conference-league/456-test"
+        target_url = "https://example.test" + href
+        match = {
+            "number": 1,
+            "match_id": "456",
+            "team1": "Hearts",
+            "team2": "AZ",
+            "href": href,
+            "url": target_url,
+            "is_upcoming": True,
+            "period": "",
+        }
+
+        link = AsyncMock()
+        link.first = link
+        page = AsyncMock()
+        page.url = target_url
+        page.locator.return_value = link
+        page.wait_for_url.side_effect = TimeoutError("SPA route stalled")
+        browser = LeagueBrowser(page, exclude_teams_enabled=False)
+
+        with patch.object(browser, "revalidate_upcoming", AsyncMock(return_value=match)):
+            opened = await browser.open_match(match)
+
+        link.click.assert_awaited_once_with(timeout=5_000, no_wait_after=True)
+        page.goto.assert_awaited_once_with(
+            target_url,
+            wait_until="domcontentloaded",
+            timeout=15_000,
+        )
+        self.assertEqual(opened["url"], target_url)
+
     async def test_disabled_filter_keeps_excluded_team_in_candidates(self):
         class FakeLinks:
             async def count(self):
