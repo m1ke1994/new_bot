@@ -218,6 +218,7 @@ class FakePage:
     def show_success_modal(self):
         self.success_modal.present = 1
         self.success_modal.visible = True
+        self.success_modal.text = "Ваша ставка принята! Купон № 87729189649"
         self.success_title.present = 1
         self.success_title.visible = True
         self.success_info.present = 1
@@ -466,6 +467,32 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("LIVE_SUCCESS_MODAL_DETECTED", [event for event, _ in events])
         self.assertIn(
             "LIVE_SUCCESS_MODAL_CONTINUE_CLICKED",
+            [event for event, _ in events],
+        )
+
+    async def test_success_modal_detects_acceptance_from_modal_text_when_title_selector_changes(self):
+        events = []
+
+        async def log(event, message):
+            events.append((event, message))
+
+        executor, page, item = LiveExecutor(log), FakePage(), decision(amount=10)
+        await executor.prepare(page, item)
+        page.show_success_modal()
+        page.success_title.present = 0
+        page.success_title.visible = False
+
+        observation = await executor.wait_for_manual_confirmation(
+            page,
+            item,
+            asyncio.Event(),
+        )
+
+        self.assertTrue(observation.placed)
+        self.assertEqual(page.success_continue.clicks, 1)
+        self.assertFalse(page.success_modal.visible)
+        self.assertIn(
+            "LIVE_SUCCESS_MODAL_DETECTED",
             [event for event, _ in events],
         )
 
