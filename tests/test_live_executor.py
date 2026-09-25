@@ -92,7 +92,12 @@ class FakeLocator:
     async def element_handle(self):
         return self
 
-    async def evaluate(self, _script):
+    async def evaluate(self, script):
+        if "button.click()" in script:
+            self.clicks += 1
+            if self.on_click is not None:
+                self.on_click()
+            return None
         self.attributes["data-autobet-manual-click"] = "0"
 
 
@@ -451,6 +456,37 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("LIVE_SUCCESS_MODAL_DETECTED", [event for event, _ in events])
         self.assertIn(
             "LIVE_SUCCESS_MODAL_CONTINUE_CLICKED",
+            [event for event, _ in events],
+        )
+
+    async def test_balance_debit_closes_success_modal_that_arrives_after_balance_update(self):
+        events = []
+
+        async def log(event, message):
+            events.append((event, message))
+
+        executor, page, item = LiveExecutor(log), FakePage(), decision(amount=42)
+        await executor.prepare(page, item)
+        page.balance.text = "958.00"
+        page.show_success_modal()
+
+        with patch.object(
+            executor,
+            "_confirmed_success_modal",
+            side_effect=[None, page.success_modal],
+        ):
+            observation = await executor.wait_for_manual_confirmation(
+                page,
+                item,
+                asyncio.Event(),
+            )
+
+        self.assertTrue(observation.placed)
+        self.assertEqual(observation.signal, "balance debit confirmed")
+        self.assertEqual(page.success_continue.clicks, 1)
+        self.assertFalse(page.success_modal.visible)
+        self.assertIn(
+            "LIVE_SUCCESS_MODAL_CLEANUP_AFTER_BALANCE",
             [event for event, _ in events],
         )
 
