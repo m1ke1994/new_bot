@@ -78,6 +78,31 @@ class StrategyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             StrategyConfig.from_payload({"blocked_events_switch_enabled": "true"})
 
+    def test_run_time_limit_defaults_and_allowed_durations(self):
+        config = StrategyConfig.from_payload({})
+        self.assertFalse(config.run_time_limit_enabled)
+        self.assertEqual(config.run_duration_hours, 3)
+        self.assertFalse(config.to_dict()["run_time_limit_enabled"])
+        self.assertEqual(config.to_dict()["run_duration_hours"], 3)
+
+        for hours in (3, 6, 12, 24):
+            configured = StrategyConfig.from_payload(
+                {
+                    "run_time_limit_enabled": True,
+                    "run_duration_hours": hours,
+                }
+            )
+            self.assertTrue(configured.run_time_limit_enabled)
+            self.assertEqual(configured.run_duration_hours, hours)
+
+        with self.assertRaises(ValueError):
+            StrategyConfig.from_payload(
+                {
+                    "run_time_limit_enabled": True,
+                    "run_duration_hours": 5,
+                }
+            )
+
     def test_initial_odds_threshold_is_inclusive_and_decimal_safe(self):
         self.assertEqual(MIN_INITIAL_SELECTED_ODDS, Decimal("1.93"))
         self.assertFalse(is_initial_odds_allowed(1.92))
