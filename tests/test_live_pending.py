@@ -305,6 +305,23 @@ class LivePendingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(engine._stop_event.is_set())
 
+    async def test_unresolved_submission_still_blocks_duplicate_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = DemoRepository(Path(directory))
+            await repository.save_bet(
+                {
+                    "id": "unresolved",
+                    "mode": "LIVE",
+                    "result": "SUBMISSION_UNRESOLVED",
+                    "status": "SUBMISSION_UNRESOLVED",
+                }
+            )
+
+            unresolved = await repository.unresolved_live_submission()
+
+        self.assertIsNotNone(unresolved)
+        self.assertEqual(unresolved["id"], "unresolved")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -324,7 +324,10 @@ class DemoRepository:
             "ACTIVE",
         }
         for item in reversed(await self.history(5000, mode="LIVE")):
-            if item.get("result") == "SUBMISSION_UNKNOWN":
+            if item.get("result") in {
+                "SUBMISSION_UNKNOWN",
+                "SUBMISSION_UNRESOLVED",
+            }:
                 return item
             if (
                 item.get("result") == "PENDING"
