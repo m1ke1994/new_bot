@@ -362,7 +362,7 @@ class LiveExecutor:
         modal: Any,
         decision: LiveDecision,
     ) -> str:
-        """Record the accepted coupon and dismiss its blocking modal."""
+        """Record the accepted coupon and dismiss its blocking modal quickly."""
         coupon_text = ""
         try:
             info = modal.locator(SUCCESS_MODAL_INFO_SELECTOR).first
@@ -383,20 +383,39 @@ class LiveExecutor:
                 raise RuntimeError("Кнопка «Продолжить» не найдена в success-modal")
             if await continue_button.is_disabled():
                 raise RuntimeError("Кнопка «Продолжить» недоступна")
-            await continue_button.click(timeout=5_000)
-            try:
-                await modal.wait_for(state="hidden", timeout=5_000)
-            except Exception:
-                # The click itself is sufficient; Vue can remove the modal
-                # between locator resolution and the hidden-state waiter.
-                pass
-            await self._log(
-                "LIVE_SUCCESS_MODAL_CONTINUE_CLICKED",
-                f"attempt={decision.attempt_id}; coupon_id={coupon_id}",
-            )
+
+            # The exact success modal already proves acceptance. Avoid waiting
+            # several seconds for Playwright actionability on a Vue button that
+            # may be re-rendered; trigger its native click immediately.
+            await continue_button.evaluate("button => button.click()")
+
+            hidden = False
+            for _ in range(12):
+                try:
+                    if not await modal.is_visible():
+                        hidden = True
+                        break
+                except Exception:
+                    hidden = True
+                    break
+                await asyncio.sleep(0.05)
+
+            if hidden:
+                await self._log(
+                    "LIVE_SUCCESS_MODAL_CONTINUE_CLICKED",
+                    f"attempt={decision.attempt_id}; coupon_id={coupon_id}",
+                )
+            else:
+                await self._log(
+                    "LIVE_SUCCESS_MODAL_STILL_VISIBLE",
+                    (
+                        f"attempt={decision.attempt_id}; coupon_id={coupon_id}; "
+                        "native continue click was sent but modal is still visible"
+                    ),
+                )
         except Exception as error:
-            # The exact success title already proves acceptance. A modal
-            # cleanup failure must never cause a duplicate real-money click.
+            # Acceptance is already proven; cleanup failure must never trigger
+            # a duplicate real-money confirmation click.
             await self._log(
                 "LIVE_SUCCESS_MODAL_CONTINUE_FAILED",
                 (
@@ -405,6 +424,27 @@ class LiveExecutor:
                 ),
             )
         return coupon_id
+
+    async def _dismiss_success_modal_after_balance_debit(
+        self,
+        page: Any,
+        decision: LiveDecision,
+    ) -> None:
+        """Close a success modal even when the balance debit wins the race."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 0.60
+        while True:
+            modal = await self._confirmed_success_modal(page)
+            if modal is not None:
+                await self._log(
+                    "LIVE_SUCCESS_MODAL_CLEANUP_AFTER_BALANCE",
+                    f"attempt={decision.attempt_id}",
+                )
+                await self._accept_success_modal(modal, decision)
+                return
+            if loop.time() >= deadline:
+                return
+            await asyncio.sleep(0.05)
 
     async def _publish_accepted_placement(
         self,
@@ -1264,6 +1304,10 @@ class LiveExecutor:
                         f"attempt={decision.attempt_id}; debit={debit}; "
                         f"stake={decision.amount}"
                     ),
+                )
+                await self._dismiss_success_modal_after_balance_debit(
+                    page,
+                    decision,
                 )
                 await self._clear_accepted_coupon(page, decision)
                 await self._publish_accepted_placement(
