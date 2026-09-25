@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from backend.app.browser.league import LeagueBrowser
 from matches import is_upcoming_match, sort_upcoming_matches
@@ -213,7 +213,7 @@ class LeagueTeamFilterTests(unittest.IsolatedAsyncioTestCase):
         link.first = link
         page = AsyncMock()
         page.url = target_url
-        page.locator.return_value = link
+        page.locator = MagicMock(return_value=link)
         browser = LeagueBrowser(page, exclude_teams_enabled=False)
 
         with patch.object(browser, "revalidate_upcoming", AsyncMock(return_value=match)):
@@ -242,7 +242,7 @@ class LeagueTeamFilterTests(unittest.IsolatedAsyncioTestCase):
         link.first = link
         page = AsyncMock()
         page.url = target_url
-        page.locator.return_value = link
+        page.locator = MagicMock(return_value=link)
         page.wait_for_url.side_effect = TimeoutError("SPA route stalled")
         browser = LeagueBrowser(page, exclude_teams_enabled=False)
 
