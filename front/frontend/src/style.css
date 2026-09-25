@@ -226,6 +226,51 @@ button { font: inherit; }
 .filter-copy small { margin-top: 4px; color: var(--muted); font-size: 10px; font-weight: 500; letter-spacing: 0; line-height: 1.4; }
 .filter-state { color: var(--green); font-size: 9px; font-weight: 850; letter-spacing: .1em; }
 .filter-disabled .filter-state { color: var(--muted); }
+.run-time-settings { padding: 16px 19px; border-bottom: 1px solid var(--line-soft); }
+.run-time-toggle { margin-top: 12px; }
+.run-duration-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+.strategy-config .run-duration-option {
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: var(--muted);
+  background: #0d131c;
+  cursor: pointer;
+}
+.strategy-config .run-duration-option.selected {
+  border-color: rgba(56, 217, 149, .4);
+  color: var(--green);
+  background: var(--green-soft);
+}
+.strategy-config .run-duration-option:has(input:disabled) { cursor: not-allowed; opacity: .48; }
+.strategy-config .run-duration-option input[type="radio"] {
+  width: 15px;
+  min-height: 15px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--green);
+}
+.run-time-stage {
+  min-height: 62px;
+  margin-top: 12px;
+  padding: 13px 16px;
+  border: 1px solid rgba(244, 184, 96, .32);
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  background: rgba(244, 184, 96, .07);
+}
+.run-time-stage strong, .run-time-stage span { display: block; }
+.run-time-stage strong { color: var(--amber); font-size: 12px; font-variant-numeric: tabular-nums; }
+.run-time-stage span { margin-top: 4px; color: #b3bdcb; font-size: 11px; }
+.run-time-stage small { color: var(--amber); font-size: 10px; font-weight: 850; letter-spacing: .08em; }
+
 .stake-row { flex-wrap: wrap; padding-top: 12px; }
 .stake-row input { width: 104px; }
 .strategy-config-footer { padding-top: 0; justify-content: space-between; align-items: center; color: var(--muted); font-size: 11px; }
@@ -235,6 +280,7 @@ button { font: inherit; }
   .strategy-config-footer { align-items: stretch; }
   .match-filter-grid { grid-template-columns: 1fr; }
   .strategy-option-grid { grid-template-columns: 1fr; }
+  .run-duration-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .match-filters-heading { align-items: flex-start; flex-direction: column; }
 }
 
