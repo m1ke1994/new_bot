@@ -486,6 +486,41 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page.reloads, 0)
         self.assertEqual(page.confirm.clicks, 1)
 
+    async def test_predispatch_unstable_confirm_reacquires_fresh_button(self):
+        events = []
+
+        async def log(event, message):
+            events.append((event, message))
+
+        executor, page, item = LiveExecutor(log), FakePage(), decision(amount=42)
+        first_confirm = page.confirm
+        fresh_confirm = FakeLocator(text="Сделать ставку")
+
+        async def predispatch_timeout(**_kwargs):
+            first_confirm.clicks += 1
+            page.confirm = fresh_confirm
+            raise TimeoutError(
+                "Locator.click: Timeout 1250ms exceeded. Call log: "
+                "- attempting click action "
+                "- waiting for element to be visible, enabled and stable"
+            )
+
+        first_confirm.click = predispatch_timeout
+
+        await executor.prepare(page, item)
+
+        self.assertEqual(first_confirm.clicks, 1)
+        self.assertEqual(fresh_confirm.clicks, 1)
+        self.assertTrue(await executor.manual_click_seen(item.attempt_id))
+        self.assertIn(
+            "LIVE_COUPON_BUTTON_REACQUIRE",
+            [event for event, _ in events],
+        )
+        self.assertIn(
+            "LIVE_COUPON_CLICKED",
+            [event for event, _ in events],
+        )
+
     async def test_ambiguous_confirm_click_is_reconciled_without_second_click(self):
         events = []
 
