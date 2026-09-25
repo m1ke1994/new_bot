@@ -44,6 +44,8 @@ CONFIRM_SELECTOR = (
 CONFIRM_TEXT = "Сделать ставку"
 CONFIRM_WAIT_SECONDS = 5.0
 CONFIRM_CLICK_TIMEOUT_MS = 1_250
+CONFIRM_PRE_DISPATCH_RETRIES = 3
+CONFIRM_PRE_DISPATCH_RETRY_DELAY_SECONDS = 0.08
 SUBMISSION_RECONCILE_SECONDS = 2.5
 COUPON_SELECTION_WAIT_SECONDS = 10.0
 BALANCE_SELECTOR = '[data-gtm="account-balance-value-desktop"]'
@@ -186,6 +188,35 @@ class LiveExecutor:
         except Exception:
             return None
         return None
+
+    @staticmethod
+    def _confirm_click_definitely_not_dispatched(error: Exception) -> bool:
+        """True only when Playwright timed out before it started the real click action."""
+        message = str(error).casefold()
+        return (
+            "locator.click" in message
+            and "waiting for element to be visible, enabled and stable" in message
+            and "performing click action" not in message
+        )
+
+    async def _arm_confirm_button(self, confirm: Any, attempt_id: str) -> Any:
+        """Attach the manual-click marker to the current Vue button instance."""
+        handle = await confirm.element_handle()
+        if handle is None:
+            raise LivePreparationError(
+                "LIVE_CONFIRM_BUTTON_NOT_FOUND",
+                "Не удалось зафиксировать кнопку подтверждения.",
+            )
+        await handle.evaluate(
+            """button => {
+                button.dataset.autobetManualClick = '0';
+                button.addEventListener('click', () => {
+                    button.dataset.autobetManualClick = '1';
+                }, { once: true });
+            }"""
+        )
+        self._confirm_handles[attempt_id] = handle
+        return handle
 
     async def _wait_for_ready_confirm_button(self, page: Any) -> tuple[Any | None, str]:
         """Allow the coupon to re-render and enable its button after stake entry."""
@@ -952,23 +983,9 @@ class LiveExecutor:
                     raise LivePreparationError(
                         "LIVE_AMOUNT_VERIFICATION_FAILED", "Сумма ставки изменилась перед подтверждением."
                     )
-                handle = await confirm.element_handle()
-                if handle is None:
-                    raise LivePreparationError(
-                        "LIVE_CONFIRM_BUTTON_NOT_FOUND", "Не удалось зафиксировать кнопку подтверждения."
-                    )
-
                 # Сохраняем handle и listener: это оставляет прежний ручной режим рабочим,
                 # когда автоподтверждение тестового аккаунта выключено.
-                await handle.evaluate(
-                    """button => {
-                        button.dataset.autobetManualClick = '0';
-                        button.addEventListener('click', () => {
-                            button.dataset.autobetManualClick = '1';
-                        }, { once: true });
-                    }"""
-                )
-                self._confirm_handles[decision.attempt_id] = handle
+                await self._arm_confirm_button(confirm, decision.attempt_id)
 
                 if not TEST_AUTO_CONFIRM:
                     await self._publish(
@@ -988,39 +1005,130 @@ class LiveExecutor:
                         f"step={decision.strategy_step} amount={expected_text}"
                     ),
                 )
-                self._raise_if_submission_deadline_reached(
-                    decision,
-                    phase="before_confirm_click",
-                )
-                self._submission_attempted.add(decision.attempt_id)
-                await self._log(
-                    "LIVE_COUPON_CLICK_ATTEMPT",
-                    f"attempt={decision.attempt_id}; step={decision.strategy_step}",
-                )
-                try:
-                    await confirm.click(timeout=CONFIRM_CLICK_TIMEOUT_MS)
-                    await self._log(
-                        "LIVE_COUPON_CLICKED",
-                        f"attempt={decision.attempt_id}",
+
+                current_confirm = confirm
+                click_message = ""
+                for click_try in range(1, CONFIRM_PRE_DISPATCH_RETRIES + 1):
+                    self._raise_if_submission_deadline_reached(
+                        decision,
+                        phase="before_confirm_click",
                     )
-                    click_message = (
-                        "Тестовый режим: кнопка «Сделать ставку» нажата автоматически; "
-                        "ждём ответ сайта"
-                    )
-                except Exception as error:
-                    # A Playwright click timeout is ambiguous: the browser event
-                    # may already have reached the bookmaker. Never click twice
-                    # inside the same attempt; reconciliation below decides it.
                     await self._log(
-                        "LIVE_COUPON_BUTTON_UNSTABLE",
+                        "LIVE_COUPON_CLICK_ATTEMPT",
                         (
                             f"attempt={decision.attempt_id}; "
-                            f"{type(error).__name__}: {error}"
+                            f"step={decision.strategy_step}; retry={click_try}"
                         ),
                     )
-                    click_message = (
-                        "Клик мог быть отправлен; проверяем ACCEPTED без второго клика"
-                    )
+                    try:
+                        await current_confirm.click(timeout=CONFIRM_CLICK_TIMEOUT_MS)
+                    except Exception as error:
+                        definitely_not_dispatched = (
+                            self._confirm_click_definitely_not_dispatched(error)
+                        )
+                        if (
+                            definitely_not_dispatched
+                            and click_try < CONFIRM_PRE_DISPATCH_RETRIES
+                        ):
+                            await self._log(
+                                "LIVE_COUPON_BUTTON_REACQUIRE",
+                                (
+                                    f"attempt={decision.attempt_id}; retry={click_try}; "
+                                    "Playwright did not reach performing click action; "
+                                    "reacquiring fresh Vue button"
+                                ),
+                            )
+                            await asyncio.sleep(CONFIRM_PRE_DISPATCH_RETRY_DELAY_SECONDS)
+
+                            current_confirm, confirm_state = (
+                                await self._wait_for_ready_confirm_button(page)
+                            )
+                            if confirm_state == "BLOCKED":
+                                await self._publish(
+                                    decision.attempt_id,
+                                    LiveStatus.AWAITING_PLACEMENT_RESULT,
+                                    "Coupon заблокирован до подтверждения; ставка не отправлена",
+                                    publish,
+                                )
+                                return
+                            if current_confirm is None:
+                                raise LivePreparationError(
+                                    "LIVE_CONFIRM_BUTTON_NOT_READY",
+                                    (
+                                        "Кнопка «Сделать ставку» исчезла при "
+                                        "повторном получении после Vue rerender."
+                                    ),
+                                )
+
+                            # The coupon may have been replaced together with the
+                            # button. Revalidate every safety boundary before retry.
+                            await self._verify_coupon_selection(page, decision)
+                            fresh_amount_input = await self._visible_amount_input(page)
+                            if fresh_amount_input is None:
+                                raise LivePreparationError(
+                                    "LIVE_AMOUNT_INPUT_NOT_FOUND",
+                                    "Поле суммы исчезло перед повторным подтверждением.",
+                                )
+                            if _parse_amount(
+                                await fresh_amount_input.input_value()
+                            ) != Decimal(str(decision.amount)):
+                                raise LivePreparationError(
+                                    "LIVE_AMOUNT_VERIFICATION_FAILED",
+                                    "Сумма ставки изменилась перед повторным подтверждением.",
+                                )
+                            await self._arm_confirm_button(
+                                current_confirm,
+                                decision.attempt_id,
+                            )
+                            continue
+
+                        if definitely_not_dispatched:
+                            await self._log(
+                                "LIVE_COUPON_BUTTON_NOT_CLICKED",
+                                (
+                                    f"attempt={decision.attempt_id}; "
+                                    f"retries={click_try}; "
+                                    "button stayed unstable before click dispatch"
+                                ),
+                            )
+                            raise LivePreparationError(
+                                "LIVE_CONFIRM_BUTTON_UNSTABLE_NOT_CLICKED",
+                                (
+                                    "Кнопка «Сделать ставку» несколько раз "
+                                    "перерисовалась до фактического клика. "
+                                    "Ставка не отправлена."
+                                ),
+                            ) from error
+
+                        # Once Playwright reached the real click action, its result
+                        # is ambiguous. Never issue a second click in this attempt.
+                        self._submission_attempted.add(decision.attempt_id)
+                        await self._log(
+                            "LIVE_COUPON_BUTTON_UNSTABLE",
+                            (
+                                f"attempt={decision.attempt_id}; "
+                                f"{type(error).__name__}: {error}"
+                            ),
+                        )
+                        click_message = (
+                            "Клик мог быть отправлен; проверяем ACCEPTED без второго клика"
+                        )
+                        break
+                    else:
+                        self._submission_attempted.add(decision.attempt_id)
+                        await self._log(
+                            "LIVE_COUPON_CLICKED",
+                            (
+                                f"attempt={decision.attempt_id}; "
+                                f"retry={click_try}"
+                            ),
+                        )
+                        click_message = (
+                            "Тестовый режим: кнопка «Сделать ставку» нажата автоматически; "
+                            "ждём ответ сайта"
+                        )
+                        break
+
                 await self._publish(
                     decision.attempt_id,
                     LiveStatus.AWAITING_PLACEMENT_RESULT,
