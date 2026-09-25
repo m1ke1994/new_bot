@@ -38,6 +38,8 @@ class StrategyConfig:
     min_initial_odds_enabled: bool
     blocked_events_switch_enabled: bool
     max_three_steps_enabled: bool
+    run_time_limit_enabled: bool
+    run_duration_hours: int
     strategy_type: StrategyType
 
     @classmethod
@@ -59,6 +61,10 @@ class StrategyConfig:
         max_three_steps_enabled = _boolean_setting(
             payload, "max_three_steps_enabled", default=False
         )
+        run_time_limit_enabled = _boolean_setting(
+            payload, "run_time_limit_enabled", default=False
+        )
+        run_duration_hours = int(payload.get("run_duration_hours", 3))
         try:
             strategy_type = StrategyType(
                 str(payload.get("strategy_type", StrategyType.NEXT_GOAL.value)).strip().upper()
@@ -76,6 +82,8 @@ class StrategyConfig:
             min_initial_odds_enabled,
             blocked_events_switch_enabled,
             max_three_steps_enabled,
+            run_time_limit_enabled,
+            run_duration_hours,
             strategy_type,
         )
         config.validate()
@@ -90,6 +98,8 @@ class StrategyConfig:
             raise ValueError("max_steps must be at least one")
         if len(self.stakes) != self.max_steps or any(value <= 0 for value in self.stakes):
             raise ValueError("stakes must contain one positive amount per step")
+        if self.run_duration_hours not in {3, 6, 12, 24}:
+            raise ValueError("run_duration_hours must be one of 3, 6, 12, 24")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -102,6 +112,8 @@ class StrategyConfig:
             "min_initial_odds_enabled": self.min_initial_odds_enabled,
             "blocked_events_switch_enabled": self.blocked_events_switch_enabled,
             "max_three_steps_enabled": self.max_three_steps_enabled,
+            "run_time_limit_enabled": self.run_time_limit_enabled,
+            "run_duration_hours": self.run_duration_hours,
             "strategy_type": self.strategy_type.value,
         }
 
