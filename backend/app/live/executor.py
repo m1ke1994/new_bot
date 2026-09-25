@@ -42,6 +42,8 @@ CONFIRM_SELECTOR = (
 )
 CONFIRM_TEXT = "Сделать ставку"
 CONFIRM_WAIT_SECONDS = 5.0
+CONFIRM_CLICK_TIMEOUT_MS = 1_250
+SUBMISSION_RECONCILE_SECONDS = 2.5
 COUPON_SELECTION_WAIT_SECONDS = 10.0
 BALANCE_SELECTOR = '[data-gtm="account-balance-value-desktop"]'
 BLOCKED_COUPON_SELECTOR = (
@@ -96,6 +98,7 @@ class LiveExecutor:
         self._states: dict[str, LiveStatus] = {}
         self._confirm_handles: dict[str, Any] = {}
         self._market_selected: set[str] = set()
+        self._submission_attempted: set[str] = set()
         self._recovered_blocked_attempts: set[str] = set()
         self._balance_before: dict[str, Decimal] = {}
         self._lock = asyncio.Lock()
@@ -123,14 +126,15 @@ class LiveExecutor:
         return attempt_id in self._market_selected
 
     async def manual_click_seen(self, attempt_id: str) -> bool:
+        if attempt_id in self._submission_attempted:
+            return True
         handle = self._confirm_handles.get(attempt_id)
         if handle is None:
             return False
         try:
             return await handle.get_attribute("data-autobet-manual-click") == "1"
         except Exception:
-            return self.state(attempt_id) == LiveStatus.AWAITING_PLACEMENT_RESULT
-
+            return attempt_id in self._submission_attempted
     async def _read_balance(self, page: Any) -> Decimal:
         balance = page.locator(BALANCE_SELECTOR).first
         if await balance.count() == 0 or not await balance.is_visible():
@@ -545,6 +549,145 @@ class LiveExecutor:
             ),
         )
 
+    async def clear_unaccepted_coupon(self, page: Any, attempt_id: str) -> bool:
+        """Clear a proven-unaccepted coupon without relying on lock strategy.
+
+        The method reacquires DOM nodes on every pass because Vue can replace
+        coupon elements during market updates. Disabled controls are never
+        force-clicked.
+        """
+        async with self._lock:
+            for retry in range(1, 6):
+                empty_coupon = page.locator(EMPTY_COUPON_SELECTOR).first
+                if await empty_coupon.count() and await empty_coupon.is_visible():
+                    await self._log(
+                        "LIVE_UNACCEPTED_COUPON_ALREADY_CLEAR",
+                        f"attempt={attempt_id}; retry={retry}",
+                    )
+                    return True
+
+                visible_bet = False
+                removed = False
+                bets = page.locator(COUPON_BET_SELECTOR)
+                try:
+                    bet_count = await bets.count()
+                except Exception:
+                    bet_count = 0
+
+                for index in range(bet_count):
+                    bet = bets.nth(index)
+                    try:
+                        if not await bet.is_visible():
+                            continue
+                        visible_bet = True
+                        remove = bet.locator(COUPON_REMOVE_SELECTOR).first
+                        if (
+                            await remove.count()
+                            and await remove.is_visible()
+                            and not await remove.is_disabled()
+                        ):
+                            await self._log(
+                                "LIVE_UNACCEPTED_COUPON_CLEAR_ATTEMPT",
+                                (
+                                    f"attempt={attempt_id}; retry={retry}; "
+                                    "source=regular_coupon"
+                                ),
+                            )
+                            await remove.click(timeout=CONFIRM_CLICK_TIMEOUT_MS)
+                            removed = True
+                            break
+                    except Exception as error:
+                        await self._log(
+                            "LIVE_UNACCEPTED_COUPON_CLEAR_TRANSIENT",
+                            (
+                                f"attempt={attempt_id}; retry={retry}; "
+                                f"{type(error).__name__}: {error}"
+                            ),
+                        )
+
+                if not removed:
+                    blocked = await self._confirmed_blocked_container(page)
+                    if blocked is not None:
+                        visible_bet = True
+                        for selector in (
+                            BLOCKED_REMOVE_SELECTOR,
+                            BLOCKED_REMOVE_FALLBACK_SELECTOR,
+                        ):
+                            try:
+                                remove = blocked.locator(selector).first
+                                if (
+                                    await remove.count()
+                                    and await remove.is_visible()
+                                    and not await remove.is_disabled()
+                                ):
+                                    await self._log(
+                                        "LIVE_UNACCEPTED_COUPON_CLEAR_ATTEMPT",
+                                        (
+                                            f"attempt={attempt_id}; retry={retry}; "
+                                            "source=blocked_coupon"
+                                        ),
+                                    )
+                                    await remove.click(
+                                        timeout=CONFIRM_CLICK_TIMEOUT_MS
+                                    )
+                                    removed = True
+                                    break
+                            except Exception as error:
+                                await self._log(
+                                    "LIVE_UNACCEPTED_COUPON_CLEAR_TRANSIENT",
+                                    (
+                                        f"attempt={attempt_id}; retry={retry}; "
+                                        f"{type(error).__name__}: {error}"
+                                    ),
+                                )
+
+                await asyncio.sleep(0.10)
+
+                # Reacquire everything after the click/re-render.
+                empty_coupon = page.locator(EMPTY_COUPON_SELECTOR).first
+                if await empty_coupon.count() and await empty_coupon.is_visible():
+                    await self._log(
+                        "LIVE_UNACCEPTED_COUPON_CLEARED",
+                        f"attempt={attempt_id}; retry={retry}",
+                    )
+                    return True
+
+                remaining_visible = False
+                bets = page.locator(COUPON_BET_SELECTOR)
+                try:
+                    for index in range(await bets.count()):
+                        if await bets.nth(index).is_visible():
+                            remaining_visible = True
+                            break
+                except Exception:
+                    remaining_visible = True
+
+                blocked_remaining = await self.blocked_event_exists(page)
+                if not remaining_visible and not blocked_remaining:
+                    amount_input = await self._visible_amount_input(page)
+                    confirm = await self._visible_confirm_button(page)
+                    if amount_input is None and confirm is None:
+                        await self._log(
+                            "LIVE_UNACCEPTED_COUPON_CLEARED",
+                            f"attempt={attempt_id}; retry={retry}; surface=gone",
+                        )
+                        return True
+
+                if not visible_bet and not blocked_remaining:
+                    # No coupon selection is present; this is already a clean
+                    # state even when the empty-coupon placeholder is absent.
+                    await self._log(
+                        "LIVE_UNACCEPTED_COUPON_ALREADY_CLEAR",
+                        f"attempt={attempt_id}; retry={retry}; no_selection=true",
+                    )
+                    return True
+
+            await self._log(
+                "LIVE_UNACCEPTED_COUPON_CLEAR_FAILED",
+                f"attempt={attempt_id}; retries=5",
+            )
+            return False
+
     async def remove_blocked_coupon(self, page: Any, attempt_id: str) -> bool:
         """Remove one rejected coupon exactly once for a placement attempt."""
         async with self._lock:
@@ -820,11 +963,39 @@ class LiveExecutor:
                         f"step={decision.strategy_step} amount={expected_text}"
                     ),
                 )
-                await confirm.click(timeout=5_000)
+                self._submission_attempted.add(decision.attempt_id)
+                await self._log(
+                    "LIVE_COUPON_CLICK_ATTEMPT",
+                    f"attempt={decision.attempt_id}; step={decision.strategy_step}",
+                )
+                try:
+                    await confirm.click(timeout=CONFIRM_CLICK_TIMEOUT_MS)
+                    await self._log(
+                        "LIVE_COUPON_CLICKED",
+                        f"attempt={decision.attempt_id}",
+                    )
+                    click_message = (
+                        "Тестовый режим: кнопка «Сделать ставку» нажата автоматически; "
+                        "ждём ответ сайта"
+                    )
+                except Exception as error:
+                    # A Playwright click timeout is ambiguous: the browser event
+                    # may already have reached the bookmaker. Never click twice
+                    # inside the same attempt; reconciliation below decides it.
+                    await self._log(
+                        "LIVE_COUPON_BUTTON_UNSTABLE",
+                        (
+                            f"attempt={decision.attempt_id}; "
+                            f"{type(error).__name__}: {error}"
+                        ),
+                    )
+                    click_message = (
+                        "Клик мог быть отправлен; проверяем ACCEPTED без второго клика"
+                    )
                 await self._publish(
                     decision.attempt_id,
                     LiveStatus.AWAITING_PLACEMENT_RESULT,
-                    "Тестовый режим: кнопка «Сделать ставку» нажата автоматически; ждём ответ сайта",
+                    click_message,
                     publish,
                 )
             except LivePreparationError:
@@ -854,36 +1025,53 @@ class LiveExecutor:
                 f"Coupon находится в неподходящем состоянии: {current_state.value}",
             )
 
-        click_seen = current_state == LiveStatus.AWAITING_PLACEMENT_RESULT
-        reloaded_after_missing_debit = False
-        success_modal_waited = False
+        click_seen = await self.manual_click_seen(decision.attempt_id)
+        reconcile_deadline: float | None = None
+        loop = asyncio.get_running_loop()
+        balance_read_failures = 0
 
         while not stop_event.is_set():
             if not click_seen:
                 click_seen = await self.manual_click_seen(decision.attempt_id)
                 if click_seen:
+                    reconcile_deadline = loop.time() + SUBMISSION_RECONCILE_SECONDS
                     await self._publish(
                         decision.attempt_id,
                         LiveStatus.AWAITING_PLACEMENT_RESULT,
-                        "Клик подтверждения обнаружен; проверяем списание баланса",
+                        "Клик подтверждения обнаружен; проверяем принятие ставки",
                         publish,
                     )
 
-            if click_seen:
-                modal = await self._confirmed_success_modal(page)
-                if modal is not None:
-                    return await self._finish_success_modal_placement(
-                        modal,
-                        decision,
-                        publish,
+            if not click_seen:
+                if await self.blocked_event_exists(page):
+                    return PlacementObservation(
+                        False,
+                        BLOCKED_EVENT_SIGNAL,
+                        retryable=True,
                     )
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=0.10)
+                    continue
+                except TimeoutError:
+                    continue
+
+            if reconcile_deadline is None:
+                reconcile_deadline = loop.time() + SUBMISSION_RECONCILE_SECONDS
+
+            modal = await self._confirmed_success_modal(page)
+            if modal is not None:
+                return await self._finish_success_modal_placement(
+                    modal,
+                    decision,
+                    publish,
+                )
 
             if await self.blocked_event_exists(page):
                 await self._log(
-                    "LIVE_BLOCKED_EVENT_DETECTED",
+                    "LIVE_SUBMISSION_NOT_ACCEPTED",
                     (
                         f"attempt={decision.attempt_id}; "
-                        f"status={self.state(decision.attempt_id).value}"
+                        f"signal={BLOCKED_EVENT_SIGNAL}"
                     ),
                 )
                 return PlacementObservation(
@@ -892,132 +1080,95 @@ class LiveExecutor:
                     retryable=True,
                 )
 
-            if click_seen:
-                if not success_modal_waited:
-                    success_modal_waited = True
-                    modal = await self._wait_for_success_modal(page, stop_event)
-                    if modal is not None:
-                        return await self._finish_success_modal_placement(
-                            modal,
-                            decision,
-                            publish,
-                        )
-                    if await self.blocked_event_exists(page):
-                        await self._log(
-                            "LIVE_BLOCKED_EVENT_DETECTED",
-                            f"attempt={decision.attempt_id}; phase=success_modal_wait",
-                        )
-                        return PlacementObservation(
-                            False,
-                            BLOCKED_EVENT_SIGNAL,
-                            retryable=True,
-                        )
+            balance_before = self._balance_before.get(decision.attempt_id)
+            if balance_before is None:
+                raise LivePreparationError(
+                    "LIVE_BALANCE_BEFORE_MISSING",
+                    "Нет сохранённого баланса перед отправкой ставки.",
+                )
 
-                balance_before = self._balance_before.get(decision.attempt_id)
-                if balance_before is None:
-                    raise LivePreparationError(
-                        "LIVE_BALANCE_BEFORE_MISSING",
-                        "Нет сохранённого баланса перед отправкой ставки.",
-                    )
-
-                # Give the header a short moment to receive the bookmaker update.
+            try:
+                balance_after = await self._read_balance(page)
+                balance_read_failures = 0
+            except LivePreparationError as error:
+                balance_read_failures += 1
+                await self._log(
+                    "LIVE_BALANCE_RECONCILE_READ_FAILED",
+                    (
+                        f"attempt={decision.attempt_id}; "
+                        f"failure={balance_read_failures}; {error}"
+                    ),
+                )
+                if loop.time() >= reconcile_deadline:
+                    return None
                 try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=0.35)
-                    continue
+                    await asyncio.wait_for(stop_event.wait(), timeout=0.25)
                 except TimeoutError:
                     pass
+                continue
 
-                if await self.blocked_event_exists(page):
-                    await self._log(
-                        "LIVE_BLOCKED_EVENT_DETECTED",
-                        f"attempt={decision.attempt_id}; phase=after_confirm_click",
-                    )
-                    return PlacementObservation(
-                        False,
-                        BLOCKED_EVENT_SIGNAL,
-                        retryable=True,
-                    )
+            debit = balance_before - balance_after
+            await self._log(
+                "LIVE_BALANCE_AFTER",
+                (
+                    f"attempt={decision.attempt_id}; before={balance_before}; "
+                    f"after={balance_after}; debit={debit}; stake={decision.amount}"
+                ),
+            )
 
-                balance_after = await self._read_balance(page)
-                debit = balance_before - balance_after
+            if self._balance_debit_matches(
+                balance_before,
+                balance_after,
+                decision.amount,
+            ):
                 await self._log(
-                    "LIVE_BALANCE_AFTER",
+                    "LIVE_BALANCE_DEBIT_CONFIRMED",
                     (
-                        f"attempt={decision.attempt_id}; before={balance_before}; "
-                        f"after={balance_after}; debit={debit}; stake={decision.amount}"
+                        f"attempt={decision.attempt_id}; debit={debit}; "
+                        f"stake={decision.amount}"
                     ),
                 )
+                await self._clear_accepted_coupon(page, decision)
+                await self._publish_accepted_placement(
+                    decision,
+                    publish,
+                    "Баланс уменьшился на сумму шага; ставка размещена",
+                )
+                return PlacementObservation(
+                    True,
+                    "balance debit confirmed",
+                )
 
-                if self._balance_debit_matches(
-                    balance_before,
-                    balance_after,
-                    decision.amount,
-                ):
-                    await self._log(
-                        "LIVE_BALANCE_DEBIT_CONFIRMED",
-                        (
-                            f"attempt={decision.attempt_id}; debit={debit}; "
-                            f"stake={decision.amount}"
-                        ),
-                    )
-                    await self._clear_accepted_coupon(page, decision)
-                    await self._publish_accepted_placement(
+            if loop.time() >= reconcile_deadline:
+                # One final modal check closes the race where the balance/header
+                # update lags behind the bookmaker success response.
+                modal = await self._confirmed_success_modal(page)
+                if modal is not None:
+                    return await self._finish_success_modal_placement(
+                        modal,
                         decision,
                         publish,
-                        "Баланс уменьшился на сумму шага; ставка размещена",
                     )
-                    return PlacementObservation(
-                        True,
-                        "balance debit confirmed",
-                    )
-
-                if not reloaded_after_missing_debit:
-                    await self._log(
-                        "LIVE_BALANCE_DEBIT_NOT_CONFIRMED",
-                        (
-                            f"attempt={decision.attempt_id}; before={balance_before}; "
-                            f"after={balance_after}; expected_stake={decision.amount}; "
-                            "checking lock then reloading once"
-                        ),
-                    )
-                    if await self.blocked_event_exists(page):
-                        return PlacementObservation(
-                            False,
-                            BLOCKED_EVENT_SIGNAL,
-                            retryable=True,
-                        )
-                    reloaded_after_missing_debit = True
-                    try:
-                        await page.reload(
-                            wait_until="domcontentloaded",
-                            timeout=30_000,
-                        )
-                        balance_locator = page.locator(BALANCE_SELECTOR).first
-                        await balance_locator.wait_for(
-                            state="visible",
-                            timeout=15_000,
-                        )
-                    except Exception as error:
-                        await self._log(
-                            "LIVE_BALANCE_RELOAD_FAILED",
-                            f"attempt={decision.attempt_id}; {type(error).__name__}: {error}",
-                        )
-                        return None
-                    continue
-
-                debit_after_reload = balance_before - balance_after
                 await self._log(
-                    "LIVE_BALANCE_UNCHANGED_AFTER_RELOAD",
+                    "LIVE_SUBMISSION_NOT_ACCEPTED",
                     (
-                        f"attempt={decision.attempt_id}; before={balance_before}; "
-                        f"after_reload={balance_after}; debit={debit_after_reload}; "
-                        "placement remains unknown; no second click"
+                        f"attempt={decision.attempt_id}; "
+                        f"before={balance_before}; after={balance_after}; "
+                        f"stake={decision.amount}; no_success_modal=true"
                     ),
                 )
-                return None
+                return PlacementObservation(
+                    False,
+                    "NOT_ACCEPTED_NO_CONFIRMATION",
+                    retryable=True,
+                )
+
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=0.25)
+            except TimeoutError:
+                pass
 
         return None
-
     async def invalidate(
         self,
         attempt_id: str,
@@ -1031,5 +1182,6 @@ class LiveExecutor:
         self._states.clear()
         self._confirm_handles.clear()
         self._market_selected.clear()
+        self._submission_attempted.clear()
         self._recovered_blocked_attempts.clear()
         self._balance_before.clear()

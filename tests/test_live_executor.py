@@ -314,6 +314,8 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
                 "LIVE_AMOUNT_VERIFIED",
                 "LIVE_BALANCE_BEFORE",
                 "TEST_AUTO_CONFIRM",
+                "LIVE_COUPON_CLICK_ATTEMPT",
+                "LIVE_COUPON_CLICKED",
                 "AWAITING_PLACEMENT_RESULT",
             ],
         )
@@ -447,18 +449,75 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(observation.placed)
         self.assertEqual(page.coupon_remove.clicks, 1)
 
-    async def test_missing_balance_debit_reloads_once_and_stays_unknown(self):
+    async def test_missing_balance_debit_resolves_not_accepted_without_second_click(self):
         executor, page, item = LiveExecutor(), FakePage(), decision(amount=42)
         await executor.prepare(page, item)
 
-        observation = await executor.wait_for_manual_confirmation(
-            page, item, asyncio.Event()
+        with patch(
+            "backend.app.live.executor.SUBMISSION_RECONCILE_SECONDS",
+            0.02,
+        ):
+            observation = await executor.wait_for_manual_confirmation(
+                page, item, asyncio.Event()
+            )
+
+        self.assertIsNotNone(observation)
+        self.assertFalse(observation.placed)
+        self.assertTrue(observation.retryable)
+        self.assertEqual(observation.signal, "NOT_ACCEPTED_NO_CONFIRMATION")
+        self.assertEqual(page.reloads, 0)
+        self.assertEqual(page.confirm.clicks, 1)
+
+    async def test_ambiguous_confirm_click_is_reconciled_without_second_click(self):
+        events = []
+
+        async def log(event, message):
+            events.append((event, message))
+
+        executor, page, item = LiveExecutor(log), FakePage(), decision(amount=42)
+
+        async def unstable_click(**_kwargs):
+            page.confirm.clicks += 1
+            raise TimeoutError("element is not stable")
+
+        page.confirm.click = unstable_click
+
+        await executor.prepare(page, item)
+
+        self.assertEqual(page.confirm.clicks, 1)
+        self.assertTrue(await executor.manual_click_seen(item.attempt_id))
+        self.assertEqual(
+            executor.state(item.attempt_id),
+            LiveStatus.AWAITING_PLACEMENT_RESULT,
+        )
+        self.assertIn(
+            "LIVE_COUPON_BUTTON_UNSTABLE",
+            [event for event, _ in events],
         )
 
-        self.assertIsNone(observation)
-        self.assertEqual(page.reloads, 1)
-        self.assertEqual(executor.state(item.attempt_id), LiveStatus.AWAITING_PLACEMENT_RESULT)
-        self.assertEqual(page.confirm.clicks, 1)
+    async def test_clear_unaccepted_regular_coupon_is_idempotent(self):
+        executor, page, item = LiveExecutor(), FakePage(), decision()
+        page.coupon_remove.present = 1
+        page.coupon_remove.visible = True
+
+        def remove_coupon():
+            page.coupon_bet.present = 0
+            page.coupon_bet.visible = False
+            page.coupon_remove.present = 0
+            page.coupon_remove.visible = False
+            page.amount.present = 0
+            page.amount.visible = False
+            page.confirm.present = 0
+            page.confirm.visible = False
+
+        page.coupon_remove.on_click = remove_coupon
+
+        first = await executor.clear_unaccepted_coupon(page, item.attempt_id)
+        second = await executor.clear_unaccepted_coupon(page, item.attempt_id)
+
+        self.assertTrue(first)
+        self.assertTrue(second)
+        self.assertEqual(page.coupon_remove.clicks, 1)
 
     async def test_blocked_coupon_after_market_click_skips_amount_and_confirm(self):
         executor, page, item = LiveExecutor(), FakePage(), decision()
