@@ -1,4 +1,5 @@
 import asyncio
+import time
 import unittest
 from dataclasses import replace
 from unittest.mock import patch
@@ -230,6 +231,23 @@ def decision(locator=None, *, amount=42):
 
 
 class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_expired_runtime_deadline_blocks_new_market_click(self):
+        executor, page, item = LiveExecutor(), FakePage(), decision()
+        item = replace(
+            item,
+            submission_deadline_monotonic=time.monotonic() - 1,
+        )
+
+        with self.assertRaises(LivePreparationError) as raised:
+            await executor.prepare(page, item)
+
+        self.assertEqual(
+            raised.exception.status,
+            "LIVE_RUN_TIME_LIMIT_REACHED",
+        )
+        self.assertEqual(item.coefficient_locator.clicks, 0)
+        self.assertEqual(page.confirm.clicks, 0)
+
     async def test_pending_blocked_event_returns_retryable_not_placed(self):
         executor, page, item = LiveExecutor(), FakePage(), decision()
         await executor.prepare(page, item)
