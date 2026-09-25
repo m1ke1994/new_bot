@@ -88,6 +88,16 @@ const state = ref({
 
   stats: emptyStats,
 
+  run_time: {
+    enabled: false,
+    duration_hours: 3,
+    started_at: null,
+    deadline_at: null,
+    limit_reached: false,
+    awaiting_active_bet: false,
+    stopped_by_limit: false,
+  },
+
   updated_at: null,
 
 })
@@ -117,6 +127,10 @@ const strategyConfig = ref({
   blocked_events_switch_enabled: false,
 
   max_three_steps_enabled: false,
+
+  run_time_limit_enabled: false,
+
+  run_duration_hours: 3,
 
 })
 
@@ -829,6 +843,39 @@ const statusTone = computed(() => {
 
 })
 
+const runTime = computed(() => state.value.run_time || {})
+
+const runTimeDeadlineLabel = computed(() => {
+  const raw = runTime.value.deadline_at
+  if (!raw) return '—'
+  const date = new Date(raw)
+  return Number.isNaN(date.getTime())
+    ? raw
+    : date.toLocaleString('ru-RU', {
+        hour: '2-digit',
+        minute: '2-digit',
+        day: '2-digit',
+        month: '2-digit',
+      })
+})
+
+const runTimeRemaining = computed(() => {
+  if (!runTime.value.enabled) return 'Без ограничения'
+  if (runTime.value.stopped_by_limit) return '00:00:00'
+  const raw = runTime.value.deadline_at
+  if (!raw) return `${runTime.value.duration_hours || strategyConfig.value.run_duration_hours || 3} ч`
+  const deadline = new Date(raw).getTime()
+  if (!Number.isFinite(deadline)) return '—'
+  const remaining = Math.max(0, deadline - Date.now())
+  const totalSeconds = Math.floor(remaining / 1000)
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  return [hours, minutes, seconds]
+    .map((value) => String(value).padStart(2, '0'))
+    .join(':')
+})
+
 const updatedAt = computed(() => {
 
   if (!state.value.updated_at) return '—'
@@ -944,6 +991,22 @@ onBeforeUnmount(() => {
           <span v-else>Реальные ставки не отправляются. Все действия стратегии виртуальные.</span>
 
         </div>
+
+      </section>
+
+      <section v-if="state.running && runTime.enabled" class="run-time-stage">
+
+        <div>
+
+          <strong>Лимит сессии · {{ runTimeRemaining }}</strong>
+
+          <span v-if="runTime.awaiting_active_bet">Время вышло: ждём расчёта уже ACCEPTED ставки, новых ставок не будет.</span>
+
+          <span v-else>DEMO/LIVE остановит новые ставки в {{ runTimeDeadlineLabel }}.</span>
+
+        </div>
+
+        <small>{{ runTime.duration_hours }} ч</small>
 
       </section>
 
@@ -1102,6 +1165,51 @@ onBeforeUnmount(() => {
               <span class="filter-copy"><strong>max 3 шага</strong><small>DEMO и LIVE: после 3 принятых проигранных ставок перейти на второй матч с шага 4; блокировки и NOT_PLACED шаг не расходуют</small></span>
 
               <span class="filter-state">{{ strategyConfig.max_three_steps_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
+
+            </label>
+
+          </div>
+
+        </div>
+
+        <div class="run-time-settings">
+
+          <div class="match-filters-heading">
+
+            <div><span class="eyebrow amber">SESSION TIMER</span><h3>Время работы бота</h3></div>
+
+            <small>Backend сам остановит новые ставки по истечении лимита</small>
+
+          </div>
+
+          <label :class="['match-filter-option', 'run-time-toggle', { 'filter-disabled': !strategyConfig.run_time_limit_enabled }]">
+
+            <input v-model="strategyConfig.run_time_limit_enabled" type="checkbox" :disabled="state.running || actionPending" @change="saveMatchFilters">
+
+            <span class="filter-copy"><strong>Ограничить время работы</strong><small>Одинаково для DEMO и LIVE. Уже принятую ставку бот сначала рассчитает.</small></span>
+
+            <span class="filter-state">{{ strategyConfig.run_time_limit_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
+
+          </label>
+
+          <div class="run-duration-grid">
+
+            <label
+              v-for="hours in [3, 6, 12, 24]"
+              :key="hours"
+              :class="['run-duration-option', { selected: Number(strategyConfig.run_duration_hours) === hours }]"
+            >
+
+              <input
+                v-model.number="strategyConfig.run_duration_hours"
+                type="radio"
+                name="run-duration-hours"
+                :value="hours"
+                :disabled="state.running || actionPending || !strategyConfig.run_time_limit_enabled"
+                @change="saveMatchFilters"
+              >
+
+              <strong>{{ hours }} ч</strong>
 
             </label>
 
