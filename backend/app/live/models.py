@@ -58,6 +58,7 @@ class LiveDecision:
     goal_number: int
     coefficient: float
     coefficient_locator: Any
+    submission_deadline_monotonic: float | None = None
 
 
 @dataclass(frozen=True)
