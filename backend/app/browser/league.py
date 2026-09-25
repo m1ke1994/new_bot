@@ -248,25 +248,48 @@ class LeagueBrowser:
     async def open_match(self, match: dict[str, Any]) -> dict[str, str]:
         match = await self.revalidate_upcoming(match)
         href = match["href"]
+        target_url = match.get("url")
 
         link = self.page.locator(exact_match_link_selector(href)).first
         await link.wait_for(state="visible", timeout=10_000)
         await link.scroll_into_view_if_needed()
-        await link.click()
-        selector = "a.ui-game-card__link"
 
+        # This is a Vue SPA route. Locator.click() used to wait for navigation
+        # internally and could spend the full 30s even after the click had
+        # already been dispatched. Dispatch the click only, then own the route
+        # wait explicitly below.
+        click_error: Exception | None = None
         try:
-            if match.get("match_id"):
+            await link.click(timeout=5_000, no_wait_after=True)
+        except Exception as error:
+            click_error = error
+
+        selector = "a.ui-game-card__link"
+        route_ready = False
+        if match.get("match_id"):
+            try:
                 await self.page.wait_for_url(
                     re.compile(rf".*/{re.escape(match['match_id'])}-[^/?#]+.*"),
-                    timeout=10_000,
+                    timeout=7_500,
                 )
-            else:
-                await self.page.wait_for_timeout(1500)
-        except Exception:
-            target_url = match.get("url")
+                route_ready = True
+            except Exception:
+                route_ready = False
+        else:
+            await self.page.wait_for_timeout(500)
+            route_ready = click_error is None
+
+        if not route_ready:
             if not target_url:
+                if click_error is not None:
+                    raise RuntimeError(
+                        f"Не удалось открыть матч кликом: {click_error}"
+                    ) from click_error
                 raise RuntimeError("После клика страница матча не открылась.")
-            await self.page.goto(target_url, wait_until="domcontentloaded", timeout=30_000)
+            await self.page.goto(
+                target_url,
+                wait_until="domcontentloaded",
+                timeout=15_000,
+            )
 
         return {"selector": selector, "url": self.page.url}
