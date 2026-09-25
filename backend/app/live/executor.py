@@ -75,6 +75,8 @@ SUCCESS_MODAL_CLOSE_SELECTOR = (
 )
 SUCCESS_MODAL_TITLE = "Ваша ставка принята!"
 SUCCESS_MODAL_WAIT_SECONDS = 2.0
+SUCCESS_MODAL_BALANCE_RACE_SECONDS = 1.5
+ACCEPTED_COUPON_CLEANUP_SECONDS = 0.35
 
 # ТЕСТОВЫЙ АККАУНТ:
 # автоподтверждение включено прямо в коде, ENV больше не требуется.
@@ -329,7 +331,7 @@ class LiveExecutor:
         return await self._confirmed_blocked_container(page) is not None
 
     async def _confirmed_success_modal(self, page: Any) -> Any | None:
-        """Return only the visible modal with the exact accepted-bet title."""
+        """Return only a visible modal that proves the bookmaker accepted the bet."""
         try:
             modals = page.locator(SUCCESS_MODAL_SELECTOR)
             expected = " ".join(SUCCESS_MODAL_TITLE.casefold().split())
@@ -337,12 +339,25 @@ class LiveExecutor:
                 modal = modals.nth(index)
                 if not await modal.is_visible():
                     continue
-                title = modal.locator(SUCCESS_MODAL_TITLE_SELECTOR).first
-                if await title.count() == 0 or not await title.is_visible():
-                    continue
-                actual = " ".join((await title.inner_text()).casefold().split())
-                if actual == expected:
-                    return modal
+
+                # Preferred signal: the bookmaker's explicit success-title node.
+                try:
+                    title = modal.locator(SUCCESS_MODAL_TITLE_SELECTOR).first
+                    if await title.count() and await title.is_visible():
+                        actual = " ".join((await title.inner_text()).casefold().split())
+                        if actual == expected:
+                            return modal
+                except Exception:
+                    pass
+
+                # Fallback for markup changes: the visible modal itself still
+                # contains the exact accepted-bet text shown to the user.
+                try:
+                    modal_text = " ".join((await modal.inner_text()).casefold().split())
+                    if expected in modal_text:
+                        return modal
+                except Exception:
+                    pass
         except Exception:
             return None
         return None
@@ -469,9 +484,9 @@ class LiveExecutor:
         page: Any,
         decision: LiveDecision,
     ) -> None:
-        """Close a success modal even when the balance debit wins the race."""
+        """Close a delayed success modal before any next LIVE interaction."""
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + 0.60
+        deadline = loop.time() + SUCCESS_MODAL_BALANCE_RACE_SECONDS
         while True:
             modal = await self._confirmed_success_modal(page)
             if modal is not None:
@@ -480,8 +495,26 @@ class LiveExecutor:
                     f"attempt={decision.attempt_id}",
                 )
                 await self._accept_success_modal(modal, decision)
-                return
+
+                # Reacquire from the page, not from the old locator. Vue can
+                # replace the modal node while handling Continue/X.
+                if await self._confirmed_success_modal(page) is None:
+                    return
+                await self._log(
+                    "LIVE_SUCCESS_MODAL_CLEANUP_RETRY",
+                    f"attempt={decision.attempt_id}; modal still visible after first cleanup",
+                )
+
             if loop.time() >= deadline:
+                remaining = await self._confirmed_success_modal(page)
+                if remaining is not None:
+                    await self._log(
+                        "LIVE_SUCCESS_MODAL_CLEANUP_EXHAUSTED",
+                        (
+                            f"attempt={decision.attempt_id}; "
+                            "accepted modal is still visible after cleanup window"
+                        ),
+                    )
                 return
             await asyncio.sleep(0.05)
 
@@ -843,7 +876,7 @@ class LiveExecutor:
             return True
 
     async def _clear_accepted_coupon(self, page: Any, decision: LiveDecision) -> None:
-        """Clear a lingering selection after a confirmed debit, if it is still ours."""
+        """Clear a lingering accepted selection without blocking the LIVE loop."""
         if decision.side.value not in {"TEAM_1", "TEAM_2"}:
             return
         try:
@@ -852,9 +885,37 @@ class LiveExecutor:
                 return
             await self._verify_coupon_selection(page, decision)
             remove = bets.first.locator(COUPON_REMOVE_SELECTOR).first
-            if await remove.count() and await remove.is_visible():
-                await remove.click(timeout=5_000)
-                await self._log("LIVE_ACCEPTED_COUPON_CLEARED", f"attempt={decision.attempt_id}")
+            if await remove.count() == 0 or not await remove.is_visible():
+                return
+
+            # The debit already proves acceptance. Avoid Playwright's 5-second
+            # actionability wait on a Vue node that is frequently detached.
+            try:
+                await remove.evaluate("button => button.click()")
+            except Exception:
+                # A detached button after acceptance generally means the coupon
+                # was already cleared by the bookmaker rerender.
+                pass
+
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + ACCEPTED_COUPON_CLEANUP_SECONDS
+            while loop.time() < deadline:
+                current = page.locator(COUPON_BET_SELECTOR)
+                if await current.count() == 0 or not await current.first.is_visible():
+                    await self._log(
+                        "LIVE_ACCEPTED_COUPON_CLEARED",
+                        f"attempt={decision.attempt_id}",
+                    )
+                    return
+                await asyncio.sleep(0.04)
+
+            await self._log(
+                "LIVE_ACCEPTED_COUPON_CLEANUP_SKIPPED",
+                (
+                    f"attempt={decision.attempt_id}; "
+                    "coupon still visible after fast cleanup window"
+                ),
+            )
         except Exception as error:
             # The debit has already confirmed the bet; cleanup cannot undo it.
             await self._log(
