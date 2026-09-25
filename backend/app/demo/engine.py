@@ -3,7 +3,7 @@ import time
 import traceback
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -258,6 +258,122 @@ class DemoEngine:
         self._current_series: CurrentSeries | None = None
         self._active_demo_protection: DemoBlockedWindow | None = None
         self._active_bet_lock_context: dict[str, Any] | None = None
+        self._run_started_monotonic: float | None = None
+        self._run_deadline_monotonic: float | None = None
+        self._run_started_at_iso: str | None = None
+        self._run_deadline_at_iso: str | None = None
+        self._run_limit_reached_logged = False
+        self._run_limit_waiting_logged = False
+        self._run_limit_stopped = False
+        self._accepted_bet_in_progress = False
+
+    def _configure_run_time_limit(self) -> None:
+        self._run_limit_reached_logged = False
+        self._run_limit_waiting_logged = False
+        self._run_limit_stopped = False
+        self._accepted_bet_in_progress = False
+        self._run_started_monotonic = None
+        self._run_deadline_monotonic = None
+        self._run_started_at_iso = None
+        self._run_deadline_at_iso = None
+        if not self._config.run_time_limit_enabled:
+            return
+        now = datetime.now().astimezone()
+        self._run_started_monotonic = time.monotonic()
+        self._run_deadline_monotonic = (
+            self._run_started_monotonic
+            + float(self._config.run_duration_hours * 60 * 60)
+        )
+        self._run_started_at_iso = now.isoformat()
+        self._run_deadline_at_iso = (
+            now + timedelta(hours=self._config.run_duration_hours)
+        ).isoformat()
+
+    def _run_time_state(self) -> dict[str, Any]:
+        return {
+            "enabled": self._config.run_time_limit_enabled,
+            "duration_hours": self._config.run_duration_hours,
+            "started_at": self._run_started_at_iso,
+            "deadline_at": self._run_deadline_at_iso,
+            "limit_reached": self._run_limit_reached_logged,
+            "awaiting_active_bet": (
+                self._run_limit_reached_logged
+                and self._accepted_bet_in_progress
+                and not self._run_limit_stopped
+            ),
+            "stopped_by_limit": self._run_limit_stopped,
+        }
+
+    def _run_time_limit_reached(self) -> bool:
+        return bool(
+            self._run_deadline_monotonic is not None
+            and time.monotonic() >= self._run_deadline_monotonic
+        )
+
+    async def _stop_for_run_time_limit_if_idle(self, context: str) -> bool:
+        if not self._run_time_limit_reached():
+            return False
+
+        if not self._run_limit_reached_logged:
+            self._run_limit_reached_logged = True
+            await REPOSITORY.log(
+                "RUN_TIME_LIMIT_REACHED",
+                (
+                    f"mode={self._mode}; duration_hours="
+                    f"{self._config.run_duration_hours}; context={context}; "
+                    f"active_accepted={str(self._accepted_bet_in_progress).lower()}"
+                ),
+            )
+            await STATE.update(
+                event="RUN_TIME_LIMIT_REACHED",
+                message=(
+                    f"Лимит {self._config.run_duration_hours} ч достигнут. "
+                    "Новые ставки запрещены."
+                ),
+                run_time=self._run_time_state(),
+            )
+
+        if self._accepted_bet_in_progress:
+            if not self._run_limit_waiting_logged:
+                self._run_limit_waiting_logged = True
+                await REPOSITORY.log(
+                    "RUN_TIME_LIMIT_WAITING_ACTIVE_BET",
+                    (
+                        f"mode={self._mode}; context={context}; "
+                        "accepted bet will be settled before stop"
+                    ),
+                )
+                await STATE.update(
+                    event="RUN_TIME_LIMIT_WAITING_ACTIVE_BET",
+                    message=(
+                        "Лимит времени достигнут. Ждём расчёта уже принятой "
+                        "ставки; новые ставки не создаются."
+                    ),
+                    run_time=self._run_time_state(),
+                )
+            return False
+
+        if not self._run_limit_stopped:
+            self._run_limit_stopped = True
+            self._stop_event.set()
+            await REPOSITORY.log(
+                "RUN_TIME_LIMIT_STOPPED",
+                (
+                    f"mode={self._mode}; duration_hours="
+                    f"{self._config.run_duration_hours}; context={context}"
+                ),
+            )
+            await STATE.update(
+                running=False,
+                status=DemoStatus.STOPPED.value,
+                event="RUN_TIME_LIMIT_STOPPED",
+                message=(
+                    f"{self._mode} остановлен по лимиту "
+                    f"{self._config.run_duration_hours} ч"
+                ),
+                run_time=self._run_time_state(),
+            )
+        return True
 
     async def restore(self) -> None:
         """Hydrate the in-memory dashboard from durable storage after a restart."""
@@ -412,6 +528,7 @@ class DemoEngine:
             self._auth_status = "UNKNOWN"
             self._mode = requested_mode
             self._current_series = None
+            self._configure_run_time_limit()
             if requested_mode == "LIVE":
                 self.live_executor.reset()
                 self._pending_live_bet = None
@@ -428,6 +545,14 @@ class DemoEngine:
                 "STRATEGY_STARTED",
                 f"{self._config.strategy_type.value} / {self._config.strategy_type.display_name}",
             )
+            await REPOSITORY.log(
+                "RUN_TIME_LIMIT_CONFIGURED",
+                (
+                    f"enabled={str(self._config.run_time_limit_enabled).lower()}; "
+                    f"duration_hours={self._config.run_duration_hours}; "
+                    f"deadline={self._run_deadline_at_iso or 'none'}"
+                ),
+            )
             await REPOSITORY.save_sequence(status="WAITING_FOR_MATCH")
             await STATE.reset_for_start(await REPOSITORY.stats())
             market_name, market_selection = strategy_market_presentation(
@@ -440,6 +565,7 @@ class DemoEngine:
                 market_selection=market_selection,
                 strategy_config=(await REPOSITORY.get_config()),
                 sequence=(await REPOSITORY.get_sequence()),
+                run_time=self._run_time_state(),
             )
             try:
                 await REPOSITORY.log("BROWSER_STARTING", "Проверяем Playwright/browser/context/page")
@@ -524,6 +650,7 @@ class DemoEngine:
             message=f"{current_mode} остановлен",
             event="STOPPED",
             browser=await self.browser_manager.snapshot(),
+            run_time=self._run_time_state(),
         )
         return await STATE.snapshot()
 
@@ -568,6 +695,8 @@ class DemoEngine:
     async def _run(self) -> None:
         while not self._stop_event.is_set():
             try:
+                if await self._stop_for_run_time_limit_if_idle("WORKER_LOOP"):
+                    break
                 page = await self.browser_manager.ensure_page()
                 await STATE.update(browser=await self.browser_manager.snapshot())
                 if not await self._ensure_authorized(page):
@@ -1286,6 +1415,10 @@ class DemoEngine:
                 if odds_result is None:
                     return
                 snapshot, current_odds = odds_result
+            if await self._stop_for_run_time_limit_if_idle(
+                "NEXT_GOAL_BEFORE_NEW_BET"
+            ):
+                return
             selected_odd, opponent_odd = odds_for_selected_side(
                 current_odds, selection.selected_side
             )
@@ -1373,6 +1506,7 @@ class DemoEngine:
                 waiting_for_match_start = step == 1 and not snapshot.period
                 active_status = "WAITING_FOR_MATCH_START" if waiting_for_match_start else "ACTIVE"
             await REPOSITORY.save_bet(active_record)
+            self._accepted_bet_in_progress = True
             await STATE.update(
                 status=(
                     DemoStatus.WAITING_FOR_MATCH_START.value
@@ -1631,6 +1765,11 @@ class DemoEngine:
                         current_step=next_step,
                         status="ACTIVE",
                     )
+                    self._accepted_bet_in_progress = False
+                    if await self._stop_for_run_time_limit_if_idle(
+                        "NEXT_GOAL_AFTER_AMBIGUOUS_SETTLEMENT"
+                    ):
+                        return
                     await self._status(
                         DemoStatus.NEXT_STEP,
                         f"Неоднозначный score delta; остаёмся в том же матче, шаг {next_step}",
@@ -1710,6 +1849,8 @@ class DemoEngine:
                 bet={**record, "max_steps": self._config.max_steps},
             )
             snapshot = new_snapshot
+            self._accepted_bet_in_progress = False
+            await STATE.update(run_time=self._run_time_state())
             if result == "LOSE":
                 losses_in_current_match += 1
                 await REPOSITORY.log(
@@ -1751,6 +1892,10 @@ class DemoEngine:
                 )
                 await STATE.update(stats=await REPOSITORY.stats(), sequence=await REPOSITORY.get_sequence())
                 self._current_series = None
+                if await self._stop_for_run_time_limit_if_idle(
+                    "NEXT_GOAL_AFTER_WIN"
+                ):
+                    return
                 break
 
             if self._max_three_switch_ready(
@@ -1766,6 +1911,9 @@ class DemoEngine:
                     step=step,
                     losses_in_current_match=losses_in_current_match,
                 )
+                await self._stop_for_run_time_limit_if_idle(
+                    "NEXT_GOAL_AFTER_MAX_THREE_LOSS"
+                )
                 return
 
             if step < self._config.max_steps:
@@ -1779,6 +1927,10 @@ class DemoEngine:
                     status="ACTIVE",
                     cumulative_pnl=str((await REPOSITORY.get_sequence())["cumulative_pnl"]),
                 )
+                if await self._stop_for_run_time_limit_if_idle(
+                    "NEXT_GOAL_AFTER_LOSS"
+                ):
+                    return
                 if (
                     self._mode == "DEMO"
                     and self._config.blocked_events_switch_enabled
@@ -2081,6 +2233,11 @@ class DemoEngine:
             "FIRST_HALF_DRAW_STAKE", f"{prefix} Stake: {amount:g} RUB"
         )
 
+        if await self._stop_for_run_time_limit_if_idle(
+            "FIRST_HALF_DRAW_BEFORE_NEW_BET"
+        ):
+            return
+
         if self._mode == "LIVE":
             placed = await self._place_first_half_draw_live(
                 selected_match=selected_match,
@@ -2099,6 +2256,7 @@ class DemoEngine:
             )
             await REPOSITORY.save_bet(active_record)
 
+        self._accepted_bet_in_progress = True
         await STATE.update(
             status=DemoStatus.BET_ACTIVE.value,
             event="FIRST_HALF_DRAW_BET_PLACED",
@@ -2157,6 +2315,7 @@ class DemoEngine:
         )
         if self._mode == "LIVE":
             self._active_live_bet = None
+        self._accepted_bet_in_progress = False
 
         current_sequence = await REPOSITORY.get_sequence()
         if self._mode == "DEMO":
@@ -2237,6 +2396,11 @@ class DemoEngine:
             sequence=sequence_after,
             stats=await REPOSITORY.stats(),
         )
+        await STATE.update(run_time=self._run_time_state())
+        if await self._stop_for_run_time_limit_if_idle(
+            "FIRST_HALF_DRAW_AFTER_SETTLEMENT"
+        ):
+            return
         if sequence_after["status"] != "SEQUENCE_EXHAUSTED":
             await self._status(
                 DemoStatus.SWITCHING_MATCH,
@@ -2404,6 +2568,7 @@ class DemoEngine:
             goal_number=0,
             coefficient=float(market.odds),
             coefficient_locator=market.locator,
+            submission_deadline_monotonic=self._run_deadline_monotonic,
         )
         await REPOSITORY.save_sequence(
             status="PLACING_BET",
@@ -2478,6 +2643,22 @@ class DemoEngine:
             )
             await REPOSITORY.save_bet(record)
             await REPOSITORY.log(error.status, str(error))
+            if error.status == "LIVE_RUN_TIME_LIMIT_REACHED":
+                try:
+                    await self.live_executor.clear_unaccepted_coupon(
+                        await self.browser_manager.ensure_page(),
+                        attempt_id,
+                    )
+                except Exception as cleanup_error:
+                    await REPOSITORY.log(
+                        "RUN_TIME_LIMIT_COUPON_CLEANUP_FAILED",
+                        f"{type(cleanup_error).__name__}: {cleanup_error}",
+                    )
+                await REPOSITORY.discard_unaccepted_bet(attempt_id)
+                await self._stop_for_run_time_limit_if_idle(
+                    "FIRST_HALF_DRAW_LIVE_CONFIRM"
+                )
+                return None
             if self.live_executor.market_was_selected(attempt_id):
                 self._stop_event.set()
                 await STATE.update(
@@ -3784,6 +3965,10 @@ class DemoEngine:
         delta, keeps/flips the side, and retries the same step and amount.
         """
         while not self._stop_event.is_set():
+            if await self._stop_for_run_time_limit_if_idle(
+                "LIVE_NEXT_GOAL_PREPARE"
+            ):
+                return None
             assert self._pending_live_bet is not None
             self._pending_live_bet = self._pending_live_bet.with_score(snapshot.score)
             target_goal = self._pending_live_bet.target_goal_number
@@ -3853,6 +4038,7 @@ class DemoEngine:
                 goal_number=target_goal,
                 coefficient=selected_odd,
                 coefficient_locator=coefficient_locator,
+                submission_deadline_monotonic=self._run_deadline_monotonic,
             )
             await REPOSITORY.save_bet(attempt_record)
 
@@ -3959,6 +4145,30 @@ class DemoEngine:
 
             except LivePreparationError as error:
                 await REPOSITORY.log(error.status, str(error))
+                if error.status == "LIVE_RUN_TIME_LIMIT_REACHED":
+                    attempt_record.update(
+                        result="NOT_PLACED",
+                        status=error.status,
+                        settled=True,
+                        resolved_at=local_now(),
+                        placement_signal=error.status,
+                    )
+                    await REPOSITORY.save_bet(attempt_record)
+                    try:
+                        await self.live_executor.clear_unaccepted_coupon(
+                            page,
+                            attempt_id,
+                        )
+                    except Exception as cleanup_error:
+                        await REPOSITORY.log(
+                            "RUN_TIME_LIMIT_COUPON_CLEANUP_FAILED",
+                            f"{type(cleanup_error).__name__}: {cleanup_error}",
+                        )
+                    await REPOSITORY.discard_unaccepted_bet(attempt_id)
+                    await self._stop_for_run_time_limit_if_idle(
+                        "LIVE_NEXT_GOAL_CONFIRM"
+                    )
+                    return None
                 clicked = await self.live_executor.manual_click_seen(attempt_id)
                 if clicked:
                     # Never create a second real bet after an ambiguous submit.
@@ -4550,10 +4760,26 @@ class DemoEngine:
         )
 
     async def _sleep_or_stop(self, seconds: float) -> None:
+        if await self._stop_for_run_time_limit_if_idle("WAIT"):
+            return
+        timeout = seconds
+        if (
+            self._run_deadline_monotonic is not None
+            and not self._accepted_bet_in_progress
+        ):
+            remaining = max(
+                0.0,
+                self._run_deadline_monotonic - time.monotonic(),
+            )
+            timeout = min(seconds, remaining)
+        if timeout <= 0:
+            await self._stop_for_run_time_limit_if_idle("WAIT")
+            return
         try:
-            await asyncio.wait_for(self._stop_event.wait(), timeout=seconds)
+            await asyncio.wait_for(self._stop_event.wait(), timeout=timeout)
         except TimeoutError:
             pass
+        await self._stop_for_run_time_limit_if_idle("WAIT")
 
 
 ENGINE = DemoEngine()
