@@ -3335,6 +3335,14 @@ class DemoEngine:
             next_goal_number = snapshot.score.team1 + snapshot.score.team2 + 1
             if attempt == 1:
                 await REPOSITORY.log(
+                    "CANVAS_2D_READER_ACTIVE",
+                    (
+                        "NEXT_GOAL runtime uses canvas_2d_adapter "
+                        "(fillText/draw-calls); OCR/Canvas Vision is not used "
+                        "for coefficient selection"
+                    ),
+                )
+                await REPOSITORY.log(
                     "MARKET_READING", f"Следующий гол №{next_goal_number}"
                 )
             await self._status(
