@@ -506,6 +506,13 @@ class LiveExecutor:
                         f"attempt={attempt_id}; coupon_id={coupon_id}",
                     )
                     return True
+                await self._log(
+                    "LIVE_SUCCESS_MODAL_CONTINUE_DID_NOT_CLOSE",
+                    (
+                        f"attempt={attempt_id}; coupon_id={coupon_id}; "
+                        "trying exact X control"
+                    ),
+                )
 
             close_button = await self._first_visible_control(
                 page,
