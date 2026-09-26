@@ -134,6 +134,10 @@ class FakePage:
             self.success_title.visible = False
             self.success_info.present = 0
             self.success_info.visible = False
+            self.success_continue.present = 0
+            self.success_continue.visible = False
+            self.success_close.present = 0
+            self.success_close.visible = False
 
         self.success_continue = FakeLocator(
             text="Продолжить",
