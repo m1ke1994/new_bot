@@ -601,7 +601,7 @@ class LiveExecutor:
         except Exception:
             coupon_text = ""
 
-        coupon_match = re.search(r"(?:Купон\\s*№\\s*)?(\\d{5,})", coupon_text, re.I)
+        coupon_match = re.search(r"(?:Купон\s*№\s*)?(\d{5,})", coupon_text, re.I)
         coupon_id = coupon_match.group(1) if coupon_match else "unknown"
         await self._log(
             "LIVE_SUCCESS_MODAL_DETECTED",
@@ -640,7 +640,7 @@ class LiveExecutor:
                     if await info.count() and await info.is_visible():
                         coupon_text = " ".join((await info.inner_text()).split())
                         coupon_match = re.search(
-                            r"(?:Купон\\s*№\\s*)?(\\d{5,})",
+                            r"(?:Купон\s*№\s*)?(\d{5,})",
                             coupon_text,
                             re.I,
                         )
