@@ -1523,6 +1523,7 @@ class LiveExecutor:
             modal = await self._confirmed_success_modal(page)
             if modal is not None:
                 return await self._finish_success_modal_placement(
+                    page,
                     modal,
                     decision,
                     publish,
