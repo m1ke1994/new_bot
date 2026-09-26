@@ -46,6 +46,7 @@ class FakeLocator:
         self.fills = []
         self.on_click = on_click
         self.children = {}
+        self.last_click_kwargs = {}
 
     @property
     def first(self):
@@ -70,6 +71,7 @@ class FakeLocator:
         return None
 
     async def click(self, **_kwargs):
+        self.last_click_kwargs = dict(_kwargs)
         self.clicks += 1
         if "data-autobet-manual-click" in self.attributes:
             self.attributes["data-autobet-manual-click"] = "1"
@@ -201,6 +203,10 @@ class FakePage:
             BLOCKED_TEXT_SELECTOR: self.blocked_text,
             BLOCKED_REMOVE_SELECTOR: self.blocked_remove,
             SUCCESS_MODAL_SELECTOR: self.success_modal,
+            SUCCESS_MODAL_TITLE_SELECTOR: self.success_title,
+            SUCCESS_MODAL_INFO_SELECTOR: self.success_info,
+            SUCCESS_MODAL_CONTINUE_SELECTOR: self.success_continue,
+            SUCCESS_MODAL_CLOSE_SELECTOR: self.success_close,
         }[selector]
 
     async def reload(self, **_kwargs):
@@ -641,6 +647,7 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(first_confirm.clicks, 1)
         self.assertEqual(fresh_confirm.clicks, 1)
+        self.assertTrue(fresh_confirm.last_click_kwargs.get("force"))
         self.assertTrue(await executor.manual_click_seen(item.attempt_id))
         self.assertIn(
             "LIVE_COUPON_BUTTON_REACQUIRE",
@@ -675,6 +682,43 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(
             "LIVE_COUPON_BUTTON_UNSTABLE",
+            [event for event, _ in events],
+        )
+
+    async def test_unaccepted_cleanup_closes_success_modal_before_coupon_remove(self):
+        events = []
+
+        async def log(event, message):
+            events.append((event, message))
+
+        executor, page, item = LiveExecutor(log), FakePage(), decision()
+        page.show_success_modal()
+        page.coupon_remove.present = 1
+        page.coupon_remove.visible = True
+
+        def remove_coupon():
+            page.coupon_bet.present = 0
+            page.coupon_bet.visible = False
+            page.coupon_remove.present = 0
+            page.coupon_remove.visible = False
+            page.amount.present = 0
+            page.amount.visible = False
+            page.confirm.present = 0
+            page.confirm.visible = False
+
+        page.coupon_remove.on_click = remove_coupon
+
+        cleared = await executor.clear_unaccepted_coupon(
+            page,
+            item.attempt_id,
+        )
+
+        self.assertTrue(cleared)
+        self.assertFalse(page.success_modal.visible)
+        self.assertEqual(page.success_continue.clicks, 1)
+        self.assertEqual(page.coupon_remove.clicks, 1)
+        self.assertIn(
+            "LIVE_UNACCEPTED_CLEANUP_BLOCKED_BY_SUCCESS_MODAL",
             [event for event, _ in events],
         )
 
