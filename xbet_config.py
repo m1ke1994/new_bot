@@ -197,6 +197,7 @@ class SelectorConfig:
     market_button: str
     market_locked_class: str
     canvas: str
+    canvas_fallback: str
     match_content_market_surfaces: tuple[str, ...]
     scoreboard_root: str
     scoreboard_root_fallbacks: tuple[str, ...]
@@ -287,6 +288,7 @@ class SelectorConfig:
             market_button=one("SELECTOR_MARKET_BUTTON"),
             market_locked_class=one("CLASS_MARKET_LOCKED"),
             canvas=one("SELECTOR_MARKET_CANVAS"),
+            canvas_fallback=one("SELECTOR_MARKET_CANVAS_FALLBACK"),
             match_content_market_surfaces=many("SELECTOR_MATCH_CONTENT_MARKET_SURFACES"),
             scoreboard_root=one("SELECTOR_SCOREBOARD"),
             scoreboard_root_fallbacks=many("SELECTOR_SCOREBOARD_FALLBACKS"),
