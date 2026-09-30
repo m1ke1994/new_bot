@@ -19,6 +19,20 @@ class FrontendCanvasStateTests(unittest.TestCase):
         self.assertIn("show(bet.next_goal_number)", self.source)
         self.assertIn("show(state.selected_team)", self.source)
 
+    def test_coupon_recovery_phases_are_visible_on_frontend(self):
+        self.assertIn("const couponRecovery = computed", self.source)
+        self.assertIn("BLOCKED_COUPON", self.source)
+        self.assertIn("CLEARING_COUPON", self.source)
+        self.assertIn("REFRESHING_SCORE", self.source)
+        self.assertIn("WAITING_NEW_MARKET", self.source)
+        self.assertIn("RETRYING_SAME_STEP", self.source)
+        self.assertIn("ЗАБЛОКИРОВАННЫЙ КУПОН", self.source)
+        self.assertIn("тот же матч", self.source)
+        self.assertIn("та же команда", self.source)
+        self.assertIn("тот же шаг", self.source)
+        self.assertIn("DEMO_VIRTUAL_BLOCKED_EVENT", self.source)
+        self.assertIn("COUPON_CLEAR_RECOVERED", self.source)
+
     def test_canvas_source_metadata_replaces_stale_dom_only_copy(self):
         self.assertIn("const marketSource = computed", self.source)
         self.assertIn("state.value.odds?.source", self.source)
