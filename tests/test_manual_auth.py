@@ -34,6 +34,7 @@ class FakePage:
     def __init__(self, balance_checks):
         self.balance_checks = list(balance_checks)
         self.calls = []
+        self.url = "about:blank"
 
     def locator(self, selector):
         self.calls.append(("locator", selector))
@@ -42,6 +43,11 @@ class FakePage:
 
     async def goto(self, url, **kwargs):
         self.calls.append(("goto", url, kwargs))
+        self.url = url
+
+    async def evaluate(self, expression):
+        self.calls.append(("evaluate", expression))
+        return {"readyState": "complete", "hasBody": True}
 
     async def wait_for_timeout(self, timeout):
         self.calls.append(("wait_for_timeout", timeout))
@@ -58,7 +64,7 @@ class ManualAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(authorized)
         self.assertFalse(wrong_case)
 
-    async def test_saved_session_waits_25_seconds_before_continuing(self):
+    async def test_saved_session_continues_without_extra_delay(self):
         page = FakePage([["RUB"]])
         statuses = []
 
@@ -78,9 +84,18 @@ class ManualAuthorizationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, {"ok": True, "status": "AUTHORIZED"})
         self.assertEqual(statuses, ["AUTHORIZED"])
-        wait_mock.assert_awaited_once_with(None, AUTHORIZED_CONTINUE_DELAY)
+        wait_mock.assert_not_awaited()
         self.assertEqual(page.calls[0][0], "goto")
         self.assertEqual(page.calls[0][1], SITE_URL)
+
+    async def test_saved_site_tab_is_reused_without_second_navigation(self):
+        page = FakePage([["RUB"]])
+        page.url = f"{SITE_URL.rstrip('/')}/live"
+
+        result = await authorize(page)
+
+        self.assertEqual(result, {"ok": True, "status": "AUTHORIZED"})
+        self.assertFalse(any(call[0] == "goto" for call in page.calls))
 
     async def test_manual_login_continues_without_extra_25_seconds(self):
         page = FakePage([[], ["RUB"]])
