@@ -32,7 +32,7 @@ class CanvasCoefficientLocator:
         self.canvas_height = float(canvas_height)
 
     async def click(self, **kwargs: Any) -> None:
-        canvas_selector = SELECTORS.canvas or CANVAS_SELECTOR
+        canvas_selector = SELECTORS.canvas
         canvas = self.page.locator(canvas_selector).first
         await canvas.wait_for(state="visible", timeout=10_000)
         css_box = await canvas.bounding_box()
