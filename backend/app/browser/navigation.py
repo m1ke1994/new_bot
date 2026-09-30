@@ -7,6 +7,17 @@ from urllib.parse import urlparse
 
 NavigationLogger = Callable[[str], Any]
 
+NETWORK_ERROR_MARKERS = (
+    "ERR_NETWORK_CHANGED",
+    "ERR_INTERNET_DISCONNECTED",
+    "ERR_CONNECTION_RESET",
+    "ERR_CONNECTION_CLOSED",
+    "ERR_CONNECTION_REFUSED",
+    "ERR_NAME_NOT_RESOLVED",
+    "ERR_TIMED_OUT",
+    "ERR_PROXY_CONNECTION_FAILED",
+)
+
 
 class NavigationLoadError(RuntimeError):
     """Raised when the target page did not become a usable DOM document."""
@@ -62,20 +73,49 @@ async def _document_is_usable(page: Any, target_url: str) -> bool:
         if not _same_target(str(current_url or ""), target_url):
             return False
         state = await page.evaluate(
-            "() => ({ readyState: document.readyState, hasBody: Boolean(document.body) })"
+            """() => ({
+                readyState: document.readyState,
+                hasBody: Boolean(document.body),
+                href: String(location.href || ''),
+                title: String(document.title || ''),
+                bodyText: String(document.body?.innerText || '').slice(0, 4000),
+            })"""
         )
     except Exception:
         return False
+
+    if not isinstance(state, dict):
+        return False
+
+    href = str(state.get("href") or "")
+    diagnostic_text = " ".join(
+        (
+            href,
+            str(state.get("title") or ""),
+            str(state.get("bodyText") or ""),
+        )
+    ).upper()
+    if href.lower().startswith("chrome-error://"):
+        return False
+    if any(marker in diagnostic_text for marker in NETWORK_ERROR_MARKERS):
+        return False
+
     return bool(
-        isinstance(state, dict)
-        and state.get("hasBody")
+        state.get("hasBody")
         and state.get("readyState") in {"interactive", "complete"}
     )
 
 
 def _is_transient_navigation_abort(error: Exception) -> bool:
     message = str(error).lower()
-    return "err_aborted" in message or "frame was detached" in message
+    return (
+        "err_aborted" in message
+        or "frame was detached" in message
+        or "err_network_changed" in message
+        or "err_connection_reset" in message
+        or "err_connection_closed" in message
+        or "err_timed_out" in message
+    )
 
 
 async def _wait_for_redirected_document(
@@ -161,9 +201,10 @@ async def goto_with_retry(
             )
             await _stop_incomplete_navigation(page)
             try:
-                await page.wait_for_timeout(retry_delay_ms)
+                delay_ms = retry_delay_ms * attempt
+                await page.wait_for_timeout(delay_ms)
             except Exception:
-                await asyncio.sleep(retry_delay_ms / 1000)
+                await asyncio.sleep((retry_delay_ms * attempt) / 1000)
 
     raise NavigationLoadError(
         f"Страница не загрузилась после {attempts} попыток: "
