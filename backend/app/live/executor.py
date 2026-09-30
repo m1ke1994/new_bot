@@ -1113,6 +1113,98 @@ class LiveExecutor:
                 ),
             )
 
+    async def preview_virtual_coupon(
+        self,
+        page: Any,
+        decision: LiveDecision,
+        publish: Publisher | None = None,
+    ) -> str:
+        """Open the selected coupon for DEMO validation without submitting a bet.
+
+        This path intentionally never fills the stake amount and never clicks
+        «Сделать ставку». The caller clears the coupon afterwards. A bookmaker
+        lock is returned as BLOCKED so the strategy can reread the score/market
+        and retry exactly the same step and side.
+        """
+        async with self._lock:
+            if decision.coefficient_locator is None:
+                raise LivePreparationError(
+                    "LIVE_MARKET_ELEMENT_MISSING",
+                    "DOM-элемент выбранного коэффициента отсутствует.",
+                )
+
+            if await self._success_modal_is_visible(page):
+                if not await self._close_success_modal_controls(
+                    page,
+                    decision.attempt_id,
+                ):
+                    raise LivePreparationError(
+                        "LIVE_SUCCESS_MODAL_BLOCKING",
+                        "Модальное окно предыдущей ставки мешает DEMO-проверке coupon.",
+                    )
+
+            await decision.coefficient_locator.click()
+            self._market_selected.add(decision.attempt_id)
+            await self._publish(
+                decision.attempt_id,
+                LiveStatus.LIVE_MARKET_SELECTED,
+                (
+                    f"DEMO preview goal={decision.goal_number} "
+                    f"team={decision.side.value} odds={decision.coefficient}"
+                ),
+                publish,
+            )
+
+            coupon_signal = await self._wait_for_coupon_surface(page)
+            if coupon_signal == "EMPTY_COUPON":
+                raise LivePreparationError(
+                    "LIVE_COUPON_EMPTY_AFTER_CLICK",
+                    "После клика по коэффициенту coupon остался пустым.",
+                )
+            if coupon_signal is None:
+                raise LivePreparationError(
+                    "LIVE_COUPON_NOT_READY",
+                    "После клика по коэффициенту coupon не появился.",
+                )
+
+            await self._publish(
+                decision.attempt_id,
+                LiveStatus.LIVE_COUPON_OPENED,
+                f"DEMO preview coupon открыт; signal={coupon_signal}",
+                publish,
+            )
+
+            if coupon_signal == "BLOCKED" or await self.blocked_event_exists(page):
+                await self._log(
+                    "DEMO_VIRTUAL_BLOCKED_EVENT",
+                    (
+                        f"attempt={decision.attempt_id}; step={decision.strategy_step}; "
+                        "same-side same-step retry required"
+                    ),
+                )
+                return "BLOCKED"
+
+            selection_signal = await self._wait_for_coupon_selection(page, decision)
+            if selection_signal == "BLOCKED":
+                await self._log(
+                    "DEMO_VIRTUAL_BLOCKED_EVENT",
+                    (
+                        f"attempt={decision.attempt_id}; step={decision.strategy_step}; "
+                        "lock appeared while verifying coupon"
+                    ),
+                )
+                return "BLOCKED"
+
+            await self._log(
+                "DEMO_VIRTUAL_COUPON_READY",
+                (
+                    f"attempt={decision.attempt_id}; team={decision.team}; "
+                    f"goal={decision.goal_number}; amount_not_entered=true; "
+                    "confirm_not_clicked=true"
+                ),
+            )
+            return "READY"
+
     async def prepare(
         self,
         page: Any,
