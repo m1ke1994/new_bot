@@ -8,6 +8,7 @@ from typing import Any
 from playwright.async_api import Page
 
 from backend.app.demo.models import ScoreboardSnapshot
+from xbet_config import SELECTORS, TEXTS, join_selectors
 from backend.app.demo.strategies.first_half_draw import (
     FirstHalfPhase,
     classify_first_half_phase,
@@ -27,31 +28,30 @@ from .scoreboard import parse_timer_and_period
 
 
 Logger = Callable[[str, str], Awaitable[Any]]
-FIRST_HALF_LABEL = "1-й тайм"
-SUBGAME_LIST_SELECTOR = ".game-sub-games__list"
-SUBGAME_ITEM_SELECTOR = ".game-sub-games__item"
-SUBGAME_CAPTION_SELECTOR = ".ui-caption"
-SUBGAME_SELECTED_CLASS = "game-sub-games__item--is-selected"
+FIRST_HALF_LABEL = TEXTS.first_half_tab
+SUBGAME_LIST_SELECTOR = SELECTORS.subgame_list
+SUBGAME_ITEM_SELECTOR = SELECTORS.subgame_item
+SUBGAME_CAPTION_SELECTOR = SELECTORS.subgame_caption
+SUBGAME_SELECTED_CLASS = SELECTORS.subgame_selected_class
 FIRST_HALF_OPEN_RETRIES = 3
 FIRST_HALF_VERIFY_POLLS = 20
 FIRST_HALF_VERIFY_DELAY = 0.15
-SCOREBOARD_TIMER_STATUS_SELECTOR = (
-    ".scoreboard-layout-head__footer "
-    ".scoreboard-live__status .scoreboard-timer .ui-caption"
+SCOREBOARD_TIMER_STATUS_SELECTOR = join_selectors(
+    tuple(
+        dict.fromkeys(
+            selector
+            for selector in (
+                SELECTORS.scoreboard_timer_status,
+                *SELECTORS.scoreboard_timer_fallbacks,
+            )
+            if selector
+        )
+    )
 )
-GAME_OVER_PANEL_SELECTOR = ".game-over-panel-default-message"
-GAME_OVER_TITLE_SELECTOR = ".ui-message-block__title"
-GAME_OVER_TEXT = "Игра завершена."
-PERIOD_SIGNAL_SELECTORS = (
-    ".scoreboard-live__status",
-    '[role="tab"][aria-selected="true"]',
-    'button[aria-pressed="true"]',
-    ".game-sub-games__item--is-selected",
-    ".game-toolbar-filter-switch--active",
-    ".game-toolbar-filter-switch--is-active",
-    ".game-subgames__item--active",
-    ".game-tabs__item--active",
-)
+GAME_OVER_PANEL_SELECTOR = SELECTORS.game_over_panel
+GAME_OVER_TITLE_SELECTOR = SELECTORS.game_over_title
+GAME_OVER_TEXT = TEXTS.game_over
+PERIOD_SIGNAL_SELECTORS = SELECTORS.period_signals
 
 
 class FirstHalfNotReady(RuntimeError):
@@ -103,7 +103,7 @@ async def open_first_half(page: Page, logger: Logger | None = None) -> str:
         await root.wait_for(state="visible", timeout=8_000)
     except Exception as error:
         raise FirstHalfNotReady(
-            "Контейнер sub-game .game-sub-games__list пока не найден."
+            f"Контейнер sub-game {SUBGAME_LIST_SELECTOR} пока не найден."
         ) from error
 
     last_selected = await selected_subgame_text(page)
@@ -140,7 +140,8 @@ async def open_first_half(page: Page, logger: Logger | None = None) -> str:
 
         if target is None:
             raise FirstHalfNotReady(
-                "В .game-sub-games__list не найден элемент .game-sub-games__item с текстом «1-й тайм»."
+                f"В {SUBGAME_LIST_SELECTOR} не найден элемент {SUBGAME_ITEM_SELECTOR} "
+                f"с текстом «{FIRST_HALF_LABEL}»."
             )
 
         if logger is not None:
