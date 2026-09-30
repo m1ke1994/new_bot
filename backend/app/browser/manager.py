@@ -4,7 +4,7 @@ from typing import Any
 
 from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
 
-from auth import PROFILE_DIR
+from auth import PROFILE_DIR, open_site
 
 
 Logger = Callable[[str, str], Awaitable[Any]]
@@ -185,6 +185,30 @@ class BrowserManager:
             return preferred
         return open_pages[-1] if open_pages else None
 
+    async def _preopen_site_locked(self, page: Page) -> Page:
+        """Open the bookmaker during start and recover once if the first tab is stale."""
+        try:
+            await open_site(page)
+        except Exception as first_error:
+            await self._log(
+                "BROWSER_SITE_OPEN_RETRY",
+                (
+                    "Первое открытие сайта не удалось; "
+                    f"перезапускаем persistent Chromium: "
+                    f"{type(first_error).__name__}: {first_error}"
+                ),
+            )
+            page = await self._recover_page_locked(first_error)
+            await page.bring_to_front()
+            await open_site(page)
+
+        self._navigation_recovery_stage = 0
+        await self._log(
+            "BROWSER_SITE_READY",
+            f"url={self._page_url(page) or 'about:blank'}",
+        )
+        return page
+
     async def prepare_session_page(self) -> Page:
         """Select and stabilize the persistent tab before a new worker starts."""
         async with self.lock:
@@ -230,6 +254,9 @@ class BrowserManager:
                 "BROWSER_SESSION_PAGE_READY",
                 f"url={self._page_url(page) or 'about:blank'}; ready_state={ready_state}",
             )
+            # Do not return an about:blank tab to the worker. Open the site as
+            # part of the start transaction, then authorize() simply reuses it.
+            page = await self._preopen_site_locked(page)
             return page
 
     async def _launch_locked(self, *, recovered: bool) -> Page:
