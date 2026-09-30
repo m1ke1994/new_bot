@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover
     RapidOCR = None
 
 
-CANVAS_SELECTOR = SELECTORS.canvas or "canvas.market-grid-canvas__canvas"
+CANVAS_SELECTOR = SELECTORS.canvas
 MIN_ODDS = 1.01
 MAX_ODDS = 100.0
 OCR_MIN_CONFIDENCE = (
