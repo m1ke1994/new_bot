@@ -1038,18 +1038,20 @@ CANVAS_2D_HOOK_SCRIPT = r"""
         };
     };
 
-    state.snapshot = (selector) => {
+    state.snapshot = (selector, fallbackSelector) => {
         let canvas = null;
         try {
             canvas = document.querySelector(selector);
         } catch (_) {}
-        if (!canvas) {
-            for (const candidate of document.querySelectorAll("canvas")) {
-                if (candidate.__autobetCanvas2DId) {
-                    canvas = candidate;
-                    break;
+        if (!canvas && fallbackSelector) {
+            try {
+                for (const candidate of document.querySelectorAll(fallbackSelector)) {
+                    if (candidate.__autobetCanvas2DId) {
+                        canvas = candidate;
+                        break;
+                    }
                 }
-            }
+            } catch (_) {}
         }
         if (!canvas) {
             return {
@@ -2840,7 +2842,7 @@ async def ensure_canvas_2d_hook(page: Page) -> bool:
 async def capture_canvas_2d_snapshot(page: Page) -> dict[str, Any]:
     await ensure_canvas_2d_hook(page)
     return await page.evaluate(
-        """async (selector) => {
+        """async ({selector, fallbackSelector}) => {
             await new Promise((resolve) => {
                 requestAnimationFrame(() => setTimeout(resolve, 0));
             });
@@ -2856,9 +2858,12 @@ async def capture_canvas_2d_snapshot(page: Page) -> dict[str, Any]:
                     diagnostics: {},
                 };
             }
-            return api.snapshot(selector);
+            return api.snapshot(selector, fallbackSelector);
         }""",
-        CANVAS_SELECTOR,
+        {
+            "selector": CANVAS_SELECTOR,
+            "fallbackSelector": SELECTORS.canvas_fallback,
+        },
     )
 
 
