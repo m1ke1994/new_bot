@@ -847,11 +847,12 @@ class LiveExecutor:
         )
 
     async def clear_unaccepted_coupon(self, page: Any, attempt_id: str) -> bool:
-        """Clear a proven-unaccepted coupon without relying on lock strategy.
+        """Clear one proven-unaccepted coupon without changing strategy state.
 
-        The method reacquires DOM nodes on every pass because Vue can replace
-        coupon elements during market updates. Disabled controls are never
-        force-clicked.
+        Exact blocked coupons are removed first. DOM nodes are reacquired on
+        every retry because Vue frequently replaces them while the market is
+        locked/unlocked. A JS click is used only as a fallback after the remove
+        control was confirmed visible and enabled.
         """
         async with self._lock:
             for retry in range(1, 6):
@@ -876,84 +877,112 @@ class LiveExecutor:
 
                 visible_bet = False
                 removed = False
-                bets = page.locator(COUPON_BET_SELECTOR)
-                try:
-                    bet_count = await bets.count()
-                except Exception:
-                    bet_count = 0
 
-                for index in range(bet_count):
-                    bet = bets.nth(index)
-                    try:
-                        if not await bet.is_visible():
-                            continue
-                        visible_bet = True
-                        remove = bet.locator(COUPON_REMOVE_SELECTOR).first
-                        if (
-                            await remove.count()
-                            and await remove.is_visible()
-                            and not await remove.is_disabled()
-                        ):
-                            await self._log(
-                                "LIVE_UNACCEPTED_COUPON_CLEAR_ATTEMPT",
-                                (
-                                    f"attempt={attempt_id}; retry={retry}; "
-                                    "source=regular_coupon"
-                                ),
-                            )
-                            await remove.click(
-                                timeout=SUCCESS_MODAL_ACTION_TIMEOUT_MS,
-                                force=True,
-                                no_wait_after=True,
-                            )
-                            removed = True
-                            break
-                    except Exception as error:
-                        await self._log(
-                            "LIVE_UNACCEPTED_COUPON_CLEAR_TRANSIENT",
-                            (
-                                f"attempt={attempt_id}; retry={retry}; "
-                                f"{type(error).__name__}: {error}"
-                            ),
-                        )
-
-                if not removed:
-                    blocked = await self._confirmed_blocked_container(page)
-                    if blocked is not None:
-                        visible_bet = True
-                        for selector in (
-                            BLOCKED_REMOVE_SELECTOR,
-                            BLOCKED_REMOVE_FALLBACK_SELECTOR,
-                        ):
-                            try:
-                                remove = blocked.locator(selector).first
-                                if (
-                                    await remove.count()
-                                    and await remove.is_visible()
-                                    and not await remove.is_disabled()
-                                ):
-                                    await self._log(
-                                        "LIVE_UNACCEPTED_COUPON_CLEAR_ATTEMPT",
-                                        (
-                                            f"attempt={attempt_id}; retry={retry}; "
-                                            "source=blocked_coupon"
-                                        ),
-                                    )
+                # If the bookmaker explicitly says the coupon is blocked, use
+                # its dedicated remove control before touching regular coupon
+                # controls. This avoids repeatedly clicking a stale Vue node.
+                blocked = await self._confirmed_blocked_container(page)
+                if blocked is not None:
+                    visible_bet = True
+                    for selector in (
+                        BLOCKED_REMOVE_SELECTOR,
+                        BLOCKED_REMOVE_FALLBACK_SELECTOR,
+                    ):
+                        try:
+                            remove = blocked.locator(selector).first
+                            if (
+                                await remove.count()
+                                and await remove.is_visible()
+                                and not await remove.is_disabled()
+                            ):
+                                await self._log(
+                                    "LIVE_UNACCEPTED_COUPON_CLEAR_ATTEMPT",
+                                    (
+                                        f"attempt={attempt_id}; retry={retry}; "
+                                        "source=blocked_coupon"
+                                    ),
+                                )
+                                try:
                                     await remove.click(
                                         timeout=SUCCESS_MODAL_ACTION_TIMEOUT_MS,
                                         force=True,
                                         no_wait_after=True,
                                     )
-                                    removed = True
-                                    break
-                            except Exception as error:
+                                except Exception as click_error:
+                                    await self._log(
+                                        "LIVE_UNACCEPTED_COUPON_CLEAR_JS_FALLBACK",
+                                        (
+                                            f"attempt={attempt_id}; retry={retry}; "
+                                            f"source=blocked_coupon; "
+                                            f"{type(click_error).__name__}: {click_error}"
+                                        ),
+                                    )
+                                    await remove.evaluate("button => button.click()")
+                                removed = True
+                                break
+                        except Exception as error:
+                            await self._log(
+                                "LIVE_UNACCEPTED_COUPON_CLEAR_TRANSIENT",
+                                (
+                                    f"attempt={attempt_id}; retry={retry}; "
+                                    f"source=blocked_coupon; "
+                                    f"{type(error).__name__}: {error}"
+                                ),
+                            )
+
+                if not removed:
+                    bets = page.locator(COUPON_BET_SELECTOR)
+                    try:
+                        bet_count = await bets.count()
+                    except Exception:
+                        bet_count = 0
+
+                    for index in range(bet_count):
+                        bet = bets.nth(index)
+                        try:
+                            if not await bet.is_visible():
+                                continue
+                            visible_bet = True
+                            remove = bet.locator(COUPON_REMOVE_SELECTOR).first
+                            if (
+                                await remove.count()
+                                and await remove.is_visible()
+                                and not await remove.is_disabled()
+                            ):
                                 await self._log(
-                                    "LIVE_UNACCEPTED_COUPON_CLEAR_TRANSIENT",
+                                    "LIVE_UNACCEPTED_COUPON_CLEAR_ATTEMPT",
                                     (
                                         f"attempt={attempt_id}; retry={retry}; "
-                                        f"{type(error).__name__}: {error}"
+                                        "source=regular_coupon"
                                     ),
                                 )
+                                try:
+                                    await remove.click(
+                                        timeout=SUCCESS_MODAL_ACTION_TIMEOUT_MS,
+                                        force=True,
+                                        no_wait_after=True,
+                                    )
+                                except Exception as click_error:
+                                    await self._log(
+                                        "LIVE_UNACCEPTED_COUPON_CLEAR_JS_FALLBACK",
+                                        (
+                                            f"attempt={attempt_id}; retry={retry}; "
+                                            f"source=regular_coupon; "
+                                            f"{type(click_error).__name__}: {click_error}"
+                                        ),
+                                    )
+                                    await remove.evaluate("button => button.click()")
+                                removed = True
+                                break
+                        except Exception as error:
+                            await self._log(
+                                "LIVE_UNACCEPTED_COUPON_CLEAR_TRANSIENT",
+                                (
+                                    f"attempt={attempt_id}; retry={retry}; "
+                                    f"source=regular_coupon; "
+                                    f"{type(error).__name__}: {error}"
+                                ),
+                            )
 
                 await asyncio.sleep(0.10)
 
@@ -988,8 +1017,6 @@ class LiveExecutor:
                         return True
 
                 if not visible_bet and not blocked_remaining:
-                    # No coupon selection is present; this is already a clean
-                    # state even when the empty-coupon placeholder is absent.
                     await self._log(
                         "LIVE_UNACCEPTED_COUPON_ALREADY_CLEAR",
                         f"attempt={attempt_id}; retry={retry}; no_selection=true",
