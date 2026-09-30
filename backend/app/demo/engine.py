@@ -3774,22 +3774,26 @@ class DemoEngine:
         context: str,
         selected_team: str | None = None,
         score_before: Score | None = None,
+        show_recovery: bool = True,
+        market_locked: bool = False,
     ) -> bool:
         """Do not allow a new market click until the old coupon is really gone."""
         cleanup_cycle = 0
+        recovery_visible = show_recovery
         while not self._stop_event.is_set():
             cleanup_cycle += 1
-            await self._set_coupon_recovery_state(
-                phase="CLEARING_COUPON",
-                attempt_id=attempt_id,
-                step=step,
-                amount=amount,
-                selected_team=selected_team,
-                score_before=score_before,
-                cleanup_cycle=cleanup_cycle,
-                message="Удаляем старый coupon; новый коэффициент пока не кликаем.",
-                market_locked=True,
-            )
+            if recovery_visible:
+                await self._set_coupon_recovery_state(
+                    phase="CLEARING_COUPON",
+                    attempt_id=attempt_id,
+                    step=step,
+                    amount=amount,
+                    selected_team=selected_team,
+                    score_before=score_before,
+                    cleanup_cycle=cleanup_cycle,
+                    message="Удаляем старый coupon; новый коэффициент пока не кликаем.",
+                    market_locked=market_locked,
+                )
             try:
                 cleared = await self.live_executor.clear_unaccepted_coupon(
                     page,
@@ -3806,17 +3810,18 @@ class DemoEngine:
                 )
 
             if cleared:
-                await self._set_coupon_recovery_state(
-                    phase="REFRESHING_SCORE",
-                    attempt_id=attempt_id,
-                    step=step,
-                    amount=amount,
-                    selected_team=selected_team,
-                    score_before=score_before,
-                    cleanup_cycle=cleanup_cycle,
-                    message="Coupon удалён. Проверяем актуальный счёт.",
-                    market_locked=False,
-                )
+                if recovery_visible:
+                    await self._set_coupon_recovery_state(
+                        phase="REFRESHING_SCORE",
+                        attempt_id=attempt_id,
+                        step=step,
+                        amount=amount,
+                        selected_team=selected_team,
+                        score_before=score_before,
+                        cleanup_cycle=cleanup_cycle,
+                        message="Coupon удалён. Проверяем актуальный счёт.",
+                        market_locked=False,
+                    )
                 if cleanup_cycle > 1:
                     await REPOSITORY.log(
                         f"{context}_COUPON_CLEAR_RECOVERED",
@@ -3826,6 +3831,20 @@ class DemoEngine:
                         ),
                     )
                 return True
+
+            if not recovery_visible:
+                recovery_visible = True
+                await self._set_coupon_recovery_state(
+                    phase="CLEARING_COUPON",
+                    attempt_id=attempt_id,
+                    step=step,
+                    amount=amount,
+                    selected_team=selected_team,
+                    score_before=score_before,
+                    cleanup_cycle=cleanup_cycle,
+                    message="Coupon не удалился с первой попытки. Повторяем очистку.",
+                    market_locked=market_locked,
+                )
 
             await REPOSITORY.log(
                 f"{context}_COUPON_CLEAR_WAIT",
@@ -3934,6 +3953,8 @@ class DemoEngine:
                     context="DEMO_VIRTUAL_STALE",
                     selected_team=selection.selected_team,
                     score_before=snapshot.score,
+                    show_recovery=True,
+                    market_locked=False,
                 ):
                     return None
                 snapshot = await self._read_fresh_score(
@@ -4002,6 +4023,8 @@ class DemoEngine:
                 context="DEMO_VIRTUAL",
                 selected_team=selection.selected_team,
                 score_before=score_before_preview.score,
+                show_recovery=signal == "BLOCKED",
+                market_locked=signal == "BLOCKED",
             )
             if not cleanup_ok:
                 return None
@@ -4129,6 +4152,8 @@ class DemoEngine:
             context="LIVE_UNACCEPTED",
             selected_team=selection.selected_team,
             score_before=placement_snapshot.score,
+            show_recovery=True,
+            market_locked=placement_signal == BLOCKED_EVENT_SIGNAL,
         )
         if not cleanup_ok:
             return None
@@ -4536,6 +4561,8 @@ class DemoEngine:
                     context="LIVE_MARKET_STALE",
                     selected_team=selection.selected_team,
                     score_before=placement_snapshot.score,
+                    show_recovery=True,
+                    market_locked=False,
                 ):
                     return None
                 snapshot = await self._read_fresh_score(
