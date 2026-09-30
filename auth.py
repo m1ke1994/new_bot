@@ -3,6 +3,7 @@ import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from playwright.async_api import Page
 
@@ -32,7 +33,7 @@ AUTH_SELECTOR_CANDIDATES = tuple(
 BASE_DIR = Path(__file__).resolve().parent
 PROFILE_DIR = BASE_DIR / "browser_profile"
 
-PAGE_TIMEOUT = 60_000
+PAGE_TIMEOUT = 20_000
 # Auth is checked frequently because this is only a tiny DOM lookup. The old
 # 2-second poll could unnecessarily stall an already-authorized session.
 MANUAL_LOGIN_POLL_INTERVAL = 0.25
@@ -86,21 +87,49 @@ async def check_balance(page: Page) -> bool:
     return False
 
 
+async def _site_document_is_usable(page: Page, url: str) -> bool:
+    """Return True when the persistent tab is already on the configured site."""
+    try:
+        if page.is_closed():
+            return False
+        current = urlparse(str(page.url or ""))
+        target = urlparse(url)
+        if not current.scheme or current.scheme == "about":
+            return False
+        if target.netloc and current.netloc.lower() != target.netloc.lower():
+            return False
+        state = await page.evaluate(
+            "() => ({ readyState: document.readyState, hasBody: Boolean(document.body) })"
+        )
+    except Exception:
+        return False
+    return bool(
+        isinstance(state, dict)
+        and state.get("hasBody")
+        and state.get("readyState") in {"interactive", "complete"}
+    )
+
+
 async def open_site(page: Page, url: str = SITE_URL) -> None:
-    """Open only the configured site; login remains entirely manual."""
+    """Open the configured site once and reuse an already usable persistent tab."""
     if not url:
         raise RuntimeError("XBET_URL отсутствует в .env")
+
+    if await _site_document_is_usable(page, url):
+        log(f"Сайт уже открыт: {page.url}")
+        return
 
     log(f"Открываем сайт: {url}")
     await goto_with_retry(
         page,
         url,
         timeout_ms=PAGE_TIMEOUT,
-        attempts=2,
+        attempts=3,
         logger=log,
     )
-    # domcontentloaded is enough. The auth poll below observes the header as
-    # soon as Vue renders it, instead of paying an unconditional 3-second wait.
+    # Use shorter attempts instead of one long 60s wait. A flaky first request
+    # is retried quickly while goto_with_retry still accepts a document that
+    # became usable just as Playwright reported a timeout.
     log("DOM сайта загружен")
 
 
