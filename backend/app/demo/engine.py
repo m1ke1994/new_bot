@@ -197,7 +197,11 @@ def resolve_unaccepted_score_transition(
     score_before: Score,
     score_after: Score,
 ) -> str:
-    """Resolve one NOT_ACCEPTED window without consuming the strategy step."""
+    """Resolve one NOT_ACCEPTED window without consuming the strategy step.
+
+    New strategy rule: a blocked/unaccepted attempt never changes the selected
+    side. Any valid score advance keeps the same team, same step and same stake.
+    """
     delta1 = score_after.team1 - score_before.team1
     delta2 = score_after.team2 - score_before.team2
     if (
@@ -208,12 +212,7 @@ def resolve_unaccepted_score_transition(
         return UNACCEPTED_INVALID_SCORE
     if delta1 == 0 and delta2 == 0:
         return UNACCEPTED_NO_CHANGE
-    selected_delta = delta1 if selected_side == Scorer.TEAM_1 else delta2
-    return (
-        UNACCEPTED_FLIP_SIDE
-        if selected_delta > 0
-        else UNACCEPTED_KEEP_SIDE
-    )
+    return UNACCEPTED_KEEP_SIDE
 
 
 def selection_for_side(
@@ -1422,6 +1421,26 @@ class DemoEngine:
             selected_odd, opponent_odd = odds_for_selected_side(
                 current_odds, selection.selected_side
             )
+            if self._mode == "DEMO":
+                preview_result = await self._prepare_demo_virtual_until_ready(
+                    page=page,
+                    browser=browser,
+                    selected_match=selected_match,
+                    selection=selection,
+                    cycle_id=cycle_id,
+                    step=step,
+                    amount=amount,
+                    snapshot=snapshot,
+                    current_odds=current_odds,
+                )
+                if preview_result is None:
+                    return
+                (
+                    snapshot,
+                    current_odds,
+                    selected_odd,
+                    opponent_odd,
+                ) = preview_result
             score_before = snapshot.score
             created_at = local_now()
             bet_id = f"{cycle_id}:{step}:{score_before.text()}"
@@ -3721,6 +3740,151 @@ class DemoEngine:
         )
         return BlockedMatchSwitch(match_id=match_id, step=step, amount=amount)
 
+    async def _prepare_demo_virtual_until_ready(
+        self,
+        *,
+        page: Any,
+        browser: MatchBrowser,
+        selected_match: dict[str, Any],
+        selection: TeamSelection,
+        cycle_id: str,
+        step: int,
+        amount: float,
+        snapshot: ScoreboardSnapshot,
+        current_odds: Any,
+    ) -> tuple[ScoreboardSnapshot, Any, float, float] | None:
+        """Validate a DEMO step through the real coupon without submitting it.
+
+        The coefficient is clicked, coupon state is inspected, then the coupon
+        is removed. No amount is entered and the confirm button is never
+        clicked. If the coupon is blocked or the score changes while it is
+        open, the same step/stake/side is retried on the fresh next-goal row.
+        """
+        while not self._stop_event.is_set():
+            if await self._stop_for_run_time_limit_if_idle(
+                "DEMO_VIRTUAL_COUPON_PREVIEW"
+            ):
+                return None
+
+            expected_goal = snapshot.score.team1 + snapshot.score.team2 + 1
+            if current_odds.next_goal_number != expected_goal:
+                odds_result = await self._wait_for_odds(
+                    snapshot,
+                    selected_match,
+                )
+                if odds_result is None:
+                    return None
+                snapshot, current_odds = odds_result
+                continue
+
+            selected_odd, opponent_odd = odds_for_selected_side(
+                current_odds,
+                selection.selected_side,
+            )
+            locator = current_odds.locator_for_side(selection.selected_side)
+            attempt_id = (
+                f"demo_preview_{selected_match.get('match_id') or cycle_id}_"
+                f"{selection.selected_side.value}_step{step}_goal{expected_goal}_"
+                f"{uuid4().hex[:8]}"
+            )
+            decision = LiveDecision(
+                attempt_id=attempt_id,
+                match_id=str(selected_match.get("match_id") or cycle_id),
+                team=selection.selected_team,
+                side=selection.selected_side,
+                strategy_step=step,
+                amount=amount,
+                goal_number=expected_goal,
+                coefficient=selected_odd,
+                coefficient_locator=locator,
+                submission_deadline_monotonic=self._run_deadline_monotonic,
+            )
+            score_before_preview = snapshot
+
+            try:
+                signal = await self.live_executor.preview_virtual_coupon(
+                    page,
+                    decision,
+                )
+            except LivePreparationError as error:
+                await REPOSITORY.log(
+                    "DEMO_VIRTUAL_COUPON_PREVIEW_FAILED",
+                    (
+                        f"attempt={attempt_id}; status={error.status}; "
+                        f"step={step}; team={selection.selected_team}; {error}"
+                    ),
+                )
+                with suppress(Exception):
+                    await self.live_executor.clear_unaccepted_coupon(
+                        page,
+                        attempt_id,
+                    )
+                await self._sleep_or_stop(CONFIG.score_poll_interval)
+                snapshot = await self._read_fresh_score(
+                    browser,
+                    selected_match,
+                    snapshot,
+                )
+                odds_result = await self._wait_for_odds(
+                    snapshot,
+                    selected_match,
+                )
+                if odds_result is None:
+                    return None
+                snapshot, current_odds = odds_result
+                continue
+
+            cleanup_ok = await self.live_executor.clear_unaccepted_coupon(
+                page,
+                attempt_id,
+            )
+            if not cleanup_ok:
+                await REPOSITORY.log(
+                    "DEMO_VIRTUAL_COUPON_CLEAR_FAILED",
+                    (
+                        f"attempt={attempt_id}; step={step}; "
+                        "new coupon click postponed"
+                    ),
+                )
+                await self._sleep_or_stop(0.15)
+                continue
+
+            fresh = await self._read_fresh_score(
+                browser,
+                selected_match,
+                score_before_preview,
+            )
+
+            if signal == "BLOCKED" or fresh.score != score_before_preview.score:
+                await REPOSITORY.log(
+                    "DEMO_VIRTUAL_RETRY_SAME_SIDE",
+                    (
+                        f"step={step}; stake={amount:g}; "
+                        f"team={selection.selected_team}; "
+                        f"score={score_before_preview.score.text()}->"
+                        f"{fresh.score.text()}; signal={signal}"
+                    ),
+                )
+                snapshot = fresh
+                odds_result = await self._wait_for_odds(
+                    snapshot,
+                    selected_match,
+                )
+                if odds_result is None:
+                    return None
+                snapshot, current_odds = odds_result
+                continue
+
+            await REPOSITORY.log(
+                "DEMO_VIRTUAL_COUPON_VALIDATED",
+                (
+                    f"step={step}; team={selection.selected_team}; "
+                    f"goal={expected_goal}; amount_not_entered=true; "
+                    "confirm_not_clicked=true"
+                ),
+            )
+            return snapshot, current_odds, selected_odd, opponent_odd
+
     async def _recover_unaccepted_live_attempt(
         self,
         *,
@@ -3740,10 +3904,9 @@ class DemoEngine:
     ) -> tuple[TeamSelection, ScoreboardSnapshot, Any] | None:
         """Clear a proven NOT_ACCEPTED coupon and retry the same step safely.
 
-        LIVE no longer uses bookmaker lock state as strategy input.  The only
-        strategy decision in an unaccepted window is based on the scoreboard:
-        if the currently selected team scored, flip to the opposite side;
-        otherwise keep the side.  The strategy step and amount never advance.
+        LIVE no longer uses bookmaker lock state as strategy input. After any
+        proven-unaccepted attempt the score is reread, but the selected side,
+        strategy step and amount are preserved exactly.
         """
         await self._invalidate_live_attempt(
             attempt_record,
@@ -3866,9 +4029,6 @@ class DemoEngine:
             latest_snapshot, current_odds = odds_result
 
         desired_side = selection.selected_side
-        if transition == UNACCEPTED_FLIP_SIDE:
-            desired_side = opposite_side(selection.selected_side)
-
         new_selection = selection_for_side(
             latest_snapshot.team1,
             latest_snapshot.team2,
@@ -3876,11 +4036,7 @@ class DemoEngine:
             desired_side,
         )
 
-        event = (
-            "LIVE_UNACCEPTED_FLIP_SIDE"
-            if transition == UNACCEPTED_FLIP_SIDE
-            else "LIVE_UNACCEPTED_KEEP_SIDE"
-        )
+        event = "LIVE_UNACCEPTED_KEEP_SIDE"
         await REPOSITORY.log(
             event,
             (
@@ -3937,11 +4093,7 @@ class DemoEngine:
             selected_team=new_selection.selected_team,
             selected_side=new_selection.selected_side.value,
             other_team=new_selection.other_team,
-            selection_reason=(
-                "UNACCEPTED_SCORE_FLIP"
-                if transition == UNACCEPTED_FLIP_SIDE
-                else "UNACCEPTED_SCORE_KEEP"
-            ),
+            selection_reason="UNACCEPTED_SCORE_KEEP",
             sequence=await REPOSITORY.get_sequence(),
         )
         await self._publish_pending_bet(
@@ -3968,9 +4120,9 @@ class DemoEngine:
     ):
         """Place one LIVE step, recovering every proven NOT_ACCEPTED attempt.
 
-        A bookmaker lock is no longer a strategy state.  ACCEPTED keeps the
-        normal WIN/LOSE flow; NOT_ACCEPTED clears the coupon, reads scoreboard
-        delta, keeps/flips the side, and retries the same step and amount.
+        A bookmaker lock is no longer a strategy state. ACCEPTED keeps the
+        normal WIN/LOSE flow; NOT_ACCEPTED clears the coupon, rereads the
+        scoreboard and retries the same team, step and amount.
         """
         while not self._stop_event.is_set():
             if await self._stop_for_run_time_limit_if_idle(
