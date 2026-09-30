@@ -5,76 +5,101 @@ from collections.abc import Awaitable, Callable
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from xbet_config import SELECTORS, TEXTS, join_selectors
+
 from .models import LiveDecision, LivePreparationError, LiveStatus, PlacementObservation
 
 
 Logger = Callable[[str, str], Awaitable[Any]]
 Publisher = Callable[[LiveStatus, str], Awaitable[Any]]
 
-# Legacy root selectors are kept only as compatibility fallbacks.
-COUPON_SELECTOR = ".coupon-bets, .quick-coupon-main"
-COUPON_BET_SELECTOR = ".coupon-app .coupon-bets__bet"
-EMPTY_COUPON_SELECTOR = ".coupon-app .coupon-main-tab--no-bets"
-COUPON_FIRST_TEAM_SELECTOR = '[data-test="betting-coupon-bet-first-team"]'
-COUPON_SECOND_TEAM_SELECTOR = '[data-test="betting-coupon-bet-second-team"]'
-COUPON_MARKET_SELECTOR = '[data-test="betting-coupon-bet-market-name"]'
-COUPON_REMOVE_SELECTOR = 'button.coupon-bet-header__remove[aria-label="Удалить"]'
-# Legacy account selector is kept only as an optional compatibility check.
-ACCOUNT_SELECTOR = '.quick-coupon-main button[aria-label="Основной (RUB)"]'
-AMOUNT_SELECTOR = (
-    '.coupon-app .coupon-amount input.ui-number-input__field[type="text"][inputmode="decimal"], '
-    ".coupon-app .coupon-amount input.ui-number-input__field, "
-    '.quick-coupon-main input.ui-number-input__field[placeholder="Введите сумму ставки"]'
+# All bookmaker DOM selectors are configured in .env.
+COUPON_SELECTOR = SELECTORS.betslip
+COUPON_BET_SELECTOR = SELECTORS.coupon_bet
+EMPTY_COUPON_SELECTOR = SELECTORS.empty_coupon
+COUPON_FIRST_TEAM_SELECTOR = SELECTORS.coupon_first_team
+COUPON_SECOND_TEAM_SELECTOR = SELECTORS.coupon_second_team
+COUPON_MARKET_SELECTOR = SELECTORS.coupon_market
+COUPON_REMOVE_SELECTOR = SELECTORS.coupon_remove
+ACCOUNT_SELECTOR = SELECTORS.bet_account
+AMOUNT_SELECTOR = join_selectors(
+    tuple(
+        dict.fromkeys(
+            selector
+            for selector in (
+                *SELECTORS.bet_amount_inputs,
+                SELECTORS.bet_amount_input,
+            )
+            if selector
+        )
+    )
 )
-CONFIRM_BUTTON_CLASS_SELECTOR = (
-    "button.ui-button.ui-button--size-m.ui-button--theme-accent"
-    ".ui-button--block.ui-button--uppercase.ui-button--rounded"
+CONFIRM_FALLBACK_SELECTOR = join_selectors(
+    SELECTORS.bet_submit_fallback_buttons
 )
-CONFIRM_FALLBACK_SELECTOR = (
-    ".coupon-app .coupon-main-tab__make-bet .coupon-buttons button, "
-    ".coupon-app .coupon-buttons button"
+CONFIRM_SELECTOR = join_selectors(
+    tuple(
+        dict.fromkeys(
+            selector
+            for selector in (
+                *SELECTORS.bet_submit_buttons,
+                SELECTORS.bet_submit_button,
+            )
+            if selector
+        )
+    )
 )
-CONFIRM_SELECTOR = (
-    f"{CONFIRM_FALLBACK_SELECTOR}, "
-    f"{CONFIRM_BUTTON_CLASS_SELECTOR}, "
-    f".coupon-buttons {CONFIRM_BUTTON_CLASS_SELECTOR}, "
-    f".coupon-app {CONFIRM_BUTTON_CLASS_SELECTOR}, "
-    ".quick-coupon-main button.quick-coupon-put-bet-button"
-)
-CONFIRM_TEXT = "Сделать ставку"
+CONFIRM_TEXT = TEXTS.bet_confirm
+
 CONFIRM_WAIT_SECONDS = 5.0
 CONFIRM_CLICK_TIMEOUT_MS = 1_250
 CONFIRM_PRE_DISPATCH_RETRIES = 3
 CONFIRM_PRE_DISPATCH_RETRY_DELAY_SECONDS = 0.08
 SUBMISSION_RECONCILE_SECONDS = 2.5
 COUPON_SELECTION_WAIT_SECONDS = 10.0
-BALANCE_SELECTOR = '[data-gtm="account-balance-value-desktop"]'
-BLOCKED_COUPON_SELECTOR = (
-    ".coupon-bet__lock, "
-    ".quick-coupon-events-card__lock"
+BALANCE_SELECTOR = SELECTORS.bet_balance
+BLOCKED_COUPON_SELECTOR = join_selectors(
+    tuple(
+        dict.fromkeys(
+            selector
+            for selector in (
+                *SELECTORS.locked_bets,
+                SELECTORS.locked_bet,
+            )
+            if selector
+        )
+    )
 )
-BLOCKED_TEXT_SELECTOR = (
-    ".coupon-bet-lock__text, .quick-coupon-events-card-lock__text"
+BLOCKED_TEXT_SELECTOR = join_selectors(
+    tuple(
+        dict.fromkeys(
+            selector
+            for selector in (
+                *SELECTORS.locked_bet_texts,
+                SELECTORS.locked_bet_text,
+            )
+            if selector
+        )
+    )
 )
-BLOCKED_REMOVE_SELECTOR = (
-    ".coupon-bet-lock-remove, .quick-coupon-events-card-lock__remove"
+BLOCKED_REMOVE_SELECTOR = join_selectors(SELECTORS.remove_bet_buttons)
+BLOCKED_REMOVE_FALLBACK_SELECTOR = (
+    SELECTORS.remove_bet_buttons[-1]
+    if SELECTORS.remove_bet_buttons
+    else BLOCKED_REMOVE_SELECTOR
 )
-BLOCKED_REMOVE_FALLBACK_SELECTOR = 'button[aria-label="Удалить"]'
-BLOCKED_TEXT = "Заблокированное событие"
+BLOCKED_TEXT = TEXTS.locked_event
 BLOCKED_EVENT_SIGNAL = "BLOCKED_EVENT"
+SUCCESS_MODAL_SELECTOR = SELECTORS.success_modal
+SUCCESS_MODAL_TITLE_SELECTOR = SELECTORS.success_modal_title
+SUCCESS_MODAL_INFO_SELECTOR = SELECTORS.success_modal_info
+SUCCESS_MODAL_CONTINUE_SELECTOR = SELECTORS.success_modal_continue
+SUCCESS_MODAL_CLOSE_SELECTOR = join_selectors(
+    SELECTORS.success_modal_close_buttons
+)
+SUCCESS_MODAL_TITLE = TEXTS.bet_success_title
+
 BALANCE_TOLERANCE = Decimal("0.01")
-SUCCESS_MODAL_SELECTOR = '.modal__content[data-test="modal-content"]'
-SUCCESS_MODAL_TITLE_SELECTOR = '[data-test="betting-coupon-success-modal-title"]'
-SUCCESS_MODAL_INFO_SELECTOR = '[data-test="betting-coupon-success-modal-info"]'
-SUCCESS_MODAL_CONTINUE_SELECTOR = (
-    'button[data-test="betting-coupon-modal-control-contune"]'
-)
-SUCCESS_MODAL_CLOSE_SELECTOR = (
-    'button.modal__control[data-test="modal-control"][data-original-title="Закрыть"], '
-    'button[data-test="modal-control"][data-original-title="Закрыть"], '
-    'button[data-test="modal-control"][aria-label="Закрыть"]'
-)
-SUCCESS_MODAL_TITLE = "Ваша ставка принята!"
 SUCCESS_MODAL_WAIT_SECONDS = 2.0
 SUCCESS_MODAL_BALANCE_RACE_SECONDS = 3.0
 ACCEPTED_COUPON_CLEANUP_SECONDS = 0.35
