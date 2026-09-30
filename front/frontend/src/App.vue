@@ -792,6 +792,7 @@ function isBookmakerUnlockLog(item) {
     || event === 'CANVAS_2D_LOCK_RELEASED'
     || event === 'ACTIVE_BET_LOCK_RELEASED'
     || event === 'DEMO_BET_ACCEPTANCE_CONFIRMED'
+    || event.includes('COUPON_CLEAR_RECOVERED')
   )
 }
 
