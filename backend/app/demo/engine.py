@@ -30,6 +30,7 @@ from backend.app.browser.league import (
 )
 from backend.app.browser.manager import BROWSER_MANAGER, BrowserManager
 from backend.app.browser.market import (
+    MarketNotAvailable,
     MarketReadError,
     market_canvas_debug,
     read_first_half_draw_market,
@@ -3730,6 +3731,69 @@ class DemoEngine:
         )
         return BlockedMatchSwitch(match_id=match_id, step=step, amount=amount)
 
+    async def _wait_until_coupon_cleared(
+        self,
+        *,
+        page: Any,
+        attempt_id: str,
+        step: int,
+        amount: float,
+        context: str,
+    ) -> bool:
+        """Do not allow a new market click until the old coupon is really gone."""
+        cleanup_cycle = 0
+        while not self._stop_event.is_set():
+            cleanup_cycle += 1
+            try:
+                cleared = await self.live_executor.clear_unaccepted_coupon(
+                    page,
+                    attempt_id,
+                )
+            except Exception as error:
+                cleared = False
+                await REPOSITORY.log(
+                    f"{context}_COUPON_CLEAR_TRANSIENT",
+                    (
+                        f"attempt={attempt_id}; cycle={cleanup_cycle}; "
+                        f"{type(error).__name__}: {error}"
+                    ),
+                )
+
+            if cleared:
+                if cleanup_cycle > 1:
+                    await REPOSITORY.log(
+                        f"{context}_COUPON_CLEAR_RECOVERED",
+                        (
+                            f"attempt={attempt_id}; cycle={cleanup_cycle}; "
+                            f"step={step}; stake={amount:g}"
+                        ),
+                    )
+                return True
+
+            await REPOSITORY.log(
+                f"{context}_COUPON_CLEAR_WAIT",
+                (
+                    f"attempt={attempt_id}; cycle={cleanup_cycle}; "
+                    f"step={step}; stake={amount:g}; "
+                    "new market click is forbidden until coupon is empty"
+                ),
+            )
+            await STATE.update(
+                mode=self._mode,
+                status=DemoStatus.RECOVERING.value,
+                event=f"{context}_COUPON_CLEAR_WAIT",
+                message=(
+                    f"Старый coupon ещё не удалён. Остаёмся в текущем матче "
+                    f"и сохраняем шаг {step} ({amount:g} RUB)."
+                ),
+            )
+            if await self._stop_for_run_time_limit_if_idle(
+                f"{context}_COUPON_CLEAR_WAIT"
+            ):
+                return False
+            await self._sleep_or_stop(0.25)
+        return False
+
     async def _prepare_demo_virtual_until_ready(
         self,
         *,
@@ -3796,6 +3860,36 @@ class DemoEngine:
                     page,
                     decision,
                 )
+            except MarketNotAvailable as error:
+                await REPOSITORY.log(
+                    "DEMO_VIRTUAL_MARKET_STALE",
+                    (
+                        f"attempt={attempt_id}; step={step}; "
+                        f"team={selection.selected_team}; {error}; "
+                        "rereading same match without changing step or side"
+                    ),
+                )
+                if not await self._wait_until_coupon_cleared(
+                    page=page,
+                    attempt_id=attempt_id,
+                    step=step,
+                    amount=amount,
+                    context="DEMO_VIRTUAL_STALE",
+                ):
+                    return None
+                snapshot = await self._read_fresh_score(
+                    browser,
+                    selected_match,
+                    snapshot,
+                )
+                odds_result = await self._wait_for_odds(
+                    snapshot,
+                    selected_match,
+                )
+                if odds_result is None:
+                    return None
+                snapshot, current_odds = odds_result
+                continue
             except LivePreparationError as error:
                 await REPOSITORY.log(
                     "DEMO_VIRTUAL_COUPON_PREVIEW_FAILED",
@@ -3804,11 +3898,14 @@ class DemoEngine:
                         f"step={step}; team={selection.selected_team}; {error}"
                     ),
                 )
-                with suppress(Exception):
-                    await self.live_executor.clear_unaccepted_coupon(
-                        page,
-                        attempt_id,
-                    )
+                if not await self._wait_until_coupon_cleared(
+                    page=page,
+                    attempt_id=attempt_id,
+                    step=step,
+                    amount=amount,
+                    context="DEMO_VIRTUAL_ERROR",
+                ):
+                    return None
                 await self._sleep_or_stop(CONFIG.score_poll_interval)
                 snapshot = await self._read_fresh_score(
                     browser,
@@ -3824,20 +3921,15 @@ class DemoEngine:
                 snapshot, current_odds = odds_result
                 continue
 
-            cleanup_ok = await self.live_executor.clear_unaccepted_coupon(
-                page,
-                attempt_id,
+            cleanup_ok = await self._wait_until_coupon_cleared(
+                page=page,
+                attempt_id=attempt_id,
+                step=step,
+                amount=amount,
+                context="DEMO_VIRTUAL",
             )
             if not cleanup_ok:
-                await REPOSITORY.log(
-                    "DEMO_VIRTUAL_COUPON_CLEAR_FAILED",
-                    (
-                        f"attempt={attempt_id}; step={step}; "
-                        "new coupon click postponed"
-                    ),
-                )
-                await self._sleep_or_stop(0.15)
-                continue
+                return None
 
             fresh = await self._read_fresh_score(
                 browser,
@@ -3905,40 +3997,14 @@ class DemoEngine:
             publish_live,
         )
 
-        cleanup_ok = False
-        for cleanup_try in range(1, 5):
-            cleanup_ok = await self.live_executor.clear_unaccepted_coupon(
-                page,
-                decision.attempt_id,
-            )
-            if cleanup_ok:
-                break
-            await REPOSITORY.log(
-                "LIVE_UNACCEPTED_COUPON_CLEANUP_RETRY",
-                (
-                    f"attempt={decision.attempt_id}; retry={cleanup_try}; "
-                    f"step={step}; stake={amount:g}"
-                ),
-            )
-            await self._sleep_or_stop(0.15)
-
+        cleanup_ok = await self._wait_until_coupon_cleared(
+            page=page,
+            attempt_id=decision.attempt_id,
+            step=step,
+            amount=amount,
+            context="LIVE_UNACCEPTED",
+        )
         if not cleanup_ok:
-            await REPOSITORY.log(
-                "LIVE_UNACCEPTED_COUPON_CLEANUP_FAILED",
-                (
-                    f"attempt={decision.attempt_id}; step={step}; stake={amount:g}; "
-                    "same-step retry is postponed to avoid mixing old and new selections"
-                ),
-            )
-            await STATE.update(
-                mode="LIVE",
-                status=DemoStatus.RECOVERING.value,
-                event="LIVE_UNACCEPTED_COUPON_CLEANUP_FAILED",
-                message=(
-                    "Ставка не принята, но старый coupon пока не очищен. "
-                    "LIVE worker не остановлен; новый клик не выполняется."
-                ),
-            )
             return None
 
         # The technical attempt is confirmed unaccepted and may be removed from
@@ -4112,7 +4178,8 @@ class DemoEngine:
 
         A bookmaker lock is no longer a strategy state. ACCEPTED keeps the
         normal WIN/LOSE flow; NOT_ACCEPTED clears the coupon, rereads the
-        scoreboard and retries the same team, step and amount.
+        scoreboard and retries the same match, team, step and amount. Technical
+        placement failures never choose another match.
         """
         while not self._stop_event.is_set():
             if await self._stop_for_run_time_limit_if_idle(
@@ -4292,6 +4359,38 @@ class DemoEngine:
                         return None
                     selection, snapshot, current_odds = recovery
                     continue
+
+            except MarketNotAvailable as error:
+                await REPOSITORY.log(
+                    "LIVE_MARKET_STALE_BEFORE_CLICK",
+                    (
+                        f"attempt={attempt_id}; step={step}; "
+                        f"team={selection.selected_team}; {error}; "
+                        "same match/step/side will be retried"
+                    ),
+                )
+                await REPOSITORY.discard_unaccepted_bet(attempt_id)
+                if not await self._wait_until_coupon_cleared(
+                    page=page,
+                    attempt_id=attempt_id,
+                    step=step,
+                    amount=amount,
+                    context="LIVE_MARKET_STALE",
+                ):
+                    return None
+                snapshot = await self._read_fresh_score(
+                    browser,
+                    selected_match,
+                    placement_snapshot,
+                )
+                odds_result = await self._wait_for_odds(
+                    snapshot,
+                    selected_match,
+                )
+                if odds_result is None:
+                    return None
+                snapshot, current_odds = odds_result
+                continue
 
             except LivePreparationError as error:
                 await REPOSITORY.log(error.status, str(error))
