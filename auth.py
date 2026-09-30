@@ -22,9 +22,7 @@ AUTH_SELECTOR_CANDIDATES = tuple(
         selector
         for selector in (
             BALANCE_SELECTOR,
-            ".double-row-header-balance-info__currency",
-            ".double-row-header-balance__info",
-            ".balance__currency",
+            *SELECTORS.auth_marker_fallbacks,
         )
         if selector
     )
