@@ -80,6 +80,21 @@ const state = ref({
 
   market_reader: { source: null, status: 'WAITING', attempt: 0 },
 
+  coupon_recovery: {
+    phase: 'IDLE',
+    attempt_id: null,
+    step: null,
+    amount: null,
+    selected_team: null,
+    score_before: null,
+    score_after: null,
+    cleanup_cycle: 0,
+    same_match: true,
+    same_team: true,
+    same_step: true,
+    message: null,
+  },
+
   bet: { step: 0, max_steps: 7 },
 
   budget: { initial_budget: 4142, current_budget: 4142, session_profit: 0 },
@@ -571,6 +586,51 @@ const scanner = computed(() => state.value.scanner || {})
 
 const marketReader = computed(() => state.value.market_reader || {})
 
+const couponRecovery = computed(() => state.value.coupon_recovery || { phase: 'IDLE' })
+
+const couponRecoveryPhases = {
+  BLOCKED_COUPON: {
+    label: 'ЗАБЛОКИРОВАННЫЙ КУПОН',
+    icon: '🔒',
+    tone: 'blocked',
+    description: 'БК заблокировал выбранный исход. Шаг, сумма и команда сохранены.',
+  },
+  CLEARING_COUPON: {
+    label: 'УДАЛЯЕМ КУПОН',
+    icon: '🧹',
+    tone: 'clearing',
+    description: 'Новый коэффициент не кликаем, пока старый coupon не исчезнет.',
+  },
+  REFRESHING_SCORE: {
+    label: 'ПРОВЕРЯЕМ СЧЁТ',
+    icon: '↻',
+    tone: 'refreshing',
+    description: 'Coupon очищен. Бот перечитывает актуальный scoreboard.',
+  },
+  WAITING_NEW_MARKET: {
+    label: 'ЖДЁМ НОВЫЙ РЫНОК',
+    icon: '⌛',
+    tone: 'waiting',
+    description: 'Счёт обновлён. Ждём актуальный рынок следующего гола.',
+  },
+  RETRYING_SAME_STEP: {
+    label: 'ПОВТОРЯЕМ ТОТ ЖЕ ШАГ',
+    icon: '↺',
+    tone: 'retrying',
+    description: 'Повторяем в этом же матче на той же команде и с той же суммой.',
+  },
+}
+
+const couponRecoveryVisible = computed(() => {
+  const phase = String(couponRecovery.value.phase || 'IDLE').toUpperCase()
+  return Boolean(couponRecoveryPhases[phase])
+})
+
+const couponRecoveryView = computed(() => {
+  const phase = String(couponRecovery.value.phase || 'IDLE').toUpperCase()
+  return couponRecoveryPhases[phase] || null
+})
+
 const marketSource = computed(() => state.value.odds?.source || marketReader.value.source || null)
 
 const marketBackend = computed(() => state.value.odds?.backend || state.value.odds?.ocr_backend || null)
@@ -682,6 +742,20 @@ const reversedHistory = computed(() => [...history.value].reverse())
 
 const recentLogs = computed(() => logs.value.slice(-250))
 
+const bookmakerRecoveryEventPrefixes = [
+  'DEMO_VIRTUAL_BLOCKED_EVENT',
+  'DEMO_VIRTUAL_COUPON_CLEAR_',
+  'DEMO_VIRTUAL_STALE_COUPON_CLEAR_',
+  'DEMO_VIRTUAL_ERROR_COUPON_CLEAR_',
+  'DEMO_VIRTUAL_MARKET_STALE',
+  'DEMO_VIRTUAL_RETRY_SAME_SIDE',
+  'LIVE_UNACCEPTED_COUPON_CLEAR_',
+  'LIVE_MARKET_STALE_COUPON_CLEAR_',
+  'LIVE_MARKET_STALE_BEFORE_CLICK',
+  'LIVE_UNACCEPTED_KEEP_SIDE',
+  'LIVE_UNACCEPTED_STEP_PRESERVED',
+]
+
 const bookmakerLockEvents = new Set([
   'DEMO_PREBET_CANVAS_LOCK_CHECK',
   'DEMO_PREBET_CANVAS_LOCKED',
@@ -708,6 +782,7 @@ const bookmakerLockEvents = new Set([
 function isBookmakerLockLog(item) {
   const event = String(item?.event || '')
   return bookmakerLockEvents.has(event)
+    || bookmakerRecoveryEventPrefixes.some((prefix) => event.startsWith(prefix))
 }
 
 function isBookmakerUnlockLog(item) {
@@ -752,6 +827,13 @@ function bookmakerLogLabel(item) {
   if (event === 'DEMO_SCORE_CHANGED_BEFORE_ACCEPTANCE') return 'СЧЁТ ИЗМЕНИЛСЯ ДО ПРИНЯТИЯ'
   if (event === 'DEMO_BET_ACCEPTANCE_CONFIRMED') return 'ПРИНЯТИЕ ПОДТВЕРЖДЕНО'
   if (event === 'ACTIVE_BET_RESOLVED_DURING_LIVE_START') return 'ГОЛ УЖЕ ПРОИЗОШЁЛ ПРИ СТАРТЕ LIVE'
+  if (event === 'DEMO_VIRTUAL_BLOCKED_EVENT') return '🔒 ЗАБЛОКИРОВАННЫЙ КУПОН'
+  if (event.includes('COUPON_CLEAR_WAIT')) return '🧹 УДАЛЯЕМ КУПОН'
+  if (event.includes('COUPON_CLEAR_RECOVERED')) return '✓ КУПОН УДАЛЁН'
+  if (event === 'DEMO_VIRTUAL_MARKET_STALE' || event === 'LIVE_MARKET_STALE_BEFORE_CLICK') return '↻ ОБНОВЛЯЕМ РЫНОК'
+  if (event === 'DEMO_VIRTUAL_RETRY_SAME_SIDE') return '↺ ТОТ ЖЕ ШАГ / ТА ЖЕ КОМАНДА'
+  if (event === 'LIVE_UNACCEPTED_KEEP_SIDE') return '↺ ТА ЖЕ КОМАНДА'
+  if (event === 'LIVE_UNACCEPTED_STEP_PRESERVED') return '✓ ШАГ СОХРАНЁН'
   return event
 }
 
@@ -1606,6 +1688,52 @@ onBeforeUnmount(() => {
             </div>
 
             <div v-else class="panel-empty">Ожидаем коэффициенты рынка</div>
+
+            <div
+              v-if="couponRecoveryVisible && couponRecoveryView"
+              :class="['coupon-recovery-card', `coupon-recovery-${couponRecoveryView.tone}`]"
+            >
+              <div class="coupon-recovery-head">
+                <span class="coupon-recovery-icon">{{ couponRecoveryView.icon }}</span>
+                <div>
+                  <span class="coupon-recovery-eyebrow">RECOVERY ТЕКУЩЕГО ШАГА</span>
+                  <strong>{{ couponRecoveryView.label }}</strong>
+                </div>
+              </div>
+
+              <p>{{ couponRecovery.message || couponRecoveryView.description }}</p>
+
+              <div class="coupon-recovery-grid">
+                <div>
+                  <span>ШАГ</span>
+                  <strong>{{ show(couponRecovery.step, bet.step) }}</strong>
+                </div>
+                <div>
+                  <span>КОМАНДА</span>
+                  <strong>{{ show(couponRecovery.selected_team, state.selected_team) }}</strong>
+                </div>
+                <div>
+                  <span>СУММА</span>
+                  <strong>{{ show(couponRecovery.amount, bet.amount) }} ₽</strong>
+                </div>
+                <div>
+                  <span>СЧЁТ</span>
+                  <strong>
+                    {{ show(couponRecovery.score_before, bet.score_before) }}
+                    <template v-if="couponRecovery.score_after && couponRecovery.score_after !== couponRecovery.score_before">
+                      → {{ couponRecovery.score_after }}
+                    </template>
+                  </strong>
+                </div>
+              </div>
+
+              <div class="coupon-recovery-invariants">
+                <span>✓ тот же матч</span>
+                <span>✓ та же команда</span>
+                <span>✓ тот же шаг</span>
+                <span v-if="couponRecovery.cleanup_cycle">цикл очистки: {{ couponRecovery.cleanup_cycle }}</span>
+              </div>
+            </div>
 
             <div class="ocr-meta">
 
