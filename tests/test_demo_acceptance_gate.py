@@ -170,7 +170,7 @@ class DemoAcceptanceGateTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("backend.app.demo.engine.REPOSITORY.log", AsyncMock()) as log,
-            patch("backend.app.demo.engine.STATE.update", AsyncMock()),
+            patch("backend.app.demo.engine.STATE.update", AsyncMock()) as state_update,
         ):
             result = await self.engine._prepare_demo_virtual_until_ready(
                 page=object(),
@@ -196,6 +196,18 @@ class DemoAcceptanceGateTests(unittest.IsolatedAsyncioTestCase):
         events = [call.args[0] for call in log.await_args_list]
         self.assertIn("DEMO_VIRTUAL_COUPON_CLEAR_WAIT", events)
         self.assertIn("DEMO_VIRTUAL_COUPON_CLEAR_RECOVERED", events)
+
+        phases = [
+            call.kwargs["coupon_recovery"]["phase"]
+            for call in state_update.await_args_list
+            if call.kwargs.get("coupon_recovery")
+        ]
+        self.assertIn("BLOCKED_COUPON", phases)
+        self.assertIn("CLEARING_COUPON", phases)
+        self.assertIn("REFRESHING_SCORE", phases)
+        self.assertIn("WAITING_NEW_MARKET", phases)
+        self.assertIn("RETRYING_SAME_STEP", phases)
+        self.assertEqual(phases[-1], "IDLE")
 
     async def test_requires_three_unlocked_confirmations_before_acceptance(self):
         baseline = snapshot(3, 0)
