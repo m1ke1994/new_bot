@@ -3957,10 +3957,22 @@ class DemoEngine:
                     market_locked=False,
                 ):
                     return None
+                stale_before = snapshot.score
                 snapshot = await self._read_fresh_score(
                     browser,
                     selected_match,
                     snapshot,
+                )
+                await self._set_coupon_recovery_state(
+                    phase="WAITING_NEW_MARKET",
+                    attempt_id=attempt_id,
+                    step=step,
+                    amount=amount,
+                    selected_team=selection.selected_team,
+                    score_before=stale_before,
+                    score_after=snapshot.score,
+                    message="Коэффициент устарел. Проверили счёт и ждём актуальный рынок.",
+                    market_locked=False,
                 )
                 odds_result = await self._wait_for_odds(
                     snapshot,
@@ -3969,6 +3981,17 @@ class DemoEngine:
                 if odds_result is None:
                     return None
                 snapshot, current_odds = odds_result
+                await self._set_coupon_recovery_state(
+                    phase="RETRYING_SAME_STEP",
+                    attempt_id=attempt_id,
+                    step=step,
+                    amount=amount,
+                    selected_team=selection.selected_team,
+                    score_before=stale_before,
+                    score_after=snapshot.score,
+                    message="Актуальный рынок готов. Повторяем тот же шаг на той же команде.",
+                    market_locked=False,
+                )
                 continue
             except LivePreparationError as error:
                 await REPOSITORY.log(
@@ -3989,10 +4012,22 @@ class DemoEngine:
                 ):
                     return None
                 await self._sleep_or_stop(CONFIG.score_poll_interval)
+                error_before = snapshot.score
                 snapshot = await self._read_fresh_score(
                     browser,
                     selected_match,
                     snapshot,
+                )
+                await self._set_coupon_recovery_state(
+                    phase="WAITING_NEW_MARKET",
+                    attempt_id=attempt_id,
+                    step=step,
+                    amount=amount,
+                    selected_team=selection.selected_team,
+                    score_before=error_before,
+                    score_after=snapshot.score,
+                    message="Coupon очищен после ошибки. Проверили счёт и перечитываем рынок.",
+                    market_locked=False,
                 )
                 odds_result = await self._wait_for_odds(
                     snapshot,
@@ -4001,6 +4036,17 @@ class DemoEngine:
                 if odds_result is None:
                     return None
                 snapshot, current_odds = odds_result
+                await self._set_coupon_recovery_state(
+                    phase="RETRYING_SAME_STEP",
+                    attempt_id=attempt_id,
+                    step=step,
+                    amount=amount,
+                    selected_team=selection.selected_team,
+                    score_before=error_before,
+                    score_after=snapshot.score,
+                    message="Рынок снова готов. Повторяем тот же шаг на той же команде.",
+                    market_locked=False,
+                )
                 continue
 
             if signal == "BLOCKED":
@@ -4570,6 +4616,17 @@ class DemoEngine:
                     selected_match,
                     placement_snapshot,
                 )
+                await self._set_coupon_recovery_state(
+                    phase="WAITING_NEW_MARKET",
+                    attempt_id=attempt_id,
+                    step=step,
+                    amount=amount,
+                    selected_team=selection.selected_team,
+                    score_before=placement_snapshot.score,
+                    score_after=snapshot.score,
+                    message="Счёт обновлён. Ждём актуальный рынок после изменения коэффициента.",
+                    market_locked=False,
+                )
                 odds_result = await self._wait_for_odds(
                     snapshot,
                     selected_match,
@@ -4577,6 +4634,17 @@ class DemoEngine:
                 if odds_result is None:
                     return None
                 snapshot, current_odds = odds_result
+                await self._set_coupon_recovery_state(
+                    phase="RETRYING_SAME_STEP",
+                    attempt_id=attempt_id,
+                    step=step,
+                    amount=amount,
+                    selected_team=selection.selected_team,
+                    score_before=placement_snapshot.score,
+                    score_after=snapshot.score,
+                    message="Новый коэффициент готов. Повторяем тот же LIVE-шаг.",
+                    market_locked=False,
+                )
                 continue
 
             except LivePreparationError as error:
