@@ -170,6 +170,7 @@ class UrlConfig:
 @dataclass(frozen=True)
 class SelectorConfig:
     auth_marker: str
+    auth_marker_fallbacks: tuple[str, ...]
     page_body: str
     game_card: str
     match_link: str
@@ -185,17 +186,30 @@ class SelectorConfig:
     goals_filter: str
     goals_filter_ancestor_xpath: str
     market_search: str
+    market_search_exact: str
+    market_search_button: str
+    market_search_scoped_inputs: tuple[str, ...]
+    market_search_fallback_inputs: tuple[str, ...]
+    market_search_ancestor_xpath: str
+    market_search_button_fallbacks: tuple[str, ...]
     market_group: str
     market_group_title: str
     market_button: str
     market_locked_class: str
     canvas: str
+    match_content_market_surfaces: tuple[str, ...]
     scoreboard_root: str
+    scoreboard_root_fallbacks: tuple[str, ...]
     scoreboard_team: str
+    scoreboard_team_name: str
+    scoreboard_team_fallbacks: tuple[str, ...]
     scoreboard_team_1_score: str
+    scoreboard_team_1_score_fallbacks: tuple[str, ...]
     scoreboard_team_2_score: str
+    scoreboard_team_2_score_fallbacks: tuple[str, ...]
     scoreboard_timer: str
     scoreboard_timer_status: str
+    scoreboard_timer_fallbacks: tuple[str, ...]
     subgame_list: str
     subgame_item: str
     subgame_caption: str
@@ -205,12 +219,29 @@ class SelectorConfig:
     game_over_panel: str
     game_over_title: str
     betslip: str
+    coupon_bet: str
+    empty_coupon: str
+    coupon_first_team: str
+    coupon_second_team: str
+    coupon_market: str
+    coupon_remove: str
     bet_account: str
     bet_amount_input: str
+    bet_amount_inputs: tuple[str, ...]
     bet_submit_button: str
+    bet_submit_buttons: tuple[str, ...]
+    bet_submit_fallback_buttons: tuple[str, ...]
+    bet_balance: str
     locked_bet: str
+    locked_bets: tuple[str, ...]
     locked_bet_text: str
+    locked_bet_texts: tuple[str, ...]
     remove_bet_buttons: tuple[str, ...]
+    success_modal: str
+    success_modal_title: str
+    success_modal_info: str
+    success_modal_continue: str
+    success_modal_close_buttons: tuple[str, ...]
 
     @classmethod
     def from_env(
@@ -229,6 +260,7 @@ class SelectorConfig:
 
         config = cls(
             auth_marker=one("SELECTOR_AUTH_MARKER"),
+            auth_marker_fallbacks=many("SELECTOR_AUTH_MARKER_FALLBACKS"),
             page_body=one("SELECTOR_PAGE_BODY"),
             game_card=one("SELECTOR_GAME_CARD"),
             match_link=one("SELECTOR_MATCH_LINK"),
@@ -244,17 +276,30 @@ class SelectorConfig:
             goals_filter=one("SELECTOR_GOALS_FILTER"),
             goals_filter_ancestor_xpath=one("SELECTOR_GOALS_FILTER_ANCESTOR_XPATH"),
             market_search=one("SELECTOR_MARKET_SEARCH"),
+            market_search_exact=one("SELECTOR_MARKET_SEARCH_EXACT"),
+            market_search_button=one("SELECTOR_MARKET_SEARCH_BUTTON"),
+            market_search_scoped_inputs=many("SELECTOR_MARKET_SEARCH_SCOPED_INPUTS"),
+            market_search_fallback_inputs=many("SELECTOR_MARKET_SEARCH_FALLBACK_INPUTS"),
+            market_search_ancestor_xpath=one("SELECTOR_MARKET_SEARCH_ANCESTOR_XPATH"),
+            market_search_button_fallbacks=many("SELECTOR_MARKET_SEARCH_BUTTON_FALLBACKS"),
             market_group=one("SELECTOR_MARKET_GROUP"),
             market_group_title=one("SELECTOR_MARKET_GROUP_TITLE"),
             market_button=one("SELECTOR_MARKET_BUTTON"),
             market_locked_class=one("CLASS_MARKET_LOCKED"),
             canvas=one("SELECTOR_MARKET_CANVAS"),
+            match_content_market_surfaces=many("SELECTOR_MATCH_CONTENT_MARKET_SURFACES"),
             scoreboard_root=one("SELECTOR_SCOREBOARD"),
+            scoreboard_root_fallbacks=many("SELECTOR_SCOREBOARD_FALLBACKS"),
             scoreboard_team=one("SELECTOR_SCOREBOARD_TEAM"),
+            scoreboard_team_name=one("SELECTOR_SCOREBOARD_TEAM_NAME"),
+            scoreboard_team_fallbacks=many("SELECTOR_SCOREBOARD_TEAM_FALLBACKS"),
             scoreboard_team_1_score=one("SELECTOR_SCOREBOARD_TEAM_1_SCORE"),
+            scoreboard_team_1_score_fallbacks=many("SELECTOR_SCOREBOARD_TEAM_1_SCORE_FALLBACKS"),
             scoreboard_team_2_score=one("SELECTOR_SCOREBOARD_TEAM_2_SCORE"),
+            scoreboard_team_2_score_fallbacks=many("SELECTOR_SCOREBOARD_TEAM_2_SCORE_FALLBACKS"),
             scoreboard_timer=one("SELECTOR_TIMER"),
             scoreboard_timer_status=one("SELECTOR_SCOREBOARD_TIMER_STATUS"),
+            scoreboard_timer_fallbacks=many("SELECTOR_SCOREBOARD_TIMER_FALLBACKS"),
             subgame_list=one("SELECTOR_SUBGAME_LIST"),
             subgame_item=one("SELECTOR_SUBGAME_ITEM"),
             subgame_caption=one("SELECTOR_SUBGAME_CAPTION"),
@@ -264,12 +309,29 @@ class SelectorConfig:
             game_over_panel=one("SELECTOR_GAME_OVER_PANEL"),
             game_over_title=one("SELECTOR_GAME_OVER_TITLE"),
             betslip=one("SELECTOR_BETSLIP"),
+            coupon_bet=one("SELECTOR_COUPON_BET"),
+            empty_coupon=one("SELECTOR_EMPTY_COUPON"),
+            coupon_first_team=one("SELECTOR_COUPON_FIRST_TEAM"),
+            coupon_second_team=one("SELECTOR_COUPON_SECOND_TEAM"),
+            coupon_market=one("SELECTOR_COUPON_MARKET"),
+            coupon_remove=one("SELECTOR_COUPON_REMOVE"),
             bet_account=one("SELECTOR_BET_ACCOUNT"),
             bet_amount_input=one("SELECTOR_BET_AMOUNT_INPUT"),
+            bet_amount_inputs=many("SELECTOR_BET_AMOUNT_INPUTS"),
             bet_submit_button=one("SELECTOR_BET_SUBMIT_BUTTON"),
+            bet_submit_buttons=many("SELECTOR_BET_SUBMIT_BUTTONS"),
+            bet_submit_fallback_buttons=many("SELECTOR_BET_SUBMIT_FALLBACK_BUTTONS"),
+            bet_balance=one("SELECTOR_BET_BALANCE"),
             locked_bet=one("SELECTOR_LOCKED_BET"),
+            locked_bets=many("SELECTOR_LOCKED_BETS"),
             locked_bet_text=one("SELECTOR_LOCKED_BET_TEXT"),
+            locked_bet_texts=many("SELECTOR_LOCKED_BET_TEXTS"),
             remove_bet_buttons=many("SELECTOR_REMOVE_BET_BUTTON"),
+            success_modal=one("SELECTOR_SUCCESS_MODAL"),
+            success_modal_title=one("SELECTOR_SUCCESS_MODAL_TITLE"),
+            success_modal_info=one("SELECTOR_SUCCESS_MODAL_INFO"),
+            success_modal_continue=one("SELECTOR_SUCCESS_MODAL_CONTINUE"),
+            success_modal_close_buttons=many("SELECTOR_SUCCESS_MODAL_CLOSE_BUTTONS"),
         )
         config.require(*required)
         return config
@@ -299,6 +361,7 @@ class TextConfig:
     game_over: str
     bet_confirm: str
     locked_event: str
+    bet_success_title: str
     market_response_keywords: tuple[str, ...]
 
     @classmethod
@@ -319,6 +382,7 @@ class TextConfig:
             game_over=required("TEXT_GAME_OVER"),
             bet_confirm=required("TEXT_BET_CONFIRM"),
             locked_event=required("TEXT_LOCKED_EVENT"),
+            bet_success_title=required("TEXT_BET_SUCCESS_TITLE"),
             market_response_keywords=split_config_list(
                 required("TEXT_MARKET_RESPONSE_KEYWORDS")
             ),
