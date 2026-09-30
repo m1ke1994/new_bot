@@ -62,6 +62,9 @@ class DemoRepository:
                 CREATE TABLE IF NOT EXISTS bet_history (id TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at TEXT NOT NULL, settled_at TEXT);
                 CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL, timestamp TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS cycles (id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL, timestamp TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS long_series_runtime (
+                    mode TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
             """)
             sequence_columns = {
                 str(row["name"])
@@ -127,6 +130,39 @@ class DemoRepository:
             with self._connection() as db:
                 db.execute("UPDATE budget_state SET initial_budget=?, current_budget=?, total_pnl=?, updated_at=? WHERE id=1", (str(snapshot["initial_budget"]), str(snapshot["current_budget"]), str(snapshot["session_profit"]), now))
         return await self.get_budget()
+
+    async def get_long_series_runtime(self, mode: str) -> dict[str, Any] | None:
+        await self.initialize()
+        expected_mode = mode.strip().upper()
+        async with self._lock:
+            with self._connection() as db:
+                row = db.execute(
+                    "SELECT payload FROM long_series_runtime WHERE mode=?",
+                    (expected_mode,),
+                ).fetchone()
+        return json.loads(row["payload"]) if row is not None else None
+
+    async def save_long_series_runtime(
+        self, mode: str, payload: dict[str, Any]
+    ) -> None:
+        await self.initialize()
+        expected_mode = mode.strip().upper()
+        async with self._lock:
+            with self._connection() as db:
+                db.execute(
+                    """
+                    INSERT INTO long_series_runtime(mode, payload, updated_at)
+                    VALUES(?, ?, ?)
+                    ON CONFLICT(mode) DO UPDATE SET
+                        payload=excluded.payload,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        expected_mode,
+                        json.dumps(payload, ensure_ascii=False),
+                        local_now(),
+                    ),
+                )
 
     async def get_sequence(self) -> dict[str, Any]:
         await self.initialize()
@@ -366,6 +402,7 @@ class DemoRepository:
                 db.execute("DELETE FROM budget_state")
                 db.execute("DELETE FROM sequence_state")
                 db.execute("DELETE FROM sequence_blocked_matches")
+                db.execute("DELETE FROM long_series_runtime")
                 db.execute(
                     "INSERT INTO strategy_config VALUES (1, ?, ?, ?)",
                     (json.dumps(DEFAULT_STRATEGY_CONFIG.to_dict()), now, now),

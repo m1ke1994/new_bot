@@ -20,6 +20,17 @@ class FrontendControlTests(unittest.TestCase):
         self.assertIn("DEMO и LIVE", self.source)
         self.assertIn("NOT_PLACED шаг не расходуют", self.source)
 
+    def test_long_series_checkbox_and_runtime_status_exist(self):
+        self.assertIn("long_series_enabled", self.source)
+        self.assertIn("LONG_SERIES", self.source)
+        self.assertIn("state.long_series?.state", self.source)
+        self.assertIn("Следующий матч", self.source)
+        self.assertIn("Наблюдение", self.source)
+        self.assertIn("active_observation", self.source)
+        self.assertIn("observations", self.source)
+        self.assertIn("Нет активной ставки · LONG_SERIES наблюдает матчи", self.source)
+        self.assertIn("Последние наблюдения", self.source)
+
     def test_runtime_limit_controls_offer_only_supported_durations(self):
         self.assertIn("run_time_limit_enabled", self.source)
         self.assertIn("run_duration_hours", self.source)

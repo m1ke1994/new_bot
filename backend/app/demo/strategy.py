@@ -38,6 +38,7 @@ class StrategyConfig:
     min_initial_odds_enabled: bool
     blocked_events_switch_enabled: bool
     max_three_steps_enabled: bool
+    long_series_enabled: bool
     run_time_limit_enabled: bool
     run_duration_hours: int
     strategy_type: StrategyType
@@ -61,6 +62,9 @@ class StrategyConfig:
         max_three_steps_enabled = _boolean_setting(
             payload, "max_three_steps_enabled", default=False
         )
+        long_series_enabled = _boolean_setting(
+            payload, "long_series_enabled", default=False
+        )
         run_time_limit_enabled = _boolean_setting(
             payload, "run_time_limit_enabled", default=False
         )
@@ -82,6 +86,7 @@ class StrategyConfig:
             min_initial_odds_enabled,
             blocked_events_switch_enabled,
             max_three_steps_enabled,
+            long_series_enabled,
             run_time_limit_enabled,
             run_duration_hours,
             strategy_type,
@@ -112,6 +117,7 @@ class StrategyConfig:
             "min_initial_odds_enabled": self.min_initial_odds_enabled,
             "blocked_events_switch_enabled": self.blocked_events_switch_enabled,
             "max_three_steps_enabled": self.max_three_steps_enabled,
+            "long_series_enabled": self.long_series_enabled,
             "run_time_limit_enabled": self.run_time_limit_enabled,
             "run_duration_hours": self.run_duration_hours,
             "strategy_type": self.strategy_type.value,

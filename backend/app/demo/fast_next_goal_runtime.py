@@ -174,6 +174,7 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
         blocked_attempt_score=None,
         blocked_selected_side=None,
         demo_blocked_window=None,
+        read_only=None,
     ):
         if self._mode != "DEMO":
             return await original_wait_for_odds(
@@ -183,6 +184,7 @@ def install_fast_next_goal_runtime(engine_module: Any) -> None:
                 blocked_attempt_score=blocked_attempt_score,
                 blocked_selected_side=blocked_selected_side,
                 demo_blocked_window=demo_blocked_window,
+                read_only=read_only,
             )
 
         attempt = 0

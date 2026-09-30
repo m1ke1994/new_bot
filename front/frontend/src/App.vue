@@ -113,6 +113,18 @@ const state = ref({
     stopped_by_limit: false,
   },
 
+  long_series: {
+    enabled: false,
+    state: 'OFF',
+    last_observed_series_length: null,
+    last_observed_series_match: null,
+    last_observed_is_long: null,
+    next_match: 'ALLOWED',
+    shadow_series_step: 0,
+    active_observation: null,
+    observations: [],
+  },
+
   updated_at: null,
 
 })
@@ -142,6 +154,8 @@ const strategyConfig = ref({
   blocked_events_switch_enabled: false,
 
   max_three_steps_enabled: false,
+
+  long_series_enabled: false,
 
   run_time_limit_enabled: false,
 
@@ -572,6 +586,17 @@ function formatNumber(value, digits = 2) {
 const match = computed(() => state.value.match || {})
 
 const bet = computed(() => state.value.bet || {})
+
+const longSeries = computed(() => state.value.long_series || {})
+
+const activeObservation = computed(() => longSeries.value.active_observation || null)
+
+const observationHistory = computed(() => [...(longSeries.value.observations || [])].slice(-10).reverse())
+
+const longSeriesWaiting = computed(() => (
+  Boolean(longSeries.value.enabled)
+  && longSeries.value.state === 'WAITING_FOR_LONG'
+))
 
 const stats = computed(() => ({ ...emptyStats, ...(state.value.stats || {}) }))
 
@@ -1251,6 +1276,23 @@ onBeforeUnmount(() => {
 
             </label>
 
+            <label v-if="strategyConfig.strategy_type === 'NEXT_GOAL'" :class="['match-filter-option', { 'filter-disabled': !strategyConfig.long_series_enabled }]">
+
+              <input v-model="strategyConfig.long_series_enabled" type="checkbox" :disabled="state.running || actionPending" @change="saveMatchFilters">
+
+              <span class="filter-copy"><strong>LONG_SERIES</strong><small>Вход только в первый новый матч после длинной серии 4+</small></span>
+
+              <span class="filter-state">{{ strategyConfig.long_series_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
+
+            </label>
+
+          </div>
+
+          <div v-if="strategyConfig.strategy_type === 'NEXT_GOAL'" class="long-series-status">
+            <div><span>LONG_SERIES</span><strong>{{ state.long_series?.state || 'OFF' }}</strong></div>
+            <div><span>Последняя серия</span><strong>{{ state.long_series?.last_observed_series_match || '—' }}</strong><small v-if="state.long_series?.last_observed_series_length">{{ state.long_series.last_observed_series_length }} шагов · {{ state.long_series.last_observed_is_long ? 'LONG' : 'SHORT' }}</small></div>
+            <div><span>Текущий shadow-шаг</span><strong>{{ state.long_series?.shadow_series_step || '—' }}</strong></div>
+            <div><span>Следующий матч</span><strong>{{ state.long_series?.next_match || (strategyConfig.long_series_enabled ? 'SKIP' : 'ALLOWED') }}</strong></div>
           </div>
 
         </div>
@@ -1398,6 +1440,74 @@ onBeforeUnmount(() => {
 
         </section>
 
+        <section class="full-width-section observation-section">
+
+          <article class="panel observation-panel">
+
+            <header class="panel-header compact">
+
+              <div><span class="eyebrow amber">LONG SERIES SHADOW</span><h2>Наблюдение</h2></div>
+
+              <span :class="['observation-state', String(longSeries.state || 'OFF').toLowerCase()]">LONG_SERIES: {{ longSeries.state || 'OFF' }}</span>
+
+            </header>
+
+            <div v-if="!longSeries.enabled" class="panel-empty">LONG_SERIES выключен</div>
+
+            <template v-else>
+
+              <div v-if="activeObservation" class="active-observation">
+
+                <div class="observation-summary">
+                  <div><span>МАТЧ</span><strong>{{ show(activeObservation.match_name) }}</strong></div>
+                  <div><span>ВЫБРАНА</span><strong>{{ show(activeObservation.selected_team) }}</strong><small>{{ show(activeObservation.side_label) }}</small></div>
+                  <div><span>СТАРТОВЫЙ КФ</span><strong>{{ show(activeObservation.initial_odds) }}</strong></div>
+                  <div><span>ТЕКУЩИЙ КФ</span><strong>{{ show(activeObservation.current_odds) }}</strong></div>
+                  <div><span>SHADOW STEP</span><strong>{{ activeObservation.shadow_step || 0 }}</strong></div>
+                  <div><span>СЧЁТ</span><strong>{{ show(activeObservation.score_before) }} → {{ show(activeObservation.score_after) }}</strong></div>
+                  <div><span>РЕЗУЛЬТАТ ШАГА</span><strong>{{ show(activeObservation.step_result, 'WAITING') }}</strong></div>
+                  <div><span>СТАТУС</span><strong>{{ show(activeObservation.classification, 'OBSERVING') }}</strong></div>
+                </div>
+
+                <div class="table-wrap observation-steps">
+                  <table>
+                    <thead><tr><th>Шаг</th><th>Кф</th><th>Счёт до</th><th>Счёт после</th><th>Автор гола</th><th>Результат</th></tr></thead>
+                    <tbody>
+                      <tr v-for="stepItem in activeObservation.steps || []" :key="stepItem.step">
+                        <td>{{ stepItem.step }}</td><td>{{ show(stepItem.odds) }}</td><td>{{ show(stepItem.score_before) }}</td><td>{{ show(stepItem.score_after) }}</td><td>{{ show(stepItem.scorer) }}</td><td><span :class="['table-result', String(stepItem.result).toLowerCase()]">{{ stepItem.result }}</span></td>
+                      </tr>
+                      <tr v-if="!(activeObservation.steps || []).length"><td colspan="6" class="empty-row">Шаг {{ activeObservation.shadow_step || 1 }} · ожидаем гол</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+
+              </div>
+
+              <div v-else class="panel-empty">
+                {{ longSeries.state === 'NEXT_MATCH_ALLOWED' ? 'LONG обнаружен — следующий матч разрешён' : (longSeries.state === 'LIVE_MATCH_ACTIVE' ? 'Разрешённый betting match активен' : 'Нет активного наблюдения — ожидаем следующий матч') }}
+              </div>
+
+              <div class="observation-history">
+                <h3>Последние наблюдения</h3>
+                <div class="table-wrap">
+                  <table>
+                    <thead><tr><th>Матч</th><th>Команда</th><th>Сторона</th><th>Начальный кф</th><th>Длина</th><th>Результат</th></tr></thead>
+                    <tbody>
+                      <tr v-for="item in observationHistory" :key="`${item.match_id}-${item.completed_at}`" :class="{ 'observation-long': item.classification === 'LONG' }">
+                        <td>{{ item.match_name }}</td><td>{{ item.selected_team }}</td><td>{{ item.side_label }}</td><td>{{ show(item.initial_odds) }}</td><td>{{ item.series_length }}</td><td><span :class="['table-result', String(item.classification).toLowerCase()]">{{ item.classification }}</span></td>
+                      </tr>
+                      <tr v-if="!observationHistory.length"><td colspan="6" class="empty-row">Завершённых наблюдений пока нет</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+            </template>
+
+          </article>
+
+        </section>
+
         <section class="secondary-grid">
 
           <article class="panel bet-panel">
@@ -1416,7 +1526,9 @@ onBeforeUnmount(() => {
 
             </header>
 
-            <div class="bet-grid">
+            <div v-if="longSeriesWaiting" class="panel-empty">Нет активной ставки · LONG_SERIES наблюдает матчи</div>
+
+            <div v-else class="bet-grid">
 
               <div><span>СУММА</span><strong>{{ show(bet.amount) }} <small>RUB</small></strong></div>
 

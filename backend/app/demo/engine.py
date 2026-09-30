@@ -52,6 +52,7 @@ from backend.app.match_filters import (
     excluded_team_in_match,
     is_initial_odds_allowed,
 )
+from backend.app.long_series import LongSeriesDecision, LongSeriesGate
 
 from .budget import DemoBudget
 from .config import CONFIG
@@ -266,6 +267,34 @@ class DemoEngine:
         self._run_limit_waiting_logged = False
         self._run_limit_stopped = False
         self._accepted_bet_in_progress = False
+        self._long_series = LongSeriesGate(REPOSITORY.save_long_series_runtime)
+
+    async def _load_long_series(self, mode: str) -> dict[str, Any]:
+        persisted = await REPOSITORY.get_long_series_runtime(mode)
+        runtime = await self._long_series.load(
+            enabled=self._config.long_series_enabled,
+            mode=mode,
+            persisted=persisted,
+        )
+        await STATE.update(long_series=runtime)
+        return runtime
+
+    async def _complete_long_series_allowed_match(
+        self, match_id: str, *, reason: str = "allowed_match_finished"
+    ) -> None:
+        runtime = await self._long_series.snapshot()
+        if (
+            not self._config.long_series_enabled
+            or runtime.get("state") != "LIVE_MATCH_ACTIVE"
+            or str(runtime.get("active_match_id") or "") != str(match_id)
+        ):
+            return
+        runtime = await self._long_series.finish_allowed_match(match_id)
+        await REPOSITORY.log(
+            "LONG_SERIES_RESET_TO_WAITING",
+            f"reason={reason}",
+        )
+        await STATE.update(long_series=runtime)
 
     def _configure_run_time_limit(self) -> None:
         self._run_limit_reached_logged = False
@@ -399,6 +428,7 @@ class DemoEngine:
                 "RECOVERY_REQUIRED had no ACTIVE DEMO bet; DEMO runtime was reset",
             )
         await STATE.restore(budget=budget, strategy_config=config_data, sequence=sequence, stats=await REPOSITORY.stats())
+        await self._load_long_series(self._mode)
         if active is not None:
             await STATE.update(
                 mode=str(active.get("mode") or "DEMO").upper(),
@@ -410,12 +440,18 @@ class DemoEngine:
     async def save_strategy_config(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self._task is not None and not self._task.done():
             raise ValueError("Stop the strategy before changing its settings")
+        long_series_was_enabled = self._config.long_series_enabled
         saved = await REPOSITORY.save_config(payload)
         self._config = StrategyConfig.from_payload(saved)
         sequence = await REPOSITORY.get_sequence()
-        if int(sequence["current_step"]) > self._config.max_steps:
+        if self._config.long_series_enabled and not long_series_was_enabled:
+            # LONG_SERIES always starts by observing a fresh match and its first
+            # real permission must begin at step 1 inside that one match.
+            sequence = await REPOSITORY.reset_sequence()
+        elif int(sequence["current_step"]) > self._config.max_steps:
             sequence = await REPOSITORY.reset_sequence()
         await STATE.restore(budget=await REPOSITORY.get_budget(), strategy_config=saved, sequence=sequence, stats=await REPOSITORY.stats())
+        await self._load_long_series(self._mode)
         return saved
 
     async def reset_sequence(self) -> dict[str, Any]:
@@ -528,6 +564,7 @@ class DemoEngine:
             self._auth_status = "UNKNOWN"
             self._mode = requested_mode
             self._current_series = None
+            await self._load_long_series(requested_mode)
             self._configure_run_time_limit()
             if requested_mode == "LIVE":
                 self.live_executor.reset()
@@ -539,7 +576,12 @@ class DemoEngine:
                 f"min_initial_odds_enabled={str(self._config.min_initial_odds_enabled).lower()} "
                 f"blocked_events_switch_enabled={str(self._config.blocked_events_switch_enabled).lower()} "
                 f"max_three_steps_enabled={str(self._config.max_three_steps_enabled).lower()} "
+                f"long_series_enabled={str(self._config.long_series_enabled).lower()} "
                 f"min_initial_odds={MIN_INITIAL_SELECTED_ODDS}",
+            )
+            await REPOSITORY.log(
+                "LONG_SERIES_FILTER_CONFIG",
+                f"enabled={str(self._config.long_series_enabled).lower()}",
             )
             await REPOSITORY.log(
                 "STRATEGY_STARTED",
@@ -566,6 +608,7 @@ class DemoEngine:
                 strategy_config=(await REPOSITORY.get_config()),
                 sequence=(await REPOSITORY.get_sequence()),
                 run_time=self._run_time_state(),
+                long_series=await self._long_series.snapshot(),
             )
             try:
                 await REPOSITORY.log("BROWSER_STARTING", "Проверяем Playwright/browser/context/page")
@@ -807,6 +850,15 @@ class DemoEngine:
         await self._process_next_goal_match(page)
 
     async def _process_next_goal_match(self, page: Page) -> None:
+        long_runtime = await self._long_series.snapshot()
+        if (
+            self._config.long_series_enabled
+            and long_runtime.get("state") == "LIVE_MATCH_ACTIVE"
+            and long_runtime.get("active_match_id")
+        ):
+            finished_match = str(long_runtime["active_match_id"])
+            await self._complete_long_series_allowed_match(finished_match)
+            self._current_series = None
         page = await self.browser_manager.ensure_page()
         league = LeagueBrowser(
             page,
@@ -850,6 +902,7 @@ class DemoEngine:
         )
 
         selected_match = None
+        long_series_decision = LongSeriesDecision.BYPASS
         while selected_match is None and not self._stop_event.is_set():
             page = await self.browser_manager.ensure_page()
             league = LeagueBrowser(
@@ -954,11 +1007,33 @@ class DemoEngine:
                     "MATCH_CANDIDATE",
                     f"{item['team1']} — {item['team2']} / time={item['time']}",
                 )
-            await STATE.update(
-                scanner={**stats, "selected": matches[0] if matches else None}
-            )
+            selected_candidate = None
             if matches:
-                selected_match = matches[0]
+                if self._config.long_series_enabled:
+                    for candidate in matches:
+                        candidate_name = (
+                            f"{candidate['team1']} — {candidate['team2']}"
+                        )
+                        decision = await self._long_series.claim_match(
+                            next_goal_match_identity(candidate), candidate_name
+                        )
+                        if decision == LongSeriesDecision.DUPLICATE:
+                            await REPOSITORY.log(
+                                "LONG_SERIES_DUPLICATE_MATCH_IGNORED",
+                                f"match={candidate_name}; match_id={next_goal_match_identity(candidate)}",
+                            )
+                            continue
+                        selected_candidate = candidate
+                        long_series_decision = decision
+                        break
+                else:
+                    selected_candidate = matches[0]
+            await STATE.update(
+                scanner={**stats, "selected": selected_candidate},
+                long_series=await self._long_series.snapshot(),
+            )
+            if selected_candidate is not None:
+                selected_match = selected_candidate
                 break
             if blocked_match_ids:
                 await self._status(
@@ -984,6 +1059,28 @@ class DemoEngine:
             int(sequence.get("max_three_switched") or 0)
         )
         match_name = f"{selected_match['team1']} — {selected_match['team2']}"
+        if long_series_decision == LongSeriesDecision.SHADOW:
+            await REPOSITORY.log(
+                "LONG_SERIES_MATCH_SKIPPED",
+                f"match={match_name}; reason=WAITING_FOR_LONG",
+            )
+            await REPOSITORY.log(
+                "LONG_SERIES_WAITING",
+                "Ожидаем серию >=4 шагов",
+            )
+        elif long_series_decision == LongSeriesDecision.ALLOW:
+            runtime = await self._long_series.snapshot()
+            await REPOSITORY.log(
+                "LONG_SERIES_NEXT_MATCH_UNLOCKED",
+                (
+                    f"previous_long_match={runtime.get('last_observed_series_match')}; "
+                    f"winning_step={runtime.get('last_observed_series_length')}"
+                ),
+            )
+            await REPOSITORY.log("LONG_SERIES_MATCH_ALLOWED", f"match={match_name}")
+            await REPOSITORY.log(
+                "LONG_SERIES_ALLOWANCE_CONSUMED", f"match={match_name}"
+            )
         match_state = {
             "id": selected_match.get("match_id"),
             "team1": selected_match["team1"],
@@ -1122,7 +1219,11 @@ class DemoEngine:
                 "MATCH_SKIPPED_EXCLUDED_TEAM",
             )
             return
-        odds_result = await self._wait_for_odds(snapshot, selected_match)
+        odds_result = await (
+            self._wait_for_odds(snapshot, selected_match, read_only=True)
+            if long_series_decision == LongSeriesDecision.SHADOW
+            else self._wait_for_odds(snapshot, selected_match)
+        )
         if odds_result is None:
             return
         snapshot, initial_odds = odds_result
@@ -1133,6 +1234,46 @@ class DemoEngine:
             )
             return
         selection = select_team_with_higher_odds(snapshot.team1, snapshot.team2, initial_odds)
+        if long_series_decision == LongSeriesDecision.SHADOW:
+            runtime = await self._long_series.start_observation(
+                match_id=next_goal_match_identity(selected_match),
+                match_name=match_name,
+                selected_team=selection.selected_team,
+                selected_side=selection.selected_side.value,
+                initial_odds=selection.selected_odds,
+            )
+            await STATE.update(
+                message=f"LONG_SERIES наблюдает матч {match_name}",
+                event="LONG_SERIES_SHADOW_STARTED",
+                selected_team=None,
+                selected_side=None,
+                initial_selected_odds=None,
+                other_team=None,
+                selection_reason=None,
+                bet={
+                    "step": 0,
+                    "max_steps": self._config.max_steps,
+                    "amount": None,
+                    "market": "Следующий гол",
+                    "odds": None,
+                    "score_before": None,
+                    "next_goal_number": None,
+                    "status": "NO_ACTIVE_BET",
+                },
+                long_series=runtime,
+            )
+            await REPOSITORY.log(
+                "TEAM_SELECTED",
+                f"{selection.selected_team} @ {selection.selected_odds} / HIGHER_ODDS",
+            )
+            await self._process_long_series_shadow_match(
+                selected_match=selected_match,
+                match_name=match_name,
+                snapshot=snapshot,
+                initial_odds=initial_odds,
+                selection=selection,
+            )
+            return
         if not is_initial_odds_allowed(
             selection.selected_odds,
             enabled=self._config.min_initial_odds_enabled,
@@ -1902,6 +2043,10 @@ class DemoEngine:
                 )
                 await STATE.update(stats=await REPOSITORY.stats(), sequence=await REPOSITORY.get_sequence())
                 self._current_series = None
+                if long_series_decision == LongSeriesDecision.ALLOW:
+                    await self._complete_long_series_allowed_match(
+                        next_goal_match_identity(selected_match)
+                    )
                 if await self._stop_for_run_time_limit_if_idle(
                     "NEXT_GOAL_AFTER_WIN"
                 ):
@@ -2021,6 +2166,11 @@ class DemoEngine:
             await REPOSITORY.log("SEQUENCE_EXHAUSTED", match_name)
             await REPOSITORY.save_sequence(current_step=self._config.max_steps, status="SEQUENCE_EXHAUSTED", current_match_id=selected_match.get("match_id"))
             self._current_series = None
+            if long_series_decision == LongSeriesDecision.ALLOW:
+                await self._complete_long_series_allowed_match(
+                    next_goal_match_identity(selected_match),
+                    reason="allowed_match_sequence_exhausted",
+                )
 
         if not self._stop_event.is_set():
             await self._status(
@@ -2030,6 +2180,171 @@ class DemoEngine:
                 stats=await REPOSITORY.stats(),
             )
             await REPOSITORY.log("RETURNING_TO_LEAGUE", CONFIG.league_url)
+
+    async def _process_long_series_shadow_match(
+        self,
+        *,
+        selected_match: dict[str, Any],
+        match_name: str,
+        snapshot: ScoreboardSnapshot,
+        initial_odds,
+        selection: TeamSelection,
+    ) -> None:
+        """Observe one full match without creating a DEMO or LIVE bet."""
+        match_id = next_goal_match_identity(selected_match)
+        await REPOSITORY.log(
+            "LONG_SERIES_SHADOW_STARTED",
+            (
+                f"match={match_name}; match_id={match_id}; "
+                f"selected_team={selection.selected_team}; "
+                f"initial_odds={selection.selected_odds}"
+            ),
+        )
+        await STATE.update(
+            long_series=await self._long_series.snapshot(),
+            message=f"LONG_SERIES shadow: {match_name}",
+            event="LONG_SERIES_SHADOW_STARTED",
+        )
+        current_snapshot = snapshot
+        current_odds = initial_odds
+        page = await self.browser_manager.ensure_page()
+        browser = MatchBrowser(page)
+
+        for shadow_step in range(1, self._config.max_steps + 1):
+            if self._stop_event.is_set():
+                return
+            if shadow_step > 1:
+                odds_result = await self._wait_for_odds(
+                    current_snapshot,
+                    selected_match,
+                    read_only=True,
+                )
+                if odds_result is None:
+                    return
+                current_snapshot, current_odds = odds_result
+
+            selected_odd, _opponent_odd = odds_for_selected_side(
+                current_odds, selection.selected_side
+            )
+            runtime = await self._long_series.begin_shadow_step(
+                match_id=match_id,
+                step=shadow_step,
+                current_odds=selected_odd,
+                score_before=current_snapshot.score.text(),
+            )
+            await STATE.update(
+                event="LONG_SERIES_SHADOW_STEP",
+                message=(
+                    f"Shadow шаг {shadow_step}: {selection.selected_team} "
+                    f"@ {selected_odd}"
+                ),
+                long_series=runtime,
+            )
+
+            goal = None
+            if shadow_step == 1 and not current_snapshot.period:
+                started = await self._wait_for_match_start(selected_match)
+                if started is None:
+                    return
+                scorer_at_start = detect_scorer(
+                    current_snapshot.score, started.score
+                )
+                if scorer_at_start != Scorer.UNKNOWN:
+                    goal = (started, scorer_at_start)
+                current_snapshot = started
+            if goal is None:
+                goal = await self._wait_for_goal(
+                    browser, selected_match, current_snapshot
+                )
+            if goal is None:
+                return
+
+            new_snapshot, scorer = goal
+            if scorer not in {Scorer.TEAM_1, Scorer.TEAM_2}:
+                runtime = await self._long_series.finish_shadow_without_win(
+                    match_id=match_id,
+                    match_name=match_name,
+                    steps=max(0, shadow_step - 1),
+                )
+                await REPOSITORY.log(
+                    "LONG_SERIES_SHADOW_INTERRUPTED",
+                    (
+                        f"match={match_name}; step={shadow_step}; "
+                        f"scorer={scorer.value}; reason=AMBIGUOUS_SCORE_CHANGE"
+                    ),
+                )
+                await STATE.update(
+                    event="LONG_SERIES_SHADOW_INTERRUPTED",
+                    message="Shadow-серия прервана: неоднозначное изменение счёта",
+                    long_series=runtime,
+                )
+                return
+            result = (
+                "WIN" if scorer == selection.selected_side else "LOSE"
+            )
+            scorer_name = (
+                new_snapshot.team1
+                if scorer == Scorer.TEAM_1
+                else new_snapshot.team2
+            )
+            runtime = await self._long_series.record_shadow_step(
+                match_id=match_id,
+                match_name=match_name,
+                step=shadow_step,
+                result=result,
+                current_odds=selected_odd,
+                score_before=current_snapshot.score.text(),
+                score_after=new_snapshot.score.text(),
+                scorer=scorer_name,
+            )
+            await REPOSITORY.log(
+                "LONG_SERIES_SHADOW_STEP",
+                (
+                    f"match={match_name}; step={shadow_step}; "
+                    f"selected_team={selection.selected_team}; "
+                    f"odds={selected_odd}; result={result}; "
+                    f"actual_goal_index={new_snapshot.score.team1 + new_snapshot.score.team2}"
+                ),
+            )
+            await STATE.update(
+                event="LONG_SERIES_SHADOW_STEP",
+                message=f"Shadow шаг {shadow_step}: {result}",
+                long_series=runtime,
+            )
+            if result == "WIN":
+                event = (
+                    "LONG_SERIES_DETECTED"
+                    if shadow_step >= 4
+                    else "LONG_SERIES_SHORT_DETECTED"
+                )
+                await REPOSITORY.log(
+                    event, f"match={match_name}; winning_step={shadow_step}"
+                )
+                await STATE.update(
+                    event=event,
+                    message=(
+                        "LONG обнаружен — следующий матч разрешён"
+                        if shadow_step >= 4
+                        else "SHORT — продолжаем ждать LONG"
+                    ),
+                    long_series=runtime,
+                )
+                return
+            current_snapshot = new_snapshot
+
+        runtime = await self._long_series.finish_shadow_without_win(
+            match_id=match_id,
+            match_name=match_name,
+            steps=self._config.max_steps,
+        )
+        await REPOSITORY.log(
+            "LONG_SERIES_SHADOW_INCOMPLETE",
+            (
+                f"match={match_name}; steps={self._config.max_steps}; "
+                "selected team did not win within configured max_steps"
+            ),
+        )
+        await STATE.update(long_series=runtime)
 
     async def _process_first_half_draw_match(self, page: Page) -> None:
         """Run one complete «Ничья в 1-м тайме» bet on one match."""
@@ -3222,6 +3537,7 @@ class DemoEngine:
         return bool(
             result == "LOSE"
             and self._config.max_three_steps_enabled
+            and not self._config.long_series_enabled
             and not switch_already_used
             and accepted_losses_in_current_match >= 3
             and step < self._config.max_steps
@@ -3308,6 +3624,7 @@ class DemoEngine:
         blocked_attempt_score: Score | None = None,
         blocked_selected_side: Scorer | None = None,
         demo_blocked_window: DemoBlockedWindow | None = None,
+        read_only: bool | None = None,
     ):
         """Wait for current next-goal odds via Canvas 2D draw calls with DOM fallback."""
         attempt = 0
@@ -3398,7 +3715,7 @@ class DemoEngine:
                         snapshot.score.team1,
                         snapshot.score.team2,
                         REPOSITORY.log,
-                        read_only=self._mode == "DEMO",
+                        read_only=(self._mode == "DEMO" if read_only is None else read_only),
                     )
 
                 verified = await browser.snapshot()

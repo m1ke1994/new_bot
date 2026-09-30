@@ -103,6 +103,14 @@ class StrategyTests(unittest.TestCase):
                 }
             )
 
+    def test_long_series_filter_is_independent_and_disabled_by_default(self):
+        disabled = StrategyConfig.from_payload({})
+        enabled = StrategyConfig.from_payload({"long_series_enabled": True})
+        self.assertFalse(disabled.long_series_enabled)
+        self.assertFalse(disabled.to_dict()["long_series_enabled"])
+        self.assertTrue(enabled.long_series_enabled)
+        self.assertTrue(enabled.to_dict()["long_series_enabled"])
+
     def test_initial_odds_threshold_is_inclusive_and_decimal_safe(self):
         self.assertEqual(MIN_INITIAL_SELECTED_ODDS, Decimal("1.93"))
         self.assertFalse(is_initial_odds_allowed(1.92))
