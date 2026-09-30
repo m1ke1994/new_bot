@@ -1204,20 +1204,10 @@ class DemoEngine:
                 demo_blocked_window = pending_demo_protection
                 pending_demo_protection = None
             else:
-                demo_blocked_window = (
-                    DemoBlockedWindow(
-                        initial_score=snapshot.score,
-                        blocked_score_before=snapshot.score,
-                        selected_side=selection.selected_side,
-                        selected_team=selection.selected_team,
-                        step=step,
-                        stake=amount,
-                        match_id=next_goal_match_identity(selected_match),
-                    )
-                    if self._mode == "DEMO"
-                    and self._config.blocked_events_switch_enabled
-                    else None
-                )
+                # Coupon locks are now handled by the click/preview path in DEMO.
+                # Do not start the legacy lock-window strategy that could end the
+                # series or reinterpret a selected-team goal during a lock.
+                demo_blocked_window = None
             self._active_demo_protection = demo_blocked_window
             if self._mode == "LIVE":
                 self._pending_live_bet = PendingLiveBet(
