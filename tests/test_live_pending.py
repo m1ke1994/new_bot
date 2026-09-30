@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from backend.app.browser.market import MarketNotAvailable
 from backend.app.demo.engine import (
     DemoEngine,
     UNACCEPTED_FLIP_SIDE,
@@ -92,6 +93,8 @@ class LivePendingTests(unittest.IsolatedAsyncioTestCase):
         latest_score: ScoreboardSnapshot,
         *,
         signal: str = "NOT_ACCEPTED_NO_CONFIRMATION",
+        prepare_side_effect=None,
+        cleanup_side_effect=None,
     ):
         initial = snapshot(1, 0)
         initial_odds = NextGoalOdds(
@@ -139,11 +142,16 @@ class LivePendingTests(unittest.IsolatedAsyncioTestCase):
                 )
                 engine._sleep_or_stop = AsyncMock()
                 engine._publish_pending_bet = AsyncMock()
-                engine.live_executor.prepare = AsyncMock(side_effect=[None, None])
+                engine.live_executor.prepare = AsyncMock(
+                    side_effect=prepare_side_effect or [None, None]
+                )
                 engine.live_executor.manual_click_seen = AsyncMock(return_value=True)
                 engine.live_executor.invalidate = AsyncMock()
                 engine.live_executor.clear_unaccepted_coupon = AsyncMock(
-                    return_value=True
+                    side_effect=cleanup_side_effect
+                    if cleanup_side_effect is not None
+                    else None,
+                    return_value=True,
                 )
                 engine._read_fresh_score = AsyncMock(
                     side_effect=[
@@ -304,6 +312,53 @@ class LivePendingTests(unittest.IsolatedAsyncioTestCase):
             await self._run_unaccepted_recovery(snapshot(3, 1))
         )
         self.assertFalse(engine._stop_event.is_set())
+
+    async def test_stale_canvas_click_retries_same_match_team_step(self):
+        engine, result, decisions, history, sequence, logs = (
+            await self._run_unaccepted_recovery(
+                snapshot(1, 0),
+                prepare_side_effect=[
+                    MarketNotAvailable(
+                        "Коэффициент изменился перед Canvas-кликом; рынок нужно перечитать."
+                    ),
+                    None,
+                ],
+            )
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual([item.team for item in decisions], ["TEAM 2", "TEAM 2"])
+        self.assertEqual([item.strategy_step for item in decisions], [2, 2])
+        self.assertEqual([item.amount for item in decisions], [22, 22])
+        self.assertEqual(sequence["current_match_id"], "match")
+        self.assertEqual(sequence["selected_team"], "TEAM 2")
+        self.assertEqual([item["result"] for item in history], ["ACTIVE"])
+        self.assertIn(
+            "LIVE_MARKET_STALE_BEFORE_CLICK",
+            [item["event"] for item in logs],
+        )
+        self.assertFalse(engine._stop_event.is_set())
+
+    async def test_coupon_cleanup_waits_until_clear_before_retry_click(self):
+        engine, result, decisions, _history, sequence, logs = (
+            await self._run_unaccepted_recovery(
+                snapshot(3, 0),
+                cleanup_side_effect=[False, False, True],
+            )
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual([item.team for item in decisions], ["TEAM 2", "TEAM 2"])
+        self.assertEqual([item.strategy_step for item in decisions], [2, 2])
+        self.assertGreaterEqual(
+            engine.live_executor.clear_unaccepted_coupon.await_count,
+            3,
+        )
+        self.assertEqual(sequence["current_match_id"], "match")
+        self.assertIn(
+            "LIVE_UNACCEPTED_COUPON_CLEAR_WAIT",
+            [item["event"] for item in logs],
+        )
 
     async def test_unresolved_submission_still_blocks_duplicate_restart(self):
         with tempfile.TemporaryDirectory() as directory:
