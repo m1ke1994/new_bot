@@ -76,24 +76,24 @@ class NextGoalUnacceptedRecoveryTests(unittest.TestCase):
             UNACCEPTED_KEEP_SIDE,
         )
 
-    def test_selected_team_goal_flips_side(self):
+    def test_selected_team_goal_keeps_same_side(self):
         self.assertEqual(
             resolve_unaccepted_score_transition(
                 Scorer.TEAM_2,
                 Score(1, 0),
                 Score(3, 1),
             ),
-            UNACCEPTED_FLIP_SIDE,
+            UNACCEPTED_KEEP_SIDE,
         )
 
-    def test_both_teams_scoring_still_flips_when_selected_team_scored(self):
+    def test_both_teams_scoring_still_keeps_same_side(self):
         self.assertEqual(
             resolve_unaccepted_score_transition(
                 Scorer.TEAM_2,
                 Score(1, 0),
                 Score(3, 2),
             ),
-            UNACCEPTED_FLIP_SIDE,
+            UNACCEPTED_KEEP_SIDE,
         )
 
     def test_backwards_score_is_not_used_for_retry_decision(self):
