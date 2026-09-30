@@ -16,7 +16,7 @@ from . import market as hybrid_market
 
 Logger = Callable[[str, str], Awaitable[Any]]
 
-CANVAS_SELECTOR = SELECTORS.canvas or "canvas.market-grid-canvas__canvas"
+CANVAS_SELECTOR = SELECTORS.canvas
 MIN_ODDS = 1.01
 MAX_ODDS = 100.0
 ODDS_RE = re.compile(r"^\s*(\d{1,2}(?:[.,]\d{1,3})?)\s*$")
