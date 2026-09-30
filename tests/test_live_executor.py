@@ -746,6 +746,44 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
             [event for event, _ in events],
         )
 
+    async def test_clear_unaccepted_prefers_blocked_remove_control(self):
+        events = []
+
+        async def log(event, message):
+            events.append((event, message))
+
+        executor, page, item = LiveExecutor(log), FakePage(), decision()
+        page.show_blocked_event()
+        page.coupon_remove.present = 1
+        page.coupon_remove.visible = True
+
+        def remove_regular_coupon():
+            page.coupon_bet.present = 0
+            page.coupon_bet.visible = False
+            page.coupon_remove.present = 0
+            page.coupon_remove.visible = False
+            page.amount.present = 0
+            page.amount.visible = False
+            page.confirm.present = 0
+            page.confirm.visible = False
+
+        page.coupon_remove.on_click = remove_regular_coupon
+
+        cleared = await executor.clear_unaccepted_coupon(
+            page,
+            item.attempt_id,
+        )
+
+        self.assertTrue(cleared)
+        attempts = [
+            message
+            for event, message in events
+            if event == "LIVE_UNACCEPTED_COUPON_CLEAR_ATTEMPT"
+        ]
+        self.assertGreaterEqual(len(attempts), 1)
+        self.assertIn("source=blocked_coupon", attempts[0])
+        self.assertEqual(page.blocked_remove.clicks, 1)
+
     async def test_clear_unaccepted_regular_coupon_is_idempotent(self):
         executor, page, item = LiveExecutor(), FakePage(), decision()
         page.coupon_remove.present = 1
