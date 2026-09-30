@@ -34,19 +34,7 @@ MATCH_CARD_RETRY_DELAY_MS = 75
 MATCH_CONTENT_READY_TIMEOUT_MS = 30_000
 MATCH_CONTENT_READY_POLL_MS = 250
 
-MATCH_CONTENT_MARKET_SELECTORS = tuple(
-    selector
-    for selector in (
-        '.game-panel__markets input.ui-search-default__input[placeholder="Поиск по рынкам"]',
-        '.market-grid-game-panel__markets input.ui-search-default__input[placeholder="Поиск по рынкам"]',
-        'input.ui-search-default__input[placeholder="Поиск по рынкам"]',
-        SELECTORS.market_group,
-        ".game-markets-group",
-        SELECTORS.canvas,
-        "canvas.market-grid-canvas__canvas",
-    )
-    if selector
-)
+MATCH_CONTENT_MARKET_SELECTORS = SELECTORS.match_content_market_surfaces
 
 
 class LeagueBrowser:
@@ -264,7 +252,7 @@ class LeagueBrowser:
         except Exception as error:
             click_error = error
 
-        selector = "a.ui-game-card__link"
+        selector = SELECTORS.match_link
         route_ready = False
         if match.get("match_id"):
             try:
