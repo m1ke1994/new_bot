@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -10,41 +9,28 @@ from playwright.async_api import Page, Response
 from backend.app.demo.models import FirstHalfDrawMarket, NextGoalOdds
 from xbet_config import SELECTORS, TEXTS
 
-CANVAS_SELECTOR = SELECTORS.canvas or "canvas.market-grid-canvas__canvas"
+CANVAS_SELECTOR = SELECTORS.canvas
 
 
 Logger = Callable[[str, str], Awaitable[Any]]
 
-GOALS_TEXT = TEXTS.goals or "Голы"
-GOALS_FILTER_SELECTOR = SELECTORS.goals_filter or ".game-toolbar-filter-switch"
-NEXT_GOAL_SEARCH_SELECTOR = SELECTORS.market_search or "input.game-search__input"
-MARKET_SEARCH_BUTTON_SELECTOR = (
-    os.getenv("SELECTOR_MARKET_SEARCH_BUTTON", "").strip()
-    or "button.ui-search-default__button"
-)
-MARKET_GROUP_SELECTOR = SELECTORS.market_group or ".game-markets-group"
-MARKET_GROUP_TITLE_SELECTOR = (
-    SELECTORS.market_group_title or ".game-markets-group-header-title"
-)
-MARKET_BUTTON_SELECTOR = SELECTORS.market_button or "button.game-markets-group__market"
-MARKET_NAME_SELECTOR = SELECTORS.market_name or ".ui-market__name"
-MARKET_VALUE_SELECTOR = SELECTORS.market_value or ".ui-market__value"
-MARKET_LOCKED_CLASS = SELECTORS.market_locked_class or "ui-market--locked"
+GOALS_TEXT = TEXTS.goals
+GOALS_FILTER_SELECTOR = SELECTORS.goals_filter
+NEXT_GOAL_SEARCH_SELECTOR = SELECTORS.market_search
+MARKET_SEARCH_BUTTON_SELECTOR = SELECTORS.market_search_button
+MARKET_GROUP_SELECTOR = SELECTORS.market_group
+MARKET_GROUP_TITLE_SELECTOR = SELECTORS.market_group_title
+MARKET_BUTTON_SELECTOR = SELECTORS.market_button
+MARKET_NAME_SELECTOR = SELECTORS.market_name
+MARKET_VALUE_SELECTOR = SELECTORS.market_value
+MARKET_LOCKED_CLASS = SELECTORS.market_locked_class
 
-NEXT_GOAL_TEXT = TEXTS.next_goal or "Следующий гол"
-NEXT_GOAL_SEARCH_TEXT = TEXTS.next_goal_search or "следующий гол"
-FIRST_HALF_1X2_TEXT = TEXTS.first_half_market or "1X2. 1-й тайм"
-FIRST_HALF_DRAW_SELECTION_TEXT = TEXTS.draw_selection or "Ничья"
+NEXT_GOAL_TEXT = TEXTS.next_goal
+NEXT_GOAL_SEARCH_TEXT = TEXTS.next_goal_search
+FIRST_HALF_1X2_TEXT = TEXTS.first_half_market
+FIRST_HALF_DRAW_SELECTION_TEXT = TEXTS.draw_selection
 
-MARKET_KEYWORDS = tuple(TEXTS.market_response_keywords) or (
-    "market",
-    "odds",
-    "coefficient",
-    "event",
-    "outcome",
-    "goal",
-    "гол",
-)
+MARKET_KEYWORDS = tuple(TEXTS.market_response_keywords)
 SENSITIVE_KEYS = (
     "password",
     "passwd",
@@ -190,12 +176,7 @@ async def _first_visible(page: Page, selectors: tuple[str, ...]) -> tuple[Any | 
     return None, None
 
 
-MARKET_SEARCH_SCOPED_INPUT_SELECTORS = (
-    '.game-panel__markets input.ui-search-default__input[placeholder="Поиск по рынкам"]',
-    ".game-panel__markets input.ui-search-default__input",
-    '.market-grid-game-panel__markets input.ui-search-default__input[placeholder="Поиск по рынкам"]',
-    ".market-grid-game-panel__markets input.ui-search-default__input",
-)
+MARKET_SEARCH_SCOPED_INPUT_SELECTORS = SELECTORS.market_search_scoped_inputs
 MARKET_SEARCH_FALLBACK_VISIBLE_INDEX = 1  # second visible search input, top to bottom
 
 
@@ -226,9 +207,8 @@ async def _locate_market_search_input(
     deadline = loop.time() + timeout_ms / 1000
     generic_selectors = _selector_candidates(
         NEXT_GOAL_SEARCH_SELECTOR,
-        'input.ui-search-default__input[placeholder="Поиск по рынкам"]',
-        "input.ui-search-default__input",
-        "input.game-search__input",
+        SELECTORS.market_search_exact,
+        *SELECTORS.market_search_fallback_inputs,
     )
 
     while True:
@@ -268,14 +248,11 @@ async def _paired_market_search_button(
     # Resolve the button through that common ancestor so the upper search button
     # can never be clicked when the lower markets input was selected.
     try:
-        container = search_input.locator(
-            "xpath=ancestor::*[.//button[contains(@class,"
-            "'ui-search-default__button')]][1]"
-        )
+        container = search_input.locator(SELECTORS.market_search_ancestor_xpath)
         if await container.count():
-            button = container.locator("button.ui-search-default__button").first
+            button = container.locator(MARKET_SEARCH_BUTTON_SELECTOR).first
             if await button.count() and await button.is_visible():
-                return button, "paired:button.ui-search-default__button"
+                return button, f"paired:{MARKET_SEARCH_BUTTON_SELECTOR}"
     except Exception:
         pass
 
@@ -283,7 +260,7 @@ async def _paired_market_search_button(
     # same visible top-to-bottom position as the selected input.
     for selector in _selector_candidates(
         MARKET_SEARCH_BUTTON_SELECTOR,
-        "button.ui-search-default__button",
+        *SELECTORS.market_search_button_fallbacks,
     ):
         visible = await _visible_items(page, selector)
         if visible:
@@ -522,10 +499,7 @@ async def open_additional_markets(
     if await page.locator(GOALS_FILTER_SELECTOR).filter(has_text=GOALS_TEXT).count():
         return None
     await _log(logger, "OPENING_ADDITIONAL_MARKETS", "Opening additional markets")
-    for selector in SELECTORS.additional_markets or (
-        "button.dashboard-game__more",
-        "button.dashboard-game-more",
-    ):
+    for selector in SELECTORS.additional_markets:
         button = page.locator(selector).first
         if await button.count() == 0:
             continue
