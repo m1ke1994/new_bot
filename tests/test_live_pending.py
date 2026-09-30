@@ -63,20 +63,20 @@ class LivePendingTests(unittest.IsolatedAsyncioTestCase):
             UNACCEPTED_KEEP_SIDE,
         )
 
-    def test_score_transition_flips_when_selected_team_scores(self):
+    def test_score_transition_keeps_side_when_selected_team_scores(self):
         self.assertEqual(
             resolve_unaccepted_score_transition(
                 Scorer.TEAM_2, Score(1, 0), Score(3, 1)
             ),
-            UNACCEPTED_FLIP_SIDE,
+            UNACCEPTED_KEEP_SIDE,
         )
 
-    def test_score_transition_flips_when_both_teams_score(self):
+    def test_score_transition_keeps_side_when_both_teams_score(self):
         self.assertEqual(
             resolve_unaccepted_score_transition(
                 Scorer.TEAM_2, Score(1, 0), Score(3, 2)
             ),
-            UNACCEPTED_FLIP_SIDE,
+            UNACCEPTED_KEEP_SIDE,
         )
 
     def test_score_transition_rejects_backwards_score(self):
@@ -207,31 +207,31 @@ class LivePendingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item.strategy_step for item in decisions], [2, 2])
         self.assertEqual(sequence["current_step"], 2)
 
-    async def test_not_accepted_selected_team_goal_flips_side_same_step(self):
+    async def test_not_accepted_selected_team_goal_keeps_side_same_step(self):
         engine, result, decisions, history, sequence, logs = (
             await self._run_unaccepted_recovery(snapshot(3, 1))
         )
         self.assertIsNotNone(result)
-        self.assertEqual([item.team for item in decisions], ["TEAM 2", "TEAM 1"])
-        self.assertEqual([item.side for item in decisions], [Scorer.TEAM_2, Scorer.TEAM_1])
+        self.assertEqual([item.team for item in decisions], ["TEAM 2", "TEAM 2"])
+        self.assertEqual([item.side for item in decisions], [Scorer.TEAM_2, Scorer.TEAM_2])
         self.assertEqual([item.strategy_step for item in decisions], [2, 2])
         self.assertEqual([item.amount for item in decisions], [22, 22])
         self.assertEqual(sequence["current_step"], 2)
-        self.assertEqual(sequence["selected_team"], "TEAM 1")
+        self.assertEqual(sequence["selected_team"], "TEAM 2")
         self.assertEqual([item["result"] for item in history], ["ACTIVE"])
         self.assertFalse(engine._stop_event.is_set())
         self.assertIn(
-            "LIVE_UNACCEPTED_FLIP_SIDE",
+            "LIVE_UNACCEPTED_KEEP_SIDE",
             [item["event"] for item in logs],
         )
         _record, _baseline, _odds, _selected, _opponent, final_selection = result
-        self.assertEqual(final_selection.selected_side, Scorer.TEAM_1)
+        self.assertEqual(final_selection.selected_side, Scorer.TEAM_2)
 
-    async def test_not_accepted_both_teams_score_still_flips(self):
+    async def test_not_accepted_both_teams_score_still_keeps_side(self):
         _engine, _result, decisions, _history, sequence, _logs = (
             await self._run_unaccepted_recovery(snapshot(3, 2))
         )
-        self.assertEqual([item.team for item in decisions], ["TEAM 2", "TEAM 1"])
+        self.assertEqual([item.team for item in decisions], ["TEAM 2", "TEAM 2"])
         self.assertEqual(sequence["current_step"], 2)
 
     async def test_blocked_signal_is_generic_unaccepted_recovery_not_match_switch(self):
@@ -242,9 +242,9 @@ class LivePendingTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertIsNotNone(result)
-        self.assertEqual([item.team for item in decisions], ["TEAM 2", "TEAM 1"])
+        self.assertEqual([item.team for item in decisions], ["TEAM 2", "TEAM 2"])
         self.assertEqual(sequence["current_step"], 2)
-        self.assertEqual(sequence["selected_team"], "TEAM 1")
+        self.assertEqual(sequence["selected_team"], "TEAM 2")
         self.assertEqual([item["result"] for item in history], ["ACTIVE"])
         self.assertFalse(engine._stop_event.is_set())
         self.assertNotIn(
@@ -252,7 +252,7 @@ class LivePendingTests(unittest.IsolatedAsyncioTestCase):
             [item.get("result") for item in history],
         )
         self.assertIn(
-            "LIVE_UNACCEPTED_FLIP_SIDE",
+            "LIVE_UNACCEPTED_KEEP_SIDE",
             [item["event"] for item in logs],
         )
 
@@ -270,9 +270,9 @@ class LivePendingTests(unittest.IsolatedAsyncioTestCase):
         record, baseline, odds, selected, opponent, final_selection = result
         self.assertEqual(record["result"], "ACTIVE")
         self.assertEqual(baseline.score, Score(3, 1))
-        self.assertEqual(final_selection.selected_team, "TEAM 1")
-        self.assertEqual(selected, odds.team1)
-        self.assertEqual(opponent, odds.team2)
+        self.assertEqual(final_selection.selected_team, "TEAM 2")
+        self.assertEqual(selected, odds.team2)
+        self.assertEqual(opponent, odds.team1)
 
     def test_pending_score_update_preserves_step_and_amount(self):
         pending = PendingLiveBet(
