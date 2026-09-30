@@ -316,6 +316,26 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
         page.blocked_text.text = "  Заблокированное   событие  "
         self.assertTrue(await executor.blocked_event_exists(page))
 
+    async def test_virtual_preview_never_fills_amount_or_confirms(self):
+        executor, page, item = LiveExecutor(), FakePage(), decision(amount=42)
+
+        signal = await executor.preview_virtual_coupon(page, item)
+
+        self.assertEqual(signal, "READY")
+        self.assertEqual(item.coefficient_locator.clicks, 1)
+        self.assertEqual(page.amount.fills, [])
+        self.assertEqual(page.confirm.clicks, 0)
+
+    async def test_virtual_preview_reports_blocked_without_amount_or_confirm(self):
+        executor, page, item = LiveExecutor(), FakePage(), decision(amount=42)
+        page.show_blocked_event()
+
+        signal = await executor.preview_virtual_coupon(page, item)
+
+        self.assertEqual(signal, "BLOCKED")
+        self.assertEqual(page.amount.fills, [])
+        self.assertEqual(page.confirm.clicks, 0)
+
     async def test_current_coupon_dom_does_not_require_legacy_root(self):
         executor, page, item = LiveExecutor(), FakePage(), decision()
         page.coupon.present = 0
