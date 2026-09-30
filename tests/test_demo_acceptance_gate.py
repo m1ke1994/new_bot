@@ -1,13 +1,20 @@
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from backend.app.browser.market import MarketNotAvailable
 from backend.app.demo.engine import (
     DEMO_ACCEPTANCE_CONFIRMATIONS,
     DemoBlockedWindow,
     DemoEngine,
     MissedSelectedTeamGoal,
 )
-from backend.app.demo.models import NextGoalOdds, Score, ScoreboardSnapshot, Scorer
+from backend.app.demo.models import (
+    NextGoalOdds,
+    Score,
+    ScoreboardSnapshot,
+    Scorer,
+    TeamSelection,
+)
 
 
 def snapshot(score1: int, score2: int) -> ScoreboardSnapshot:
@@ -53,6 +60,142 @@ class DemoAcceptanceGateTests(unittest.IsolatedAsyncioTestCase):
             "team1": "TEAM 1",
             "team2": "TEAM 2",
         }
+
+    async def test_virtual_preview_stale_market_stays_in_same_match_and_step(self):
+        baseline = snapshot(0, 0)
+        retry_odds = NextGoalOdds(
+            1.82,
+            1.94,
+            next_goal_number=1,
+            team1_locator=object(),
+            team2_locator=object(),
+            source="CANVAS_2D",
+        )
+        selection = TeamSelection(
+            "TEAM 2",
+            Scorer.TEAM_2,
+            1.94,
+            "TEAM 1",
+            1.82,
+        )
+        selected_match = {
+            "match_id": "match",
+            "team1": "TEAM 1",
+            "team2": "TEAM 2",
+        }
+        self.engine.live_executor.preview_virtual_coupon = AsyncMock(
+            side_effect=[
+                MarketNotAvailable(
+                    "Коэффициент изменился перед Canvas-кликом; рынок нужно перечитать."
+                ),
+                "READY",
+            ]
+        )
+        self.engine.live_executor.clear_unaccepted_coupon = AsyncMock(
+            return_value=True
+        )
+        self.engine._read_fresh_score = AsyncMock(
+            side_effect=[baseline, baseline]
+        )
+        self.engine._wait_for_odds = AsyncMock(
+            return_value=(baseline, retry_odds)
+        )
+
+        with (
+            patch("backend.app.demo.engine.REPOSITORY.log", AsyncMock()) as log,
+            patch("backend.app.demo.engine.STATE.update", AsyncMock()),
+        ):
+            result = await self.engine._prepare_demo_virtual_until_ready(
+                page=object(),
+                browser=object(),
+                selected_match=selected_match,
+                selection=selection,
+                cycle_id="cycle",
+                step=2,
+                amount=23,
+                snapshot=baseline,
+                current_odds=retry_odds,
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            self.engine.live_executor.preview_virtual_coupon.await_count,
+            2,
+        )
+        decisions = [
+            call.args[1]
+            for call in self.engine.live_executor.preview_virtual_coupon.await_args_list
+        ]
+        self.assertEqual([item.team for item in decisions], ["TEAM 2", "TEAM 2"])
+        self.assertEqual([item.strategy_step for item in decisions], [2, 2])
+        self.assertEqual([item.amount for item in decisions], [23, 23])
+        events = [call.args[0] for call in log.await_args_list]
+        self.assertIn("DEMO_VIRTUAL_MARKET_STALE", events)
+        self.assertIn("DEMO_VIRTUAL_COUPON_VALIDATED", events)
+
+    async def test_virtual_preview_does_not_reclick_until_coupon_is_clear(self):
+        baseline = snapshot(0, 0)
+        retry_odds = NextGoalOdds(
+            1.82,
+            1.94,
+            next_goal_number=1,
+            team1_locator=object(),
+            team2_locator=object(),
+            source="CANVAS_2D",
+        )
+        selection = TeamSelection(
+            "TEAM 2",
+            Scorer.TEAM_2,
+            1.94,
+            "TEAM 1",
+            1.82,
+        )
+        selected_match = {
+            "match_id": "match",
+            "team1": "TEAM 1",
+            "team2": "TEAM 2",
+        }
+        self.engine.live_executor.preview_virtual_coupon = AsyncMock(
+            side_effect=["BLOCKED", "READY"]
+        )
+        self.engine.live_executor.clear_unaccepted_coupon = AsyncMock(
+            side_effect=[False, False, True, True]
+        )
+        self.engine._read_fresh_score = AsyncMock(
+            side_effect=[baseline, baseline]
+        )
+        self.engine._wait_for_odds = AsyncMock(
+            return_value=(baseline, retry_odds)
+        )
+
+        with (
+            patch("backend.app.demo.engine.REPOSITORY.log", AsyncMock()) as log,
+            patch("backend.app.demo.engine.STATE.update", AsyncMock()),
+        ):
+            result = await self.engine._prepare_demo_virtual_until_ready(
+                page=object(),
+                browser=object(),
+                selected_match=selected_match,
+                selection=selection,
+                cycle_id="cycle",
+                step=2,
+                amount=23,
+                snapshot=baseline,
+                current_odds=retry_odds,
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            self.engine.live_executor.preview_virtual_coupon.await_count,
+            2,
+        )
+        self.assertEqual(
+            self.engine.live_executor.clear_unaccepted_coupon.await_count,
+            4,
+        )
+        events = [call.args[0] for call in log.await_args_list]
+        self.assertIn("DEMO_VIRTUAL_COUPON_CLEAR_WAIT", events)
+        self.assertIn("DEMO_VIRTUAL_COUPON_CLEAR_RECOVERED", events)
 
     async def test_requires_three_unlocked_confirmations_before_acceptance(self):
         baseline = snapshot(3, 0)
