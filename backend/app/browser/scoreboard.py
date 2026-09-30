@@ -1,5 +1,4 @@
 import asyncio
-import os
 import re
 from typing import Any
 
@@ -30,31 +29,25 @@ def _selector_candidates(*values: str) -> tuple[str, ...]:
 # as fallbacks so a cosmetic wrapper change cannot block market reading.
 SCOREBOARD_ROOT_SELECTORS = _selector_candidates(
     SCOREBOARD_ROOT_SELECTOR,
-    ".scoreboard-layout-head__footer",
-    ".scoreboard-compact-view-tab-panel__body",
+    *SELECTORS.scoreboard_root_fallbacks,
 )
 TEAM_SELECTORS = _selector_candidates(
-    os.getenv("SELECTOR_SCOREBOARD_TEAM_NAME", ""),
-    ".scoreboard-team-name__text",
+    SELECTORS.scoreboard_team_name,
     TEAM_SELECTOR,
-    ".scoreboard-intro__team",
+    *SELECTORS.scoreboard_team_fallbacks,
 )
 TEAM_1_SCORE_SELECTORS = _selector_candidates(
     TEAM_1_SCORE_SELECTOR,
-    ".scoreboard-scores__item--team-1",
-    ".scoreboard-scores__score:not(.scoreboard-scores__score--team-2)",
+    *SELECTORS.scoreboard_team_1_score_fallbacks,
 )
 TEAM_2_SCORE_SELECTORS = _selector_candidates(
     TEAM_2_SCORE_SELECTOR,
-    ".scoreboard-scores__item--team-2",
-    ".scoreboard-scores__score--team-2",
+    *SELECTORS.scoreboard_team_2_score_fallbacks,
 )
 TIMER_SELECTORS = _selector_candidates(
     TIMER_SELECTOR,
     SELECTORS.scoreboard_timer_status,
-    ".scoreboard-timer span",
-    ".scoreboard-timer .ui-caption",
-    ".ui-game-timer__label",
+    *SELECTORS.scoreboard_timer_fallbacks,
 )
 
 _last_debug_scoreboard: tuple[str, str, int, int] | None = None
@@ -119,8 +112,8 @@ async def _find_locator(
 async def _scoreboard_root(page: Page) -> Locator:
     global _body_fallback_reported
 
-    if _selector_cache.get("root") == "body":
-        body = page.locator("body").first
+    if _selector_cache.get("root") == SELECTORS.page_body:
+        body = page.locator(SELECTORS.page_body).first
         try:
             if await body.count():
                 return body
@@ -140,9 +133,9 @@ async def _scoreboard_root(page: Page) -> Locator:
     except ScoreReadError:
         # A/B layouts sometimes remove the known wrapper but retain the team and
         # score elements. Scope to body and validate all required fields below.
-        body = page.locator("body").first
+        body = page.locator(SELECTORS.page_body).first
         await body.wait_for(state="attached", timeout=2_500)
-        _selector_cache["root"] = "body"
+        _selector_cache["root"] = SELECTORS.page_body
         if not _body_fallback_reported:
             print("[SCOREBOARD] known root missing; using cached body fallback")
             _body_fallback_reported = True
