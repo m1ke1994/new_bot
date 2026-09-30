@@ -99,13 +99,46 @@ async def _site_document_is_usable(page: Page, url: str) -> bool:
         if target.netloc and current.netloc.lower() != target.netloc.lower():
             return False
         state = await page.evaluate(
-            "() => ({ readyState: document.readyState, hasBody: Boolean(document.body) })"
+            """() => ({
+                readyState: document.readyState,
+                hasBody: Boolean(document.body),
+                href: String(location.href || ''),
+                title: String(document.title || ''),
+                bodyText: String(document.body?.innerText || '').slice(0, 4000),
+            })"""
         )
     except Exception:
         return False
+
+    if not isinstance(state, dict):
+        return False
+    href = str(state.get("href") or "")
+    diagnostic_text = " ".join(
+        (
+            href,
+            str(state.get("title") or ""),
+            str(state.get("bodyText") or ""),
+        )
+    ).upper()
+    if href.lower().startswith("chrome-error://"):
+        return False
+    if any(
+        marker in diagnostic_text
+        for marker in (
+            "ERR_NETWORK_CHANGED",
+            "ERR_INTERNET_DISCONNECTED",
+            "ERR_CONNECTION_RESET",
+            "ERR_CONNECTION_CLOSED",
+            "ERR_CONNECTION_REFUSED",
+            "ERR_NAME_NOT_RESOLVED",
+            "ERR_TIMED_OUT",
+            "ERR_PROXY_CONNECTION_FAILED",
+        )
+    ):
+        return False
+
     return bool(
-        isinstance(state, dict)
-        and state.get("hasBody")
+        state.get("hasBody")
         and state.get("readyState") in {"interactive", "complete"}
     )
 
