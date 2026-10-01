@@ -53,8 +53,12 @@ class BrowserManager:
 
     async def _discard_stale_context_locked(self) -> None:
         context = self.context
+        cdp_browser = self._cdp_browser
+        self._cdp_browser = None
         self._mark_context_closed()
-        if context is not None:
+        # A CDP-attached Chrome is owned by the user, not by Playwright.
+        # Detach from it instead of closing the normal Chrome process/profile.
+        if context is not None and cdp_browser is None:
             try:
                 await context.close()
             except Exception:
@@ -423,16 +427,13 @@ class BrowserManager:
             self._cdp_browser = None
             self._context_closed = True
             self._navigation_recovery_stage = 0
-            if context is not None:
+            if context is not None and cdp_browser is None:
                 try:
                     await context.close()
                 except Exception:
                     pass
-            if cdp_browser is not None:
-                try:
-                    await cdp_browser.close()
-                except Exception:
-                    pass
+            # In CDP mode Chrome was started by the user. Do not close it on
+            # backend shutdown; stopping Playwright only detaches automation.
             if playwright is not None:
                 try:
                     await playwright.stop()
