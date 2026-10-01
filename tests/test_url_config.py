@@ -84,7 +84,7 @@ class UrlConfigTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(key=key):
                 with self.assertRaisesRegex(
                     RuntimeError,
-                    rf"Missing required site configuration:\\s*{key}",
+                    rf"Missing required site configuration:\s*{key}",
                 ):
                     UrlConfig.from_env(values)
 
