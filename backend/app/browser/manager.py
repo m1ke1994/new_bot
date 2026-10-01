@@ -4,7 +4,7 @@ from typing import Any
 
 from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
 
-from auth import PROFILE_DIR, open_site
+from auth import PROFILE_DIR, SITE_URL, open_site
 from backend.app.browser.navigation import is_network_transport_error
 
 
@@ -200,6 +200,10 @@ class BrowserManager:
 
     async def _preopen_site_locked(self, page: Page) -> Page:
         """Open the site without turning a transport reset into a retry storm."""
+        await self._log(
+            "BROWSER_SITE_OPENING",
+            f"Переходим на {SITE_URL}; текущий url={self._page_url(page) or 'about:blank'}",
+        )
         try:
             await open_site(page)
         except Exception as first_error:
@@ -216,6 +220,10 @@ class BrowserManager:
                     await page.wait_for_timeout(12_000)
                 except Exception:
                     await asyncio.sleep(12)
+                await self._log(
+                    "BROWSER_SITE_RETRYING",
+                    f"Повторяем переход на {SITE_URL} через тот же browser context",
+                )
                 await open_site(page)
             else:
                 await self._log(
