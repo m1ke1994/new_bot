@@ -47,7 +47,14 @@ class FakePage:
 
     async def evaluate(self, expression):
         self.calls.append(("evaluate", expression))
-        return {"readyState": "complete", "hasBody": True}
+        return {
+            "readyState": "complete",
+            "hasBody": True,
+            "href": self.url,
+            "title": "1xBet",
+            "bodyText": "1xBet",
+            "loadEventEnd": 1,
+        }
 
     async def wait_for_timeout(self, timeout):
         self.calls.append(("wait_for_timeout", timeout))
@@ -96,6 +103,40 @@ class ManualAuthorizationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, {"ok": True, "status": "AUTHORIZED"})
         self.assertFalse(any(call[0] == "goto" for call in page.calls))
+
+    async def test_incomplete_saved_site_tab_is_not_reused(self):
+        page = FakePage([["RUB"]])
+        page.url = f"{SITE_URL.rstrip('/')}/live"
+
+        evaluate_calls = 0
+
+        async def evaluate(expression):
+            nonlocal evaluate_calls
+            evaluate_calls += 1
+            if evaluate_calls == 1:
+                return {
+                    "readyState": "interactive",
+                    "hasBody": True,
+                    "href": page.url,
+                    "title": "1xBet",
+                    "bodyText": "partial shell",
+                    "loadEventEnd": 0,
+                }
+            return {
+                "readyState": "complete",
+                "hasBody": True,
+                "href": page.url,
+                "title": "1xBet",
+                "bodyText": "1xBet",
+                "loadEventEnd": 1,
+            }
+
+        page.evaluate = evaluate
+
+        result = await authorize(page)
+
+        self.assertEqual(result, {"ok": True, "status": "AUTHORIZED"})
+        self.assertTrue(any(call[0] == "goto" for call in page.calls))
 
     async def test_manual_login_continues_without_extra_25_seconds(self):
         page = FakePage([[], ["RUB"]])
