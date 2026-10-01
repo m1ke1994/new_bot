@@ -1491,12 +1491,12 @@ onBeforeUnmount(() => {
                 <h3>Последние наблюдения</h3>
                 <div class="table-wrap">
                   <table>
-                    <thead><tr><th>Матч</th><th>Команда</th><th>Сторона</th><th>Начальный кф</th><th>Длина</th><th>Результат</th></tr></thead>
+                    <thead><tr><th>Матч</th><th>Команда</th><th>Сторона</th><th>Начальный кф</th><th>Длина</th><th>Результат</th><th>Завершение</th></tr></thead>
                     <tbody>
                       <tr v-for="item in observationHistory" :key="`${item.match_id}-${item.completed_at}`" :class="{ 'observation-long': item.classification === 'LONG' }">
-                        <td>{{ item.match_name }}</td><td>{{ item.selected_team }}</td><td>{{ item.side_label }}</td><td>{{ show(item.initial_odds) }}</td><td>{{ item.series_length }}</td><td><span :class="['table-result', String(item.classification).toLowerCase()]">{{ item.classification }}</span></td>
+                        <td>{{ item.match_name }}</td><td>{{ item.selected_team }}</td><td>{{ item.side_label }}</td><td>{{ show(item.initial_odds) }}</td><td>{{ item.series_length }}</td><td><span :class="['table-result', String(item.classification).toLowerCase()]">{{ item.classification }}</span></td><td>{{ show(item.completion_status, item.classification === 'LONG' || item.classification === 'SHORT' ? 'COMPLETED' : '—') }}</td>
                       </tr>
-                      <tr v-if="!observationHistory.length"><td colspan="6" class="empty-row">Завершённых наблюдений пока нет</td></tr>
+                      <tr v-if="!observationHistory.length"><td colspan="7" class="empty-row">Завершённых наблюдений пока нет</td></tr>
                     </tbody>
                   </table>
                 </div>
