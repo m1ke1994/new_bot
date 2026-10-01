@@ -10,8 +10,10 @@ from xbet_config import URL_CONFIG, UrlConfig, join_url
 
 def environment(**changes: str) -> dict[str, str]:
     values = {
-        "XBET_URL": "https://test-bookmaker.example/ru",
-        "XBET_FIFA_3X3_CONFERENCE_LEAGUE_PATH": "/live/fifa/test-league",
+        "SITE_BASE_URL": "https://test-bookmaker.example/ru",
+        "SITE_LOGIN_URL": "/",
+        "SITE_LIVE_URL": "/live",
+        "SITE_FIFA_URL": "/live/fifa/test-league",
         "BACKEND_HOST": "127.0.0.1",
         "BACKEND_PORT": "8000",
         "BACKEND_CORS_ORIGINS": "http://127.0.0.1:5173,http://localhost:5173",
@@ -36,9 +38,9 @@ class UrlConfigTests(unittest.IsolatedAsyncioTestCase):
             "https://test-bookmaker.example/ru/live/fifa/test-league",
         )
 
-    def test_changing_only_xbet_url_rebases_every_bookmaker_page(self):
+    def test_changing_only_site_base_url_rebases_every_bookmaker_page(self):
         config = UrlConfig.from_env(
-            environment(XBET_URL="https://new-mirror.example/ru")
+            environment(SITE_BASE_URL="https://new-mirror.example/ru")
         )
 
         self.assertEqual(
@@ -53,18 +55,34 @@ class UrlConfigTests(unittest.IsolatedAsyncioTestCase):
 
     def test_required_url_has_no_hidden_production_fallback(self):
         values = environment()
-        values.pop("XBET_URL")
+        values.pop("SITE_BASE_URL")
 
         with self.assertRaisesRegex(
             RuntimeError,
-            r"Missing required site configuration:\s*XBET_URL",
+            r"Missing required site configuration:\s*SITE_BASE_URL",
         ):
             UrlConfig.from_env(values)
+
+    def test_all_bookmaker_navigation_targets_are_required(self):
+        for key in (
+            "SITE_BASE_URL",
+            "SITE_LOGIN_URL",
+            "SITE_LIVE_URL",
+            "SITE_FIFA_URL",
+        ):
+            values = environment()
+            values.pop(key)
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    rf"Missing required site configuration:\\s*{key}",
+                ):
+                    UrlConfig.from_env(values)
 
     def test_public_urls_reject_embedded_secrets(self):
         with self.assertRaisesRegex(RuntimeError, "must not contain credentials"):
             UrlConfig.from_env(
-                environment(XBET_URL="https://user:secret@test-bookmaker.example/ru")
+                environment(SITE_BASE_URL="https://user:secret@test-bookmaker.example/ru")
             )
 
         with self.assertRaisesRegex(RuntimeError, "must not contain credentials"):
