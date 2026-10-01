@@ -157,6 +157,9 @@ class LongSeriesGate:
                     "series_length": 0,
                     "status": "OBSERVING",
                     "classification": "OBSERVING",
+                    "completion_status": "ACTIVE",
+                    "long_detected": False,
+                    "long_detected_at_step": None,
                     "started_at": utc_now(),
                     "completed_at": None,
                     "steps": [],
@@ -196,6 +199,9 @@ class LongSeriesGate:
                 series_length=0,
                 status="OBSERVING",
                 classification="OBSERVING",
+                completion_status="ACTIVE",
+                long_detected=False,
+                long_detected_at_step=None,
                 started_at=observation.get("started_at") or utc_now(),
                 completed_at=None,
                 steps=[],
@@ -214,6 +220,7 @@ class LongSeriesGate:
     ) -> dict[str, Any]:
         async with self._lock:
             observation = self._active_observation_locked(match_id)
+            long_detected = bool(observation.get("long_detected"))
             observation.update(
                 current_odds=float(current_odds),
                 shadow_step=int(step),
@@ -222,8 +229,9 @@ class LongSeriesGate:
                 scorer=None,
                 step_result="WAITING",
                 series_length=int(step),
-                status="OBSERVING",
-                classification="OBSERVING",
+                status="LONG" if long_detected else "OBSERVING",
+                classification="LONG" if long_detected else "OBSERVING",
+                completion_status="ACTIVE",
             )
             self._runtime["shadow_series_step"] = int(step)
             await self._save_locked()
@@ -258,6 +266,9 @@ class LongSeriesGate:
                     "initial_odds": None,
                     "current_odds": current_odds,
                     "started_at": utc_now(),
+                    "completion_status": "ACTIVE",
+                    "long_detected": False,
+                    "long_detected_at_step": None,
                     "steps": [],
                 }
                 self._runtime["active_observation"] = observation
@@ -284,12 +295,29 @@ class LongSeriesGate:
                 series_length=int(step),
                 steps=steps,
             )
+
+            # LONG is proven as soon as steps 1..3 are all settled LOSE.
+            # From that point the winning step cannot be earlier than 4, so
+            # the classification is sticky even if the market/match is later
+            # interrupted before a WIN is observed.
+            threshold_reached = self._long_threshold_reached_locked(observation)
+            if threshold_reached:
+                observation["long_detected"] = True
+                observation["long_detected_at_step"] = (
+                    observation.get("long_detected_at_step") or int(step)
+                )
+                observation["status"] = "LONG"
+                observation["classification"] = "LONG"
+
             if result.upper() == "WIN":
-                is_long = int(step) >= LONG_SERIES_MIN_STEP
+                is_long = bool(observation.get("long_detected")) or (
+                    int(step) >= LONG_SERIES_MIN_STEP
+                )
                 classification = "LONG" if is_long else "SHORT"
                 observation.update(
                     status=classification,
                     classification=classification,
+                    completion_status="COMPLETED",
                     completed_at=utc_now(),
                 )
                 self._append_observation_locked(observation)
@@ -337,29 +365,61 @@ class LongSeriesGate:
         async with self._lock:
             if str(match_id) == self._runtime.get("shadow_match_id"):
                 observation = self._runtime.get("active_observation")
+                is_long = False
                 if observation is not None:
+                    is_long = bool(observation.get("long_detected")) or (
+                        self._long_threshold_reached_locked(observation)
+                    )
+                    if is_long:
+                        observation["long_detected"] = True
+                        observation["long_detected_at_step"] = (
+                            observation.get("long_detected_at_step")
+                            or LONG_SERIES_MIN_STEP - 1
+                        )
                     observation.update(
                         shadow_step=int(steps),
                         series_length=int(steps),
-                        status="INTERRUPTED",
-                        classification="INTERRUPTED",
+                        status="LONG" if is_long else "INTERRUPTED",
+                        classification="LONG" if is_long else "INTERRUPTED",
+                        completion_status="INTERRUPTED",
                         completed_at=utc_now(),
                     )
                     self._append_observation_locked(observation)
                 self._runtime.update(
-                    state=LongSeriesState.WAITING_FOR_LONG.value,
+                    state=(
+                        LongSeriesState.NEXT_MATCH_ALLOWED.value
+                        if is_long
+                        else LongSeriesState.WAITING_FOR_LONG.value
+                    ),
                     last_observed_series_length=int(steps),
                     last_observed_series_match=match_name,
                     last_observed_series_match_id=str(match_id),
-                    last_observed_is_long=None,
-                    next_match_after_long_allowed=False,
+                    last_observed_is_long=True if is_long else None,
+                    next_match_after_long_allowed=is_long,
+                    permission_consumed=False,
                     shadow_match_id=None,
                     shadow_match=None,
-                    next_match="SKIP",
+                    shadow_series_step=int(steps),
+                    next_match="ALLOWED" if is_long else "SKIP",
                     active_observation=None,
                 )
                 await self._save_locked()
             return deepcopy(self._runtime)
+
+    @staticmethod
+    def _long_threshold_reached_locked(observation: dict[str, Any]) -> bool:
+        """LONG is proven by three consecutive settled losses from step 1."""
+        by_step: dict[int, str] = {}
+        for item in observation.get("steps") or []:
+            try:
+                step_number = int(item.get("step") or 0)
+            except (TypeError, ValueError):
+                continue
+            by_step[step_number] = str(item.get("result") or "").upper()
+        return all(
+            by_step.get(step_number) == "LOSE"
+            for step_number in range(1, LONG_SERIES_MIN_STEP)
+        )
 
     def _active_observation_locked(self, match_id: str) -> dict[str, Any]:
         observation = self._runtime.get("active_observation")
