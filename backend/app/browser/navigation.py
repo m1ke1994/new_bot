@@ -106,15 +106,29 @@ async def _document_is_usable(page: Any, target_url: str) -> bool:
     )
 
 
+def _error_text_chain(error: BaseException | None) -> str:
+    parts: list[str] = []
+    seen: set[int] = set()
+    current = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(str(current))
+        current = current.__cause__ or current.__context__
+    return " ".join(parts).lower()
+
+
+def is_network_transport_error(error: BaseException | None) -> bool:
+    """True for socket/DNS/proxy failures where aggressive retries make things worse."""
+    message = _error_text_chain(error)
+    return any(marker.lower() in message for marker in NETWORK_ERROR_MARKERS)
+
+
 def _is_transient_navigation_abort(error: Exception) -> bool:
-    message = str(error).lower()
+    message = _error_text_chain(error)
     return (
         "err_aborted" in message
         or "frame was detached" in message
-        or "err_network_changed" in message
-        or "err_connection_reset" in message
-        or "err_connection_closed" in message
-        or "err_timed_out" in message
+        or is_network_transport_error(error)
     )
 
 
@@ -137,13 +151,6 @@ async def _wait_for_redirected_document(
         except Exception:
             await asyncio.sleep(poll_ms / 1000)
     return await _document_is_usable(page, target_url)
-
-
-async def _stop_incomplete_navigation(page: Any) -> None:
-    try:
-        await page.evaluate("() => window.stop()")
-    except Exception:
-        pass
 
 
 async def goto_with_retry(
@@ -199,12 +206,27 @@ async def goto_with_retry(
                     f"({type(last_error).__name__}: {last_error}); повторяем"
                 ),
             )
-            await _stop_incomplete_navigation(page)
+            # Do not call window.stop() here. 1xBet is a heavy SPA and aborting
+            # an in-flight document can leave its persistent tab half-hydrated.
+            # A new page.goto() safely supersedes the previous navigation.
+            network_failure = is_network_transport_error(last_error)
+            delay_ms = (
+                max(8_000, retry_delay_ms * attempt)
+                if network_failure
+                else retry_delay_ms * attempt
+            )
+            if network_failure:
+                await _emit(
+                    logger,
+                    (
+                        "Сетевой сбой: не штурмуем зеркало повторными запросами; "
+                        f"пауза {delay_ms / 1000:.0f} сек перед одной следующей попыткой"
+                    ),
+                )
             try:
-                delay_ms = retry_delay_ms * attempt
                 await page.wait_for_timeout(delay_ms)
             except Exception:
-                await asyncio.sleep((retry_delay_ms * attempt) / 1000)
+                await asyncio.sleep(delay_ms / 1000)
 
     raise NavigationLoadError(
         f"Страница не загрузилась после {attempts} попыток: "
