@@ -31,7 +31,7 @@ AUTH_SELECTOR_CANDIDATES = tuple(
 BASE_DIR = Path(__file__).resolve().parent
 PROFILE_DIR = BASE_DIR / "browser_profile"
 
-PAGE_TIMEOUT = 20_000
+PAGE_TIMEOUT = 30_000
 # Auth is checked frequently because this is only a tiny DOM lookup. The old
 # 2-second poll could unnecessarily stall an already-authorized session.
 MANUAL_LOGIN_POLL_INTERVAL = 0.25
@@ -163,12 +163,11 @@ async def open_site(page: Page, url: str = SITE_URL) -> None:
         page,
         url,
         timeout_ms=PAGE_TIMEOUT,
-        attempts=3,
+        attempts=1,
         logger=log,
     )
-    # Use shorter attempts instead of one long 60s wait. A flaky first request
-    # is retried quickly while goto_with_retry still accepts a document that
-    # became usable just as Playwright reported a timeout.
+    # Startup performs one deliberate navigation request. BrowserManager owns
+    # the only cooldown retry so connection resets do not create a request storm.
     log("DOM сайта загружен")
 
 
