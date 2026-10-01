@@ -10,10 +10,10 @@ from xbet_config import URL_CONFIG, UrlConfig, join_url
 
 def environment(**changes: str) -> dict[str, str]:
     values = {
-        "SITE_BASE_URL": "https://test-bookmaker.example/ru",
-        "SITE_LOGIN_URL": "/",
-        "SITE_LIVE_URL": "/live",
-        "SITE_FIFA_URL": "/live/fifa/test-league",
+        "SITE_BASE_URL": "https://test-bookmaker.example",
+        "SITE_LOGIN_URL": "/ru",
+        "SITE_LIVE_URL": "/ru/live",
+        "SITE_FIFA_URL": "/ru/live/fifa/test-league",
         "BACKEND_HOST": "127.0.0.1",
         "BACKEND_PORT": "8000",
         "BACKEND_CORS_ORIGINS": "http://127.0.0.1:5173,http://localhost:5173",
@@ -34,13 +34,22 @@ class UrlConfigTests(unittest.IsolatedAsyncioTestCase):
 
     def test_join_url_normalizes_both_slashes(self):
         self.assertEqual(
-            join_url("https://test-bookmaker.example/ru/", "/live/fifa/test-league"),
+            join_url("https://test-bookmaker.example/ru/", "/ru/live/fifa/test-league"),
             "https://test-bookmaker.example/ru/live/fifa/test-league",
+        )
+
+    def test_join_url_does_not_duplicate_ru_prefix(self):
+        self.assertEqual(
+            join_url(
+                "https://test-bookmaker.example/ru",
+                "/ru/live/fifa/test-league/123-team-a-team-b",
+            ),
+            "https://test-bookmaker.example/ru/live/fifa/test-league/123-team-a-team-b",
         )
 
     def test_changing_only_site_base_url_rebases_every_bookmaker_page(self):
         config = UrlConfig.from_env(
-            environment(SITE_BASE_URL="https://new-mirror.example/ru")
+            environment(SITE_BASE_URL="https://new-mirror.example")
         )
 
         self.assertEqual(
@@ -49,7 +58,7 @@ class UrlConfigTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_existing_consumers_share_the_central_config(self):
-        self.assertEqual(SITE_URL, URL_CONFIG.xbet_url)
+        self.assertEqual(SITE_URL, URL_CONFIG.login_url)
         self.assertEqual(MATCHES_URL, URL_CONFIG.next_goal_league_url)
         self.assertEqual(DEMO_CONFIG.league_url, URL_CONFIG.next_goal_league_url)
 
