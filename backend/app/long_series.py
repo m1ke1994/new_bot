@@ -89,12 +89,55 @@ class LongSeriesGate:
                     restored["active_match_id"] = None
                     restored["active_match"] = None
                 if restored["state"] == LongSeriesState.WAITING_FOR_LONG.value:
-                    # An unfinished shadow observation cannot be resumed without
-                    # reconstructing missed goals, so restart conservatively.
-                    restored["shadow_match_id"] = None
-                    restored["shadow_match"] = None
-                    restored["shadow_series_step"] = 0
-                    restored["active_observation"] = None
+                    # An unfinished shadow observation cannot be resumed after
+                    # restart. However, if three settled losses had already
+                    # proved LONG, preserve that fact and unlock exactly one
+                    # next match instead of silently discarding the signal.
+                    observation = restored.get("active_observation")
+                    proven_long = bool(
+                        observation
+                        and (
+                            observation.get("long_detected")
+                            or self._long_threshold_reached_locked(observation)
+                        )
+                    )
+                    if proven_long and observation is not None:
+                        finalized = deepcopy(observation)
+                        finalized.update(
+                            status="LONG",
+                            classification="LONG",
+                            completion_status="INTERRUPTED",
+                            long_detected=True,
+                            long_detected_at_step=(
+                                finalized.get("long_detected_at_step")
+                                or LONG_SERIES_MIN_STEP - 1
+                            ),
+                            completed_at=finalized.get("completed_at") or utc_now(),
+                        )
+                        observations = list(restored.get("observations") or [])
+                        observations.append(finalized)
+                        restored["observations"] = observations[-20:]
+                        restored.update(
+                            state=LongSeriesState.NEXT_MATCH_ALLOWED.value,
+                            last_observed_series_length=int(
+                                finalized.get("series_length")
+                                or finalized.get("shadow_step")
+                                or LONG_SERIES_MIN_STEP
+                            ),
+                            last_observed_series_match=finalized.get("match_name"),
+                            last_observed_series_match_id=finalized.get("match_id"),
+                            last_observed_is_long=True,
+                            next_match_after_long_allowed=True,
+                            permission_consumed=False,
+                            shadow_match_id=None,
+                            shadow_match=None,
+                            active_observation=None,
+                        )
+                    else:
+                        restored["shadow_match_id"] = None
+                        restored["shadow_match"] = None
+                        restored["shadow_series_step"] = 0
+                        restored["active_observation"] = None
                 restored["next_match"] = (
                     "ALLOWED"
                     if restored["state"] == LongSeriesState.NEXT_MATCH_ALLOWED.value
