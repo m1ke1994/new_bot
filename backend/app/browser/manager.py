@@ -232,20 +232,15 @@ class BrowserManager:
 
             ready_state = "unknown"
             try:
-                # stop() clears a navigation left in progress when a previous
-                # worker was cancelled, while preserving cookies/profile state.
-                ready_state = await page.evaluate(
-                    """
-                    () => {
-                      const state = document.readyState;
-                      if (state === 'loading') window.stop();
-                      return state;
-                    }
-                    """
-                )
+                # IMPORTANT: never call window.stop() here. On a restored
+                # persistent 1xBet tab it aborts CSS/JS/XHR while the SPA is
+                # still booting. The URL then looks correct and readyState can
+                # become complete, so the auth layer may incorrectly reuse a
+                # half-loaded page forever.
+                ready_state = await page.evaluate("() => document.readyState")
             except Exception as error:
-                # Execution context destruction is normal while Chromium is in
-                # the middle of a redirect. goto_with_retry() will settle it.
+                # Execution-context destruction is normal during redirects.
+                # open_site()/goto_with_retry() below will settle navigation.
                 await self._log(
                     "BROWSER_SESSION_PAGE_BUSY",
                     f"{type(error).__name__}: {error}",
@@ -254,8 +249,13 @@ class BrowserManager:
                 "BROWSER_SESSION_PAGE_READY",
                 f"url={self._page_url(page) or 'about:blank'}; ready_state={ready_state}",
             )
-            # Do not return an about:blank tab to the worker. Open the site as
-            # part of the start transaction, then authorize() simply reuses it.
+            if ready_state == "loading":
+                await self._log(
+                    "BROWSER_SESSION_PAGE_LOADING",
+                    "Не прерываем текущую загрузку сайта; даём open_site завершить/перезапустить её безопасно",
+                )
+            # Open/verify the bookmaker before the worker starts. This is now
+            # non-destructive: an in-progress restored page is never stopped.
             page = await self._preopen_site_locked(page)
             return page
 
