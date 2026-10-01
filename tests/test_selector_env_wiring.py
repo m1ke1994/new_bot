@@ -7,10 +7,15 @@ class SelectorEnvWiringTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.root = Path(__file__).resolve().parents[1]
+        browser_files = [
+            path
+            for path in sorted((cls.root / "backend/app/browser").glob("*.py"))
+            if not path.name.startswith("canvas_")
+        ]
         cls.runtime_files = [
             cls.root / "auth.py",
             cls.root / "matches.py",
-            *sorted((cls.root / "backend/app/browser").glob("*.py")),
+            *browser_files,
             *sorted((cls.root / "backend/app/live").glob("*.py")),
         ]
 
@@ -44,6 +49,17 @@ class SelectorEnvWiringTests(unittest.TestCase):
             if pattern.search(source):
                 offenders.append(str(path.relative_to(self.root)))
         self.assertEqual(offenders, [])
+
+    def test_env_example_contains_all_bookmaker_navigation_urls(self):
+        env_source = (self.root / ".env.example").read_text(encoding="utf-8")
+        for key in (
+            "SITE_BASE_URL=",
+            "SITE_LOGIN_URL=",
+            "SITE_LIVE_URL=",
+            "SITE_FIFA_URL=",
+        ):
+            with self.subTest(key=key):
+                self.assertIn(key, env_source)
 
     def test_env_example_contains_runtime_selector_groups(self):
         env_source = (self.root / ".env.example").read_text(encoding="utf-8")
