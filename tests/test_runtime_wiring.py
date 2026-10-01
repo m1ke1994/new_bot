@@ -47,6 +47,17 @@ class RuntimeWiringTests(unittest.TestCase):
             adapter_source,
         )
 
+    def test_browser_is_launched_by_playwright_not_attached_via_cdp(self):
+        source = Path("backend/app/browser/manager.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("launch_persistent_context", source)
+        self.assertIn('channel="chrome"', source)
+        self.assertIn('"headless": False', source)
+        self.assertNotIn("connect_over_cdp", source)
+        self.assertNotIn("PLAYWRIGHT_CDP_URL", source)
+        self.assertNotIn("_cdp_browser", source)
+
     def test_canvas_hook_tracks_renderer_diagnostics(self):
         source = Path("backend/app/browser/canvas_2d_adapter.py").read_text(
             encoding="utf-8"
