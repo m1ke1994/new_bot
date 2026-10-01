@@ -5,6 +5,7 @@ from typing import Any
 from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
 
 from auth import PROFILE_DIR, open_site
+from backend.app.browser.navigation import is_network_transport_error
 
 
 Logger = Callable[[str, str], Awaitable[Any]]
@@ -186,21 +187,36 @@ class BrowserManager:
         return open_pages[-1] if open_pages else None
 
     async def _preopen_site_locked(self, page: Page) -> Page:
-        """Open the bookmaker during start and recover once if the first tab is stale."""
+        """Open the site without turning a transport reset into a retry storm."""
         try:
             await open_site(page)
         except Exception as first_error:
-            await self._log(
-                "BROWSER_SITE_OPEN_RETRY",
-                (
-                    "Первое открытие сайта не удалось; "
-                    f"перезапускаем persistent Chromium: "
-                    f"{type(first_error).__name__}: {first_error}"
-                ),
-            )
-            page = await self._recover_page_locked(first_error)
-            await page.bring_to_front()
-            await open_site(page)
+            if is_network_transport_error(first_error):
+                await self._log(
+                    "BROWSER_SITE_NETWORK_BACKOFF",
+                    (
+                        "Сетевой сбой при открытии сайта; сохраняем текущий "
+                        "browser/context и ждём 12 сек перед одной повторной "
+                        f"попыткой: {type(first_error).__name__}: {first_error}"
+                    ),
+                )
+                try:
+                    await page.wait_for_timeout(12_000)
+                except Exception:
+                    await asyncio.sleep(12)
+                await open_site(page)
+            else:
+                await self._log(
+                    "BROWSER_SITE_OPEN_RETRY",
+                    (
+                        "Первое открытие сайта не удалось из-за состояния вкладки; "
+                        f"однократно перезапускаем persistent browser: "
+                        f"{type(first_error).__name__}: {first_error}"
+                    ),
+                )
+                page = await self._recover_page_locked(first_error)
+                await page.bring_to_front()
+                await open_site(page)
 
         self._navigation_recovery_stage = 0
         await self._log(
