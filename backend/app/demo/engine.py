@@ -2181,6 +2181,53 @@ class DemoEngine:
             )
             await REPOSITORY.log("RETURNING_TO_LEAGUE", CONFIG.league_url)
 
+    async def _finalize_long_series_shadow_interruption(
+        self,
+        *,
+        match_id: str,
+        match_name: str,
+        steps: int,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Finalize a shadow observation without losing an already-proven LONG."""
+        runtime = await self._long_series.finish_shadow_without_win(
+            match_id=match_id,
+            match_name=match_name,
+            steps=max(0, int(steps)),
+        )
+        is_long = runtime.get("last_observed_is_long") is True
+        await REPOSITORY.log(
+            "LONG_SERIES_OBSERVATION_FINALIZED",
+            (
+                f"match={match_name}; classification={'LONG' if is_long else 'INTERRUPTED'}; "
+                f"completion_status=INTERRUPTED; observed_length={max(0, int(steps))}; "
+                f"reason={reason}"
+            ),
+        )
+        if is_long:
+            await REPOSITORY.log(
+                "LONG_SERIES_NEXT_MATCH_UNLOCKED",
+                (
+                    f"previous_long_match={match_name}; "
+                    f"observed_length={max(0, int(steps))}; reason={reason}"
+                ),
+            )
+            await STATE.update(
+                event="LONG_SERIES_DETECTED",
+                message=(
+                    f"LONG подтверждён ({max(0, int(steps))} шагов); "
+                    "наблюдение завершилось технически, следующий матч разрешён"
+                ),
+                long_series=runtime,
+            )
+        else:
+            await STATE.update(
+                event="LONG_SERIES_SHADOW_INTERRUPTED",
+                message=f"Shadow-серия прервана до подтверждения LONG: {reason}",
+                long_series=runtime,
+            )
+        return runtime
+
     async def _process_long_series_shadow_match(
         self,
         *,
@@ -2220,6 +2267,12 @@ class DemoEngine:
                     read_only=True,
                 )
                 if odds_result is None:
+                    await self._finalize_long_series_shadow_interruption(
+                        match_id=match_id,
+                        match_name=match_name,
+                        steps=shadow_step - 1,
+                        reason="ODDS_UNAVAILABLE",
+                    )
                     return
                 current_snapshot, current_odds = odds_result
 
@@ -2245,6 +2298,12 @@ class DemoEngine:
             if shadow_step == 1 and not current_snapshot.period:
                 started = await self._wait_for_match_start(selected_match)
                 if started is None:
+                    await self._finalize_long_series_shadow_interruption(
+                        match_id=match_id,
+                        match_name=match_name,
+                        steps=0,
+                        reason="MATCH_START_UNAVAILABLE",
+                    )
                     return
                 scorer_at_start = detect_scorer(
                     current_snapshot.score, started.score
@@ -2257,15 +2316,16 @@ class DemoEngine:
                     browser, selected_match, current_snapshot
                 )
             if goal is None:
+                await self._finalize_long_series_shadow_interruption(
+                    match_id=match_id,
+                    match_name=match_name,
+                    steps=shadow_step - 1,
+                    reason="GOAL_WAIT_ENDED",
+                )
                 return
 
             new_snapshot, scorer = goal
             if scorer not in {Scorer.TEAM_1, Scorer.TEAM_2}:
-                runtime = await self._long_series.finish_shadow_without_win(
-                    match_id=match_id,
-                    match_name=match_name,
-                    steps=max(0, shadow_step - 1),
-                )
                 await REPOSITORY.log(
                     "LONG_SERIES_SHADOW_INTERRUPTED",
                     (
@@ -2273,10 +2333,11 @@ class DemoEngine:
                         f"scorer={scorer.value}; reason=AMBIGUOUS_SCORE_CHANGE"
                     ),
                 )
-                await STATE.update(
-                    event="LONG_SERIES_SHADOW_INTERRUPTED",
-                    message="Shadow-серия прервана: неоднозначное изменение счёта",
-                    long_series=runtime,
+                await self._finalize_long_series_shadow_interruption(
+                    match_id=match_id,
+                    match_name=match_name,
+                    steps=max(0, shadow_step - 1),
+                    reason="AMBIGUOUS_SCORE_CHANGE",
                 )
                 return
             result = (
@@ -2311,32 +2372,66 @@ class DemoEngine:
                 message=f"Shadow шаг {shadow_step}: {result}",
                 long_series=runtime,
             )
-            if result == "WIN":
-                event = (
-                    "LONG_SERIES_DETECTED"
-                    if shadow_step >= 4
-                    else "LONG_SERIES_SHORT_DETECTED"
+            active_observation = runtime.get("active_observation") or {}
+            if (
+                result == "LOSE"
+                and active_observation.get("long_detected")
+                and int(active_observation.get("long_detected_at_step") or 0)
+                == shadow_step
+            ):
+                await REPOSITORY.log(
+                    "LONG_SERIES_THRESHOLD_REACHED",
+                    (
+                        f"match={match_name}; settled_losses={shadow_step}; "
+                        f"next_possible_winning_step={shadow_step + 1}"
+                    ),
                 )
                 await REPOSITORY.log(
-                    event, f"match={match_name}; winning_step={shadow_step}"
+                    "LONG_SERIES_DETECTED",
+                    (
+                        f"match={match_name}; settled_losses={shadow_step}; "
+                        "classification=LONG; observation_continues=true"
+                    ),
                 )
                 await STATE.update(
-                    event=event,
+                    event="LONG_SERIES_DETECTED",
                     message=(
-                        "LONG обнаружен — следующий матч разрешён"
-                        if shadow_step >= 4
-                        else "SHORT — продолжаем ждать LONG"
+                        "LONG уже подтверждён тремя LOSE подряд; "
+                        "продолжаем наблюдать текущий матч"
                     ),
                     long_series=runtime,
                 )
+            if result == "WIN":
+                if shadow_step >= 4:
+                    event = "LONG_SERIES_OBSERVATION_COMPLETED"
+                    await REPOSITORY.log(
+                        event,
+                        (
+                            f"match={match_name}; winning_step={shadow_step}; "
+                            "classification=LONG; completion_status=COMPLETED"
+                        ),
+                    )
+                    await STATE.update(
+                        event=event,
+                        message=(
+                            f"LONG завершён победой на шаге {shadow_step}; "
+                            "следующий матч разрешён"
+                        ),
+                        long_series=runtime,
+                    )
+                else:
+                    event = "LONG_SERIES_SHORT_DETECTED"
+                    await REPOSITORY.log(
+                        event, f"match={match_name}; winning_step={shadow_step}"
+                    )
+                    await STATE.update(
+                        event=event,
+                        message="SHORT — продолжаем ждать LONG",
+                        long_series=runtime,
+                    )
                 return
             current_snapshot = new_snapshot
 
-        runtime = await self._long_series.finish_shadow_without_win(
-            match_id=match_id,
-            match_name=match_name,
-            steps=self._config.max_steps,
-        )
         await REPOSITORY.log(
             "LONG_SERIES_SHADOW_INCOMPLETE",
             (
@@ -2344,7 +2439,12 @@ class DemoEngine:
                 "selected team did not win within configured max_steps"
             ),
         )
-        await STATE.update(long_series=runtime)
+        await self._finalize_long_series_shadow_interruption(
+            match_id=match_id,
+            match_name=match_name,
+            steps=self._config.max_steps,
+            reason="MAX_STEPS_WITHOUT_WIN",
+        )
 
     async def _process_first_half_draw_match(self, page: Page) -> None:
         """Run one complete «Ничья в 1-м тайме» bet on one match."""
