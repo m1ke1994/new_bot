@@ -144,6 +144,148 @@ class LongSeriesGateTests(unittest.IsolatedAsyncioTestCase):
             LongSeriesDecision.ALLOW,
         )
 
+    async def test_three_settled_losses_make_long_sticky_before_win(self):
+        self.assertEqual(
+            await self.gate.claim_match("A", "A1 — A2"),
+            LongSeriesDecision.SHADOW,
+        )
+        await self.gate.start_observation(
+            match_id="A",
+            match_name="A1 — A2",
+            selected_team="A1",
+            selected_side="TEAM_1",
+            initial_odds=2.05,
+        )
+        runtime = None
+        for step in range(1, 4):
+            await self.gate.begin_shadow_step(
+                match_id="A",
+                step=step,
+                current_odds=2.05,
+                score_before=f"0:{step - 1}",
+            )
+            runtime = await self.gate.record_shadow_step(
+                match_id="A",
+                match_name="A1 — A2",
+                step=step,
+                result="LOSE",
+                current_odds=2.05,
+                score_before=f"0:{step - 1}",
+                score_after=f"0:{step}",
+                scorer="A2",
+            )
+
+        self.assertIsNotNone(runtime)
+        observation = runtime["active_observation"]
+        self.assertTrue(observation["long_detected"])
+        self.assertEqual(observation["long_detected_at_step"], 3)
+        self.assertEqual(observation["classification"], "LONG")
+        self.assertEqual(observation["completion_status"], "ACTIVE")
+
+        runtime = await self.gate.begin_shadow_step(
+            match_id="A",
+            step=4,
+            current_odds=1.98,
+            score_before="0:3",
+        )
+        self.assertEqual(runtime["active_observation"]["classification"], "LONG")
+        self.assertTrue(runtime["active_observation"]["long_detected"])
+
+    async def test_interrupted_after_six_observed_steps_stays_long_and_unlocks_next_match(self):
+        self.assertEqual(
+            await self.gate.claim_match("A", "A1 — A2"),
+            LongSeriesDecision.SHADOW,
+        )
+        await self.gate.start_observation(
+            match_id="A",
+            match_name="A1 — A2",
+            selected_team="A1",
+            selected_side="TEAM_1",
+            initial_odds=2.05,
+        )
+        for step in range(1, 6):
+            await self.gate.begin_shadow_step(
+                match_id="A",
+                step=step,
+                current_odds=2.05,
+                score_before=f"0:{step - 1}",
+            )
+            await self.gate.record_shadow_step(
+                match_id="A",
+                match_name="A1 — A2",
+                step=step,
+                result="LOSE",
+                current_odds=2.05,
+                score_before=f"0:{step - 1}",
+                score_after=f"0:{step}",
+                scorer="A2",
+            )
+
+        await self.gate.begin_shadow_step(
+            match_id="A",
+            step=6,
+            current_odds=1.95,
+            score_before="0:5",
+        )
+        runtime = await self.gate.finish_shadow_without_win(
+            match_id="A",
+            match_name="A1 — A2",
+            steps=6,
+        )
+
+        self.assertEqual(runtime["state"], "NEXT_MATCH_ALLOWED")
+        self.assertTrue(runtime["last_observed_is_long"])
+        self.assertEqual(runtime["last_observed_series_length"], 6)
+        self.assertEqual(runtime["observations"][-1]["classification"], "LONG")
+        self.assertEqual(
+            runtime["observations"][-1]["completion_status"], "INTERRUPTED"
+        )
+        self.assertEqual(
+            await self.gate.claim_match("B", "B1 — B2"),
+            LongSeriesDecision.ALLOW,
+        )
+
+    async def test_interrupted_before_three_losses_does_not_unlock(self):
+        self.assertEqual(
+            await self.gate.claim_match("A", "A1 — A2"),
+            LongSeriesDecision.SHADOW,
+        )
+        await self.gate.start_observation(
+            match_id="A",
+            match_name="A1 — A2",
+            selected_team="A1",
+            selected_side="TEAM_1",
+            initial_odds=2.05,
+        )
+        for step in range(1, 3):
+            await self.gate.begin_shadow_step(
+                match_id="A",
+                step=step,
+                current_odds=2.05,
+                score_before=f"0:{step - 1}",
+            )
+            await self.gate.record_shadow_step(
+                match_id="A",
+                match_name="A1 — A2",
+                step=step,
+                result="LOSE",
+                current_odds=2.05,
+                score_before=f"0:{step - 1}",
+                score_after=f"0:{step}",
+                scorer="A2",
+            )
+
+        runtime = await self.gate.finish_shadow_without_win(
+            match_id="A",
+            match_name="A1 — A2",
+            steps=2,
+        )
+        self.assertEqual(runtime["state"], "WAITING_FOR_LONG")
+        self.assertIsNone(runtime["last_observed_is_long"])
+        self.assertEqual(
+            runtime["observations"][-1]["classification"], "INTERRUPTED"
+        )
+
     async def test_parallel_candidates_consume_only_one_permission(self):
         await self._finish("A", "A1 — A2", 4)
         decisions = await asyncio.gather(
@@ -160,6 +302,54 @@ class LongSeriesGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             await gate.claim_match("A", "A1 — A2"),
             LongSeriesDecision.BYPASS,
+        )
+
+    async def test_restart_preserves_proven_long_from_active_observation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = DemoRepository(Path(directory))
+            gate = LongSeriesGate(repository.save_long_series_runtime)
+            await gate.load(enabled=True, mode="LIVE")
+            self.assertEqual(
+                await gate.claim_match("A", "A1 — A2"),
+                LongSeriesDecision.SHADOW,
+            )
+            await gate.start_observation(
+                match_id="A",
+                match_name="A1 — A2",
+                selected_team="A1",
+                selected_side="TEAM_1",
+                initial_odds=2.05,
+            )
+            for step in range(1, 4):
+                await gate.begin_shadow_step(
+                    match_id="A",
+                    step=step,
+                    current_odds=2.05,
+                    score_before=f"0:{step - 1}",
+                )
+                await gate.record_shadow_step(
+                    match_id="A",
+                    match_name="A1 — A2",
+                    step=step,
+                    result="LOSE",
+                    current_odds=2.05,
+                    score_before=f"0:{step - 1}",
+                    score_after=f"0:{step}",
+                    scorer="A2",
+                )
+
+            restarted = LongSeriesGate(repository.save_long_series_runtime)
+            runtime = await restarted.load(
+                enabled=True,
+                mode="LIVE",
+                persisted=await repository.get_long_series_runtime("LIVE"),
+            )
+
+        self.assertEqual(runtime["state"], "NEXT_MATCH_ALLOWED")
+        self.assertTrue(runtime["last_observed_is_long"])
+        self.assertEqual(runtime["observations"][-1]["classification"], "LONG")
+        self.assertEqual(
+            runtime["observations"][-1]["completion_status"], "INTERRUPTED"
         )
 
     async def test_runtime_persists_unlock_but_not_consumed_active_permission(self):
