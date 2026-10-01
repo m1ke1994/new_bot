@@ -1,5 +1,4 @@
 import asyncio
-import os
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -24,7 +23,6 @@ class BrowserManager:
         self._logger: Logger | None = None
         self.generation = 0
         self._navigation_recovery_stage = 0
-        self._cdp_browser = None
 
     def set_logger(self, logger: Logger) -> None:
         self._logger = logger
@@ -53,12 +51,8 @@ class BrowserManager:
 
     async def _discard_stale_context_locked(self) -> None:
         context = self.context
-        cdp_browser = self._cdp_browser
-        self._cdp_browser = None
         self._mark_context_closed()
-        # A CDP-attached Chrome is owned by the user, not by Playwright.
-        # Detach from it instead of closing the normal Chrome process/profile.
-        if context is not None and cdp_browser is None:
+        if context is not None:
             try:
                 await context.close()
             except Exception:
@@ -305,73 +299,40 @@ class BrowserManager:
         PROFILE_DIR.mkdir(parents=True, exist_ok=True)
         if self.playwright is None:
             self.playwright = await async_playwright().start()
-        cdp_url = os.getenv("PLAYWRIGHT_CDP_URL", "").strip()
-        if cdp_url:
+        launch_kwargs = {
+            "user_data_dir": str(PROFILE_DIR),
+            "headless": False,
+            "viewport": None,
+            "args": ["--disable-quic"],
+        }
+        try:
+            context = await self.playwright.chromium.launch_persistent_context(
+                channel="chrome",
+                **launch_kwargs,
+            )
+            await self._log(
+                "BROWSER_ENGINE",
+                "Google Chrome stable; QUIC disabled for Playwright session",
+            )
+        except Exception as chrome_error:
+            await self._log(
+                "BROWSER_CHROME_CHANNEL_FALLBACK",
+                (
+                    "channel=chrome недоступен; используем bundled Chromium "
+                    f"с отключённым QUIC: {type(chrome_error).__name__}: {chrome_error}"
+                ),
+            )
             try:
-                browser = await self.playwright.chromium.connect_over_cdp(
-                    cdp_url,
-                    timeout=10_000,
+                context = await self.playwright.chromium.launch_persistent_context(
+                    **launch_kwargs,
                 )
-                if not browser.contexts:
-                    raise RuntimeError("Chrome CDP connection has no browser context")
-                context = browser.contexts[0]
-                self._cdp_browser = browser
-                await self._log(
-                    "BROWSER_ENGINE",
-                    (
-                        "Подключились к уже запущенному обычному Google Chrome "
-                        f"через CDP ({cdp_url}); Playwright не запускал браузер"
-                    ),
-                )
-            except Exception as cdp_error:
-                await self._log(
-                    "BROWSER_CDP_CONNECT_FAILED",
-                    (
-                        f"Не удалось подключиться к обычному Chrome по {cdp_url}: "
-                        f"{type(cdp_error).__name__}: {cdp_error}"
-                    ),
-                )
+            except Exception:
                 try:
                     await self.playwright.stop()
                 except Exception:
                     pass
                 self.playwright = None
                 raise
-        else:
-            launch_kwargs = {
-                "user_data_dir": str(PROFILE_DIR),
-                "headless": False,
-                "viewport": None,
-                "args": ["--disable-quic"],
-            }
-            try:
-                context = await self.playwright.chromium.launch_persistent_context(
-                    channel="chrome",
-                    **launch_kwargs,
-                )
-                await self._log(
-                    "BROWSER_ENGINE",
-                    "Google Chrome stable; QUIC disabled for Playwright session",
-                )
-            except Exception as chrome_error:
-                await self._log(
-                    "BROWSER_CHROME_CHANNEL_FALLBACK",
-                    (
-                        "channel=chrome недоступен; используем bundled Chromium "
-                        f"с отключённым QUIC: {type(chrome_error).__name__}: {chrome_error}"
-                    ),
-                )
-                try:
-                    context = await self.playwright.chromium.launch_persistent_context(
-                        **launch_kwargs,
-                    )
-                except Exception:
-                    try:
-                        await self.playwright.stop()
-                    except Exception:
-                        pass
-                    self.playwright = None
-                    raise
 
         # Do not instrument Canvas/Path2D during the bookmaker application's
         # initial boot. Hook v4 is intentionally installed lazily by the market
@@ -423,17 +384,13 @@ class BrowserManager:
             self.context = None
             self.page = None
             self.playwright = None
-            cdp_browser = self._cdp_browser
-            self._cdp_browser = None
             self._context_closed = True
             self._navigation_recovery_stage = 0
-            if context is not None and cdp_browser is None:
+            if context is not None:
                 try:
                     await context.close()
                 except Exception:
                     pass
-            # In CDP mode Chrome was started by the user. Do not close it on
-            # backend shutdown; stopping Playwright only detaches automation.
             if playwright is not None:
                 try:
                     await playwright.stop()
