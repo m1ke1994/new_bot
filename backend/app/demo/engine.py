@@ -36,7 +36,7 @@ from backend.app.browser.market import (
     read_first_half_draw_market,
 )
 from backend.app.browser.match import MatchBrowser
-from backend.app.browser.navigation import NavigationLoadError
+from backend.app.browser.navigation import NavigationLoadError, is_network_transport_error
 from backend.app.browser.scoreboard import ScoreReadError
 from backend.app.live.executor import BLOCKED_EVENT_SIGNAL, LiveExecutor
 from backend.app.live.models import (
@@ -763,10 +763,26 @@ class DemoEngine:
                     await self.browser_manager.ensure_page()
                 self._authorized_generation = -1
                 self._auth_status = "UNKNOWN"
-                await self._recover(
-                    "NAVIGATION_RECOVERING",
-                    "Навигация прервана; браузерная страница восстановлена, повторяем вход",
-                )
+                if is_network_transport_error(error):
+                    await REPOSITORY.log(
+                        "NAVIGATION_NETWORK_COOLDOWN",
+                        (
+                            "Сетевой reset/change; не создаём новые соединения "
+                            "15 секунд, затем повторяем через тот же browser context"
+                        ),
+                    )
+                    await self._status(
+                        DemoStatus.RECOVERING,
+                        "Сетевой сбой. Ждём 15 секунд без новых запросов к зеркалу.",
+                        "NAVIGATION_NETWORK_COOLDOWN",
+                        browser=await self.browser_manager.snapshot(),
+                    )
+                    await self._sleep_or_stop(15.0)
+                else:
+                    await self._recover(
+                        "NAVIGATION_RECOVERING",
+                        "Навигация прервана; браузерная страница восстановлена, повторяем вход",
+                    )
             except RecoverableDemoError as error:
                 await self._recover(error.status, str(error))
             except (PlaywrightTimeoutError, ScoreReadError) as error:
