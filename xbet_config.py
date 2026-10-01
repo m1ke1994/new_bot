@@ -86,21 +86,21 @@ class UrlConfig:
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "UrlConfig":
         source = os.environ if environ is None else environ
-        base_name = "SITE_BASE_URL" if source.get("SITE_BASE_URL") else "XBET_URL"
-        base_url = _validated_url(_required(source, base_name), base_name)
-        next_goal_name = (
-            "SITE_FIFA_URL"
-            if source.get("SITE_FIFA_URL")
-            else "XBET_FIFA_3X3_CONFERENCE_LEAGUE_PATH"
-        )
-        next_goal_target = _validated_target(
-            _required(source, next_goal_name), next_goal_name
+        base_url = _validated_url(
+            _required(source, "SITE_BASE_URL"),
+            "SITE_BASE_URL",
         )
         login_target = _validated_target(
-            _value(source, "SITE_LOGIN_URL") or base_url, "SITE_LOGIN_URL"
+            _required(source, "SITE_LOGIN_URL"),
+            "SITE_LOGIN_URL",
         )
         live_target = _validated_target(
-            _value(source, "SITE_LIVE_URL") or "/live", "SITE_LIVE_URL"
+            _required(source, "SITE_LIVE_URL"),
+            "SITE_LIVE_URL",
+        )
+        next_goal_target = _validated_target(
+            _required(source, "SITE_FIFA_URL"),
+            "SITE_FIFA_URL",
         )
 
         backend_host = _value(source, "BACKEND_HOST") or "127.0.0.1"
