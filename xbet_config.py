@@ -40,11 +40,23 @@ def join_selectors(selectors: tuple[str, ...]) -> str:
 
 
 def join_url(base: str, path: str) -> str:
-    """Resolve a configured relative site path, preserving absolute URLs."""
+    """Resolve bookmaker URLs without duplicating locale prefixes.
+
+    A target beginning with "/" is site-root-relative, so "/ru/live/..."
+    must resolve from the origin even when SITE_BASE_URL itself already
+    contains "/ru". Relative targets without a leading slash still resolve
+    below the configured base path.
+    """
     parsed = urlsplit(path)
     if parsed.scheme and parsed.netloc:
         return path.rstrip("/")
-    return urljoin(f"{base.rstrip('/')}/", path.lstrip("/")).rstrip("/")
+
+    base_parsed = urlsplit(base)
+    if path.startswith("/"):
+        origin = f"{base_parsed.scheme}://{base_parsed.netloc}"
+        return f"{origin}{path}".rstrip("/")
+
+    return urljoin(f"{base.rstrip('/')}/", path).rstrip("/")
 
 
 def _validated_url(value: str, name: str) -> str:
