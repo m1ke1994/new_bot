@@ -103,6 +103,9 @@ async def _site_document_is_usable(page: Page, url: str) -> bool:
                 href: String(location.href || ''),
                 title: String(document.title || ''),
                 bodyText: String(document.body?.innerText || '').slice(0, 4000),
+                loadEventEnd: Number(
+                    performance.getEntriesByType('navigation')[0]?.loadEventEnd || 0
+                ),
             })"""
         )
     except Exception:
@@ -135,9 +138,14 @@ async def _site_document_is_usable(page: Page, url: str) -> bool:
     ):
         return False
 
+    # Reuse only a fully finished document. "interactive" is intentionally
+    # rejected here: 1xBet is a heavy SPA and can still be loading the bundles
+    # that hydrate the shell. Reusing it too early was one cause of the
+    # permanently half-loaded Playwright tab.
     return bool(
         state.get("hasBody")
-        and state.get("readyState") in {"interactive", "complete"}
+        and state.get("readyState") == "complete"
+        and float(state.get("loadEventEnd") or 0) > 0
     )
 
 
