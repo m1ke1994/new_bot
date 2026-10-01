@@ -102,8 +102,20 @@ class BrowserManager:
                 return await self._recover_page_locked(error)
 
     async def recover_navigation(self, error: Exception) -> Page:
-        """Replace a detached page first, then restart the context if it repeats."""
+        """Recover page failures without recycling the browser on network resets."""
         async with self.lock:
+            if is_network_transport_error(error) and self._context_is_alive():
+                assert self.page is not None
+                self._navigation_recovery_stage = 0
+                await self._log(
+                    "NAVIGATION_NETWORK_PRESERVED",
+                    (
+                        "Сетевой reset/change: сохраняем текущие context/profile/cookies; "
+                        "новую вкладку и restart Chromium не создаём"
+                    ),
+                )
+                return self.page
+
             if not self._context_is_alive():
                 self._navigation_recovery_stage = 0
                 return await self._recover_page_locked(error)
@@ -279,19 +291,40 @@ class BrowserManager:
         PROFILE_DIR.mkdir(parents=True, exist_ok=True)
         if self.playwright is None:
             self.playwright = await async_playwright().start()
+        launch_kwargs = {
+            "user_data_dir": str(PROFILE_DIR),
+            "headless": False,
+            "viewport": None,
+            "args": ["--disable-quic"],
+        }
         try:
             context = await self.playwright.chromium.launch_persistent_context(
-                user_data_dir=str(PROFILE_DIR),
-                headless=False,
-                viewport=None,
+                channel="chrome",
+                **launch_kwargs,
             )
-        except Exception:
+            await self._log(
+                "BROWSER_ENGINE",
+                "Google Chrome stable; QUIC disabled for Playwright session",
+            )
+        except Exception as chrome_error:
+            await self._log(
+                "BROWSER_CHROME_CHANNEL_FALLBACK",
+                (
+                    "channel=chrome недоступен; используем bundled Chromium "
+                    f"с отключённым QUIC: {type(chrome_error).__name__}: {chrome_error}"
+                ),
+            )
             try:
-                await self.playwright.stop()
+                context = await self.playwright.chromium.launch_persistent_context(
+                    **launch_kwargs,
+                )
             except Exception:
-                pass
-            self.playwright = None
-            raise
+                try:
+                    await self.playwright.stop()
+                except Exception:
+                    pass
+                self.playwright = None
+                raise
 
         # Do not instrument Canvas/Path2D during the bookmaker application's
         # initial boot. Hook v4 is intentionally installed lazily by the market
