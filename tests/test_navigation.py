@@ -61,7 +61,7 @@ class NavigationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(page.goto_calls, 2)
-        self.assertEqual(page.stop_calls, 1)
+        self.assertEqual(page.stop_calls, 0)
         self.assertEqual(page.wait_calls, [10])
 
     async def test_timeout_is_accepted_when_target_dom_is_already_ready(self):
@@ -143,6 +143,22 @@ class NavigationTests(unittest.IsolatedAsyncioTestCase):
             await goto_with_retry(page, "https://example.test/ru", attempts=2)
 
         self.assertEqual(page.goto_calls, 2)
+
+    async def test_network_transport_error_uses_long_backoff_without_window_stop(self):
+        page = FakeNavigationPage(
+            [RuntimeError("net::ERR_CONNECTION_RESET"), "https://example.test/ru"]
+        )
+
+        await goto_with_retry(
+            page,
+            "https://example.test/ru",
+            attempts=2,
+            retry_delay_ms=10,
+        )
+
+        self.assertEqual(page.goto_calls, 2)
+        self.assertEqual(page.stop_calls, 0)
+        self.assertIn(8000, page.wait_calls)
 
     async def test_final_error_contains_page_diagnostics(self):
         page = FakeNavigationPage([RuntimeError("aborted")])
