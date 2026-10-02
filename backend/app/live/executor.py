@@ -1170,6 +1170,8 @@ class LiveExecutor:
         page: Any,
         decision: LiveDecision,
         publish: Publisher | None = None,
+        *,
+        coupon_timeout_seconds: float = 4.0,
     ) -> str:
         """Open the selected coupon for DEMO validation without submitting a bet.
 
@@ -1207,7 +1209,10 @@ class LiveExecutor:
                 publish,
             )
 
-            coupon_signal = await self._wait_for_coupon_surface(page)
+            coupon_signal = await self._wait_for_coupon_surface(
+                page,
+                timeout_seconds=coupon_timeout_seconds,
+            )
             if coupon_signal == "EMPTY_COUPON":
                 raise LivePreparationError(
                     "LIVE_COUPON_EMPTY_AFTER_CLICK",
