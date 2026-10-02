@@ -4390,6 +4390,43 @@ class DemoEngine:
                 with suppress(asyncio.CancelledError):
                     await task
 
+    async def _wait_demo_coupon_retry_backoff(
+        self,
+        *,
+        browser: MatchBrowser,
+        selected_match: dict[str, Any],
+        baseline: ScoreboardSnapshot,
+        delay_seconds: float,
+    ) -> ScoreboardSnapshot:
+        """Throttle repeated empty-coupon clicks while continuing score polling."""
+        current = baseline
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, delay_seconds)
+        while not self._stop_event.is_set() and loop.time() < deadline:
+            remaining = max(0.0, deadline - loop.time())
+            await asyncio.sleep(min(CONFIG.score_poll_interval, remaining))
+            try:
+                fresh = await asyncio.wait_for(
+                    browser.snapshot(),
+                    timeout=max(0.75, CONFIG.score_poll_interval * 4),
+                )
+            except (asyncio.TimeoutError, ScoreReadError):
+                continue
+            if fresh.team1 != baseline.team1 or fresh.team2 != baseline.team2:
+                raise RecoverableDemoError(
+                    "SCOREBOARD_TEAMS_CHANGED",
+                    "Порядок или названия команд в scoreboard изменились.",
+                )
+            current = fresh
+            await self._publish_snapshot(
+                current,
+                selected_match,
+                state="LIVE" if current.period else "UPCOMING",
+            )
+            if current.score != baseline.score:
+                break
+        return current
+
     async def _prepare_demo_virtual_until_ready(
         self,
         *,
@@ -4410,6 +4447,7 @@ class DemoEngine:
         clicked. If the coupon is blocked or the score changes while it is
         open, the same step/stake/side is retried on the fresh next-goal row.
         """
+        empty_coupon_failures = 0
         while not self._stop_event.is_set():
             if await self._stop_for_run_time_limit_if_idle(
                 "DEMO_VIRTUAL_COUPON_PREVIEW"
@@ -4552,6 +4590,26 @@ class DemoEngine:
                     selected_match,
                     snapshot,
                 )
+                if empty_coupon_error and snapshot.score == error_before:
+                    retry_delay = min(
+                        3.0,
+                        0.5 * (2 ** min(empty_coupon_failures - 1, 3)),
+                    )
+                    await REPOSITORY.log(
+                        "DEMO_EMPTY_COUPON_RETRY_BACKOFF",
+                        (
+                            f"attempt={attempt_id}; failures={empty_coupon_failures}; "
+                            f"delay={retry_delay:.2f}s; step={step}; "
+                            f"team={selection.selected_team}; score={snapshot.score.text()}; "
+                            "scoreboard polling continues; no immediate re-click"
+                        ),
+                    )
+                    snapshot = await self._wait_demo_coupon_retry_backoff(
+                        browser=browser,
+                        selected_match=selected_match,
+                        baseline=snapshot,
+                        delay_seconds=retry_delay,
+                    )
                 await self._set_coupon_recovery_state(
                     phase="WAITING_NEW_MARKET",
                     attempt_id=attempt_id,
@@ -4583,6 +4641,14 @@ class DemoEngine:
                 )
                 continue
             except LivePreparationError as error:
+                empty_coupon_error = error.status in {
+                    "LIVE_COUPON_EMPTY_AFTER_CLICK",
+                    "LIVE_COUPON_NOT_READY",
+                }
+                if empty_coupon_error:
+                    empty_coupon_failures += 1
+                else:
+                    empty_coupon_failures = 0
                 await REPOSITORY.log(
                     "DEMO_VIRTUAL_COUPON_PREVIEW_FAILED",
                     (
@@ -4637,6 +4703,8 @@ class DemoEngine:
                     market_locked=False,
                 )
                 continue
+
+            empty_coupon_failures = 0
 
             if signal == "BLOCKED":
                 await self._set_coupon_recovery_state(
