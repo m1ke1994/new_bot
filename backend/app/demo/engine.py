@@ -4590,26 +4590,6 @@ class DemoEngine:
                     selected_match,
                     snapshot,
                 )
-                if empty_coupon_error and snapshot.score == error_before:
-                    retry_delay = min(
-                        3.0,
-                        0.5 * (2 ** min(empty_coupon_failures - 1, 3)),
-                    )
-                    await REPOSITORY.log(
-                        "DEMO_EMPTY_COUPON_RETRY_BACKOFF",
-                        (
-                            f"attempt={attempt_id}; failures={empty_coupon_failures}; "
-                            f"delay={retry_delay:.2f}s; step={step}; "
-                            f"team={selection.selected_team}; score={snapshot.score.text()}; "
-                            "scoreboard polling continues; no immediate re-click"
-                        ),
-                    )
-                    snapshot = await self._wait_demo_coupon_retry_backoff(
-                        browser=browser,
-                        selected_match=selected_match,
-                        baseline=snapshot,
-                        delay_seconds=retry_delay,
-                    )
                 await self._set_coupon_recovery_state(
                     phase="WAITING_NEW_MARKET",
                     attempt_id=attempt_id,
@@ -4673,6 +4653,26 @@ class DemoEngine:
                     selected_match,
                     snapshot,
                 )
+                if empty_coupon_error and snapshot.score == error_before:
+                    retry_delay = min(
+                        3.0,
+                        0.5 * (2 ** min(empty_coupon_failures - 1, 3)),
+                    )
+                    await REPOSITORY.log(
+                        "DEMO_EMPTY_COUPON_RETRY_BACKOFF",
+                        (
+                            f"attempt={attempt_id}; failures={empty_coupon_failures}; "
+                            f"delay={retry_delay:.2f}s; step={step}; "
+                            f"team={selection.selected_team}; score={snapshot.score.text()}; "
+                            "scoreboard polling continues; no immediate re-click"
+                        ),
+                    )
+                    snapshot = await self._wait_demo_coupon_retry_backoff(
+                        browser=browser,
+                        selected_match=selected_match,
+                        baseline=snapshot,
+                        delay_seconds=retry_delay,
+                    )
                 await self._set_coupon_recovery_state(
                     phase="WAITING_NEW_MARKET",
                     attempt_id=attempt_id,
