@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -8,6 +9,7 @@ from backend.app.demo.engine import (
     DemoEngine,
     MissedSelectedTeamGoal,
 )
+from backend.app.live.models import LiveDecision
 from backend.app.demo.models import (
     NextGoalOdds,
     Score,
@@ -60,6 +62,48 @@ class DemoAcceptanceGateTests(unittest.IsolatedAsyncioTestCase):
             "team1": "TEAM 1",
             "team2": "TEAM 2",
         }
+
+    async def test_score_change_is_observed_while_coupon_preview_waits(self):
+        baseline = snapshot(2, 0)
+        changed = snapshot(2, 1)
+        decision = LiveDecision(
+            attempt_id="preview",
+            match_id="match",
+            team="TEAM 2",
+            side=Scorer.TEAM_2,
+            strategy_step=3,
+            amount=135,
+            goal_number=3,
+            coefficient=2.115,
+            coefficient_locator=object(),
+        )
+
+        async def slow_preview(*_args, **_kwargs):
+            await asyncio.sleep(5)
+            return "READY"
+
+        class ChangedScoreBrowser:
+            async def snapshot(self):
+                return changed
+
+        self.engine.live_executor.preview_virtual_coupon = AsyncMock(
+            side_effect=slow_preview
+        )
+        self.engine._publish_snapshot = AsyncMock()
+
+        with patch("backend.app.demo.engine.REPOSITORY.log", AsyncMock()) as log:
+            signal, observed = await self.engine._preview_demo_coupon_with_score_watch(
+                page=object(),
+                browser=ChangedScoreBrowser(),
+                selected_match=self.selected_match,
+                decision=decision,
+                baseline=baseline,
+            )
+
+        self.assertEqual(signal, "SCORE_CHANGED")
+        self.assertEqual(observed.score, Score(2, 1))
+        events = [call.args[0] for call in log.await_args_list]
+        self.assertIn("DEMO_SCORE_CHANGED_DURING_COUPON_WAIT", events)
 
     async def test_virtual_preview_stale_market_stays_in_same_match_and_step(self):
         baseline = snapshot(0, 0)
