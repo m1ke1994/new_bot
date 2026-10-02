@@ -4452,10 +4452,79 @@ class DemoEngine:
             score_before_preview = snapshot
 
             try:
-                signal = await self.live_executor.preview_virtual_coupon(
-                    page,
-                    decision,
+                signal, changed_during_preview = (
+                    await self._preview_demo_coupon_with_score_watch(
+                        page=page,
+                        browser=browser,
+                        selected_match=selected_match,
+                        decision=decision,
+                        baseline=score_before_preview,
+                    )
                 )
+                if changed_during_preview is not None:
+                    await self._set_coupon_recovery_state(
+                        phase="REFRESHING_SCORE",
+                        attempt_id=attempt_id,
+                        step=step,
+                        amount=amount,
+                        selected_team=selection.selected_team,
+                        score_before=score_before_preview.score,
+                        score_after=changed_during_preview.score,
+                        message=(
+                            "Счёт изменился, пока ждали coupon. "
+                            "Сохраняем ту же команду и тот же шаг."
+                        ),
+                        market_locked=False,
+                    )
+                    if not await self._wait_until_coupon_cleared(
+                        page=page,
+                        attempt_id=attempt_id,
+                        step=step,
+                        amount=amount,
+                        context="DEMO_SCORE_CHANGED_DURING_COUPON",
+                        selected_team=selection.selected_team,
+                        score_before=score_before_preview.score,
+                        show_recovery=True,
+                        market_locked=False,
+                    ):
+                        return None
+                    snapshot = changed_during_preview
+                    await self._set_coupon_recovery_state(
+                        phase="WAITING_NEW_MARKET",
+                        attempt_id=attempt_id,
+                        step=step,
+                        amount=amount,
+                        selected_team=selection.selected_team,
+                        score_before=score_before_preview.score,
+                        score_after=snapshot.score,
+                        message=(
+                            "Coupon очищен. Ждём новый рынок и повторяем "
+                            "тот же шаг на той же команде."
+                        ),
+                        market_locked=False,
+                    )
+                    odds_result = await self._wait_for_odds(
+                        snapshot,
+                        selected_match,
+                    )
+                    if odds_result is None:
+                        return None
+                    snapshot, current_odds = odds_result
+                    await self._set_coupon_recovery_state(
+                        phase="RETRYING_SAME_STEP",
+                        attempt_id=attempt_id,
+                        step=step,
+                        amount=amount,
+                        selected_team=selection.selected_team,
+                        score_before=score_before_preview.score,
+                        score_after=snapshot.score,
+                        message=(
+                            "Новый рынок готов после изменения счёта. "
+                            "Повторяем ту же команду и тот же шаг."
+                        ),
+                        market_locked=False,
+                    )
+                    continue
             except MarketNotAvailable as error:
                 await REPOSITORY.log(
                     "DEMO_VIRTUAL_MARKET_STALE",
