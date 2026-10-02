@@ -4303,6 +4303,93 @@ class DemoEngine:
             await self._sleep_or_stop(0.25)
         return False
 
+    async def _preview_demo_coupon_with_score_watch(
+        self,
+        *,
+        page: Any,
+        browser: MatchBrowser,
+        selected_match: dict[str, Any],
+        decision: LiveDecision,
+        baseline: ScoreboardSnapshot,
+    ) -> tuple[str | None, ScoreboardSnapshot | None]:
+        """Watch scoreboard while DEMO waits for coupon rendering.
+
+        A stale/blocked market click can leave the bookmaker coupon empty for
+        several seconds. During that window goals must still be observed. If
+        the score advances first, cancel the coupon wait immediately and let
+        the caller clean the coupon and retry the same team/step on the fresh
+        next-goal row.
+        """
+
+        async def watch_score() -> ScoreboardSnapshot | None:
+            while not self._stop_event.is_set():
+                await asyncio.sleep(CONFIG.score_poll_interval)
+                try:
+                    current = await asyncio.wait_for(
+                        browser.snapshot(),
+                        timeout=max(0.75, CONFIG.score_poll_interval * 4),
+                    )
+                except (asyncio.TimeoutError, ScoreReadError):
+                    continue
+
+                if current.team1 != baseline.team1 or current.team2 != baseline.team2:
+                    raise RecoverableDemoError(
+                        "SCOREBOARD_TEAMS_CHANGED",
+                        "Порядок или названия команд в scoreboard изменились.",
+                    )
+
+                await self._publish_snapshot(
+                    current,
+                    selected_match,
+                    state="LIVE" if current.period else "UPCOMING",
+                )
+                if current.score != baseline.score:
+                    return current
+            return None
+
+        preview_task = asyncio.create_task(
+            self.live_executor.preview_virtual_coupon(
+                page,
+                decision,
+                coupon_timeout_seconds=2.0,
+            )
+        )
+        score_task = asyncio.create_task(watch_score())
+        try:
+            done, _ = await asyncio.wait(
+                {preview_task, score_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if score_task in done:
+                changed = await score_task
+                if changed is not None:
+                    preview_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await preview_task
+                    await REPOSITORY.log(
+                        "DEMO_SCORE_CHANGED_DURING_COUPON_WAIT",
+                        (
+                            f"attempt={decision.attempt_id}; step={decision.strategy_step}; "
+                            f"team={decision.team}; "
+                            f"score={baseline.score.text()}->{changed.score.text()}; "
+                            "coupon wait cancelled; same step/team preserved"
+                        ),
+                    )
+                    return "SCORE_CHANGED", changed
+
+            signal = await preview_task
+            return signal, None
+        finally:
+            for task in (preview_task, score_task):
+                if not task.done():
+                    task.cancel()
+            for task in (preview_task, score_task):
+                if task.done():
+                    continue
+                with suppress(asyncio.CancelledError):
+                    await task
+
     async def _prepare_demo_virtual_until_ready(
         self,
         *,
