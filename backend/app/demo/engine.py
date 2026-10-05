@@ -57,6 +57,11 @@ from backend.app.long_series import (
     LongSeriesDecision,
     LongSeriesGate,
 )
+from backend.app.team1_profile import (
+    Team1ProfileRuntime,
+    is_team1_profile_allowed,
+    rejection_reason as team1_profile_rejection_reason,
+)
 
 from .budget import DemoBudget
 from .config import CONFIG
@@ -272,6 +277,18 @@ class DemoEngine:
         self._run_limit_stopped = False
         self._accepted_bet_in_progress = False
         self._long_series = LongSeriesGate(REPOSITORY.save_long_series_runtime)
+        self._team1_profile = Team1ProfileRuntime(REPOSITORY.save_team1_profile_runtime)
+
+    async def _load_team1_profile(self, mode: str) -> dict[str, Any]:
+        persisted = await REPOSITORY.get_team1_profile_runtime(mode)
+        runtime = await self._team1_profile.load(
+            enabled=self._config.team1_profile_enabled,
+            max_odds=self._config.team1_profile_max_odds,
+            mode=mode,
+            persisted=persisted,
+        )
+        await STATE.update(team1_profile=runtime)
+        return runtime
 
     async def _load_long_series(self, mode: str) -> dict[str, Any]:
         persisted = await REPOSITORY.get_long_series_runtime(mode)
@@ -433,6 +450,7 @@ class DemoEngine:
             )
         await STATE.restore(budget=budget, strategy_config=config_data, sequence=sequence, stats=await REPOSITORY.stats())
         await self._load_long_series(self._mode)
+        await self._load_team1_profile(self._mode)
         if active is not None:
             await STATE.update(
                 mode=str(active.get("mode") or "DEMO").upper(),
@@ -456,6 +474,7 @@ class DemoEngine:
             sequence = await REPOSITORY.reset_sequence()
         await STATE.restore(budget=await REPOSITORY.get_budget(), strategy_config=saved, sequence=sequence, stats=await REPOSITORY.stats())
         await self._load_long_series(self._mode)
+        await self._load_team1_profile(self._mode)
         return saved
 
     async def reset_sequence(self) -> dict[str, Any]:
@@ -569,6 +588,7 @@ class DemoEngine:
             self._mode = requested_mode
             self._current_series = None
             await self._load_long_series(requested_mode)
+            await self._load_team1_profile(requested_mode)
             self._configure_run_time_limit()
             if requested_mode == "LIVE":
                 self.live_executor.reset()
@@ -581,11 +601,20 @@ class DemoEngine:
                 f"blocked_events_switch_enabled={str(self._config.blocked_events_switch_enabled).lower()} "
                 f"max_three_steps_enabled={str(self._config.max_three_steps_enabled).lower()} "
                 f"long_series_enabled={str(self._config.long_series_enabled).lower()} "
+                f"team1_profile_enabled={str(self._config.team1_profile_enabled).lower()} "
+                f"team1_profile_max_odds={self._config.team1_profile_max_odds} "
                 f"min_initial_odds={MIN_INITIAL_SELECTED_ODDS}",
             )
             await REPOSITORY.log(
                 "LONG_SERIES_FILTER_CONFIG",
                 f"enabled={str(self._config.long_series_enabled).lower()}",
+            )
+            await REPOSITORY.log(
+                "TEAM1_PROFILE_FILTER_CONFIG",
+                (
+                    f"enabled={str(self._config.team1_profile_enabled).lower()}; "
+                    f"selected_side=TEAM_1; max_odds_exclusive={self._config.team1_profile_max_odds}"
+                ),
             )
             await REPOSITORY.log(
                 "STRATEGY_STARTED",
@@ -613,6 +642,7 @@ class DemoEngine:
                 sequence=(await REPOSITORY.get_sequence()),
                 run_time=self._run_time_state(),
                 long_series=await self._long_series.snapshot(),
+                team1_profile=await self._team1_profile.snapshot(),
             )
             try:
                 await REPOSITORY.log("BROWSER_STARTING", "Проверяем Playwright/browser/context/page")
