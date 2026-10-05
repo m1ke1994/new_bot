@@ -8,6 +8,7 @@ from .budget import DEMO_START_BUDGET
 from .strategy import DEFAULT_STRATEGY_CONFIG
 from .models import DemoStatus
 from backend.app.long_series import default_long_series_runtime
+from backend.app.team1_profile import default_team1_profile_runtime
 
 
 STRATEGY_PRESENTATION = {
@@ -116,6 +117,7 @@ def initial_state() -> dict[str, Any]:
             "stopped_by_limit": False,
         },
         "long_series": default_long_series_runtime(),
+        "team1_profile": default_team1_profile_runtime(),
         "sequence": {
             "current_step": 1,
             "status": "WAITING_FOR_MATCH",
