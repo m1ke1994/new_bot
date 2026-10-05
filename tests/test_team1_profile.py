@@ -51,7 +51,7 @@ class Team1ProfileRuleTests(unittest.TestCase):
         self.assertFalse(disabled.team1_profile_enabled)
         self.assertEqual(disabled.to_dict()["team1_profile_max_odds"], 2.0)
         self.assertTrue(enabled.team1_profile_enabled)
-        self.assertEqual(enabled.to_dict()["team1_profile_max_odds"], 1.99)
+        self.assertEqual(enabled.to_dict()["team1_profile_max_odds"], 1.985)
 
 
 class Team1ProfileRuntimeTests(unittest.IsolatedAsyncioTestCase):
