@@ -39,6 +39,7 @@ def default_favorite_shadow_runtime(*, enabled: bool = False) -> dict[str, Any]:
             "completed": 0,
             "exhausted": 0,
             "interrupted": 0,
+            "skipped": 0,
             "wins_by_step": {str(step): 0 for step in range(1, FAVORITE_SHADOW_MAX_STEPS + 1)},
         },
     }
@@ -112,6 +113,60 @@ class FavoriteShadowRuntime:
                 str(item.get("match_id") or "") == expected
                 for item in (self._runtime.get("observations") or [])
             )
+
+    async def record_skipped(
+        self,
+        *,
+        match_id: str,
+        match_name: str,
+        reason: str,
+        team1: str | None = None,
+        team2: str | None = None,
+        score: str | None = None,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            key = str(match_id)
+            if key in (self._runtime.get("active_observations") or {}) or any(
+                str(item.get("match_id") or "") == key
+                for item in (self._runtime.get("observations") or [])
+            ):
+                return deepcopy(self._runtime)
+            observation = {
+                "match_id": key,
+                "match_name": match_name,
+                "team1": team1,
+                "team2": team2,
+                "favorite_team": None,
+                "favorite_side": None,
+                "favorite_side_label": None,
+                "outsider_team": None,
+                "initial_favorite_odds": None,
+                "initial_outsider_odds": None,
+                "shadow_step": 0,
+                "score_before": score,
+                "score_after": score,
+                "current_favorite_odds": None,
+                "market_ready": False,
+                "status": "SKIPPED",
+                "completion_status": "SKIPPED",
+                "interruption_reason": str(reason),
+                "winning_step": None,
+                "started_at": utc_now(),
+                "completed_at": utc_now(),
+                "steps": [],
+            }
+            observations = list(self._runtime.get("observations") or [])
+            observations.append(observation)
+            observations = observations[-FAVORITE_SHADOW_HISTORY_LIMIT:]
+            self._runtime["observations"] = observations
+            self._runtime["stats"] = self._rebuild_stats(observations)
+            self._runtime["state"] = (
+                "OBSERVING"
+                if self._runtime.get("active_observations")
+                else ("READY" if self._runtime.get("enabled") else "OFF")
+            )
+            await self._save_locked()
+            return deepcopy(self._runtime)
 
     async def start_observation(
         self,
@@ -285,6 +340,7 @@ class FavoriteShadowRuntime:
         wins = {str(step): 0 for step in range(1, FAVORITE_SHADOW_MAX_STEPS + 1)}
         exhausted = 0
         interrupted = 0
+        skipped = 0
         completed = 0
         for item in observations:
             status = str(item.get("completion_status") or "")
@@ -297,10 +353,13 @@ class FavoriteShadowRuntime:
                 exhausted += 1
             elif status == "INTERRUPTED":
                 interrupted += 1
+            elif status == "SKIPPED":
+                skipped += 1
         return {
             "completed": completed,
             "exhausted": exhausted,
             "interrupted": interrupted,
+            "skipped": skipped,
             "wins_by_step": wins,
         }
 
