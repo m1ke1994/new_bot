@@ -1280,7 +1280,7 @@ onBeforeUnmount(() => {
 
               <input v-model="strategyConfig.long_series_enabled" type="checkbox" :disabled="state.running || actionPending" @change="saveMatchFilters">
 
-              <span class="filter-copy"><strong>LONG_SERIES</strong><small>Вход только в первый новый матч после длинной серии 4+</small></span>
+              <span class="filter-copy"><strong>LONG_SERIES</strong><small>Вход только в первый новый матч после длинной серии 6+</small></span>
 
               <span class="filter-state">{{ strategyConfig.long_series_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
 
