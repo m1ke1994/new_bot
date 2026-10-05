@@ -1402,6 +1402,15 @@ class DemoEngine:
                     initial_odds=initial_odds,
                     selection=selection,
                 )
+                if long_series_decision == LongSeriesDecision.ALLOW:
+                    long_runtime = await self._long_series.release_allowed_match(
+                        next_goal_match_identity(selected_match)
+                    )
+                    await REPOSITORY.log(
+                        "LONG_SERIES_ALLOWANCE_RELEASED_BY_TEAM1_PROFILE",
+                        f"match={match_name}; next matching candidate remains allowed",
+                    )
+                    await STATE.update(long_series=long_runtime)
                 return
             await REPOSITORY.log(
                 "TEAM1_PROFILE_MATCH_ALLOWED",
@@ -2578,6 +2587,191 @@ class DemoEngine:
             ),
         )
         await self._finalize_long_series_shadow_interruption(
+            match_id=match_id,
+            match_name=match_name,
+            steps=self._config.max_steps,
+            reason="MAX_STEPS_WITHOUT_WIN",
+        )
+
+    async def _finalize_team1_profile_observation(
+        self,
+        *,
+        match_id: str,
+        match_name: str,
+        steps: int,
+        reason: str,
+    ) -> dict[str, Any]:
+        runtime = await self._team1_profile.finish_without_win(
+            match_id=match_id,
+            steps=max(0, int(steps)),
+            reason=reason,
+        )
+        await REPOSITORY.log(
+            "TEAM1_PROFILE_OBSERVATION_FINALIZED",
+            (
+                f"match={match_name}; observed_length={max(0, int(steps))}; "
+                f"completion_status=INTERRUPTED; reason={reason}"
+            ),
+        )
+        await STATE.update(
+            event="TEAM1_PROFILE_OBSERVATION_INTERRUPTED",
+            message=f"TEAM1 PROFILE: наблюдение завершено ({reason})",
+            team1_profile=runtime,
+        )
+        return runtime
+
+    async def _process_team1_profile_observation(
+        self,
+        *,
+        selected_match: dict[str, Any],
+        match_name: str,
+        snapshot: ScoreboardSnapshot,
+        initial_odds,
+        selection: TeamSelection,
+    ) -> None:
+        """Observe a rejected TEAM_1 profile match without creating a bet."""
+        match_id = next_goal_match_identity(selected_match)
+        await REPOSITORY.log(
+            "TEAM1_PROFILE_SHADOW_STARTED",
+            (
+                f"match={match_name}; match_id={match_id}; "
+                f"selected_team={selection.selected_team}; "
+                f"selected_side={selection.selected_side.value}; "
+                f"initial_odds={selection.selected_odds}"
+            ),
+        )
+        await STATE.update(
+            team1_profile=await self._team1_profile.snapshot(),
+            message=f"TEAM1 PROFILE наблюдает: {match_name}",
+            event="TEAM1_PROFILE_SHADOW_STARTED",
+        )
+
+        current_snapshot = snapshot
+        current_odds = initial_odds
+        page = await self.browser_manager.ensure_page()
+        browser = MatchBrowser(page)
+
+        for shadow_step in range(1, self._config.max_steps + 1):
+            if self._stop_event.is_set():
+                return
+
+            if shadow_step > 1:
+                odds_result = await self._wait_for_odds(
+                    current_snapshot,
+                    selected_match,
+                    read_only=True,
+                )
+                if odds_result is None:
+                    await self._finalize_team1_profile_observation(
+                        match_id=match_id,
+                        match_name=match_name,
+                        steps=shadow_step - 1,
+                        reason="ODDS_UNAVAILABLE",
+                    )
+                    return
+                current_snapshot, current_odds = odds_result
+
+            selected_odd, _opponent_odd = odds_for_selected_side(
+                current_odds, selection.selected_side
+            )
+            runtime = await self._team1_profile.begin_step(
+                match_id=match_id,
+                step=shadow_step,
+                current_odds=selected_odd,
+                score_before=current_snapshot.score.text(),
+            )
+            await STATE.update(
+                event="TEAM1_PROFILE_SHADOW_STEP",
+                message=(
+                    f"Наблюдение шаг {shadow_step}: "
+                    f"{selection.selected_team} @ {selected_odd}"
+                ),
+                team1_profile=runtime,
+            )
+
+            goal = None
+            if shadow_step == 1 and not current_snapshot.period:
+                started = await self._wait_for_match_start(selected_match)
+                if started is None:
+                    await self._finalize_team1_profile_observation(
+                        match_id=match_id,
+                        match_name=match_name,
+                        steps=0,
+                        reason="MATCH_START_UNAVAILABLE",
+                    )
+                    return
+                scorer_at_start = detect_scorer(
+                    current_snapshot.score, started.score
+                )
+                if scorer_at_start != Scorer.UNKNOWN:
+                    goal = (started, scorer_at_start)
+                current_snapshot = started
+
+            if goal is None:
+                goal = await self._wait_for_goal(
+                    browser, selected_match, current_snapshot
+                )
+            if goal is None:
+                await self._finalize_team1_profile_observation(
+                    match_id=match_id,
+                    match_name=match_name,
+                    steps=shadow_step - 1,
+                    reason="GOAL_WAIT_ENDED",
+                )
+                return
+
+            new_snapshot, scorer = goal
+            if scorer not in {Scorer.TEAM_1, Scorer.TEAM_2}:
+                await self._finalize_team1_profile_observation(
+                    match_id=match_id,
+                    match_name=match_name,
+                    steps=max(0, shadow_step - 1),
+                    reason="AMBIGUOUS_SCORE_CHANGE",
+                )
+                return
+
+            result = "WIN" if scorer == selection.selected_side else "LOSE"
+            scorer_name = (
+                new_snapshot.team1
+                if scorer == Scorer.TEAM_1
+                else new_snapshot.team2
+            )
+            runtime = await self._team1_profile.record_step(
+                match_id=match_id,
+                step=shadow_step,
+                result=result,
+                current_odds=selected_odd,
+                score_before=current_snapshot.score.text(),
+                score_after=new_snapshot.score.text(),
+                scorer=scorer_name,
+            )
+            await REPOSITORY.log(
+                "TEAM1_PROFILE_SHADOW_STEP",
+                (
+                    f"match={match_name}; step={shadow_step}; "
+                    f"selected_team={selection.selected_team}; "
+                    f"selected_side={selection.selected_side.value}; "
+                    f"odds={selected_odd}; result={result}; "
+                    f"score={current_snapshot.score.text()}->{new_snapshot.score.text()}"
+                ),
+            )
+            await STATE.update(
+                event="TEAM1_PROFILE_OBSERVATION_COMPLETED"
+                if result == "WIN"
+                else "TEAM1_PROFILE_SHADOW_STEP",
+                message=(
+                    f"TEAM1 PROFILE: {match_name} закрылся на шаге {shadow_step}"
+                    if result == "WIN"
+                    else f"Наблюдение шаг {shadow_step}: LOSE"
+                ),
+                team1_profile=runtime,
+            )
+            if result == "WIN":
+                return
+
+            current_snapshot = new_snapshot
+
+        await self._finalize_team1_profile_observation(
             match_id=match_id,
             match_name=match_name,
             steps=self._config.max_steps,
