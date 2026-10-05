@@ -62,6 +62,11 @@ from backend.app.team1_profile import (
     is_team1_profile_allowed,
     rejection_reason as team1_profile_rejection_reason,
 )
+from backend.app.favorite_shadow import (
+    FAVORITE_SHADOW_MAX_STEPS,
+    FavoriteShadowRuntime,
+    select_favorite_with_lower_odds,
+)
 
 from .budget import DemoBudget
 from .config import CONFIG
@@ -278,6 +283,20 @@ class DemoEngine:
         self._accepted_bet_in_progress = False
         self._long_series = LongSeriesGate(REPOSITORY.save_long_series_runtime)
         self._team1_profile = Team1ProfileRuntime(REPOSITORY.save_team1_profile_runtime)
+        self._favorite_shadow = FavoriteShadowRuntime(
+            REPOSITORY.save_favorite_shadow_runtime
+        )
+        self._favorite_shadow_tasks: dict[str, asyncio.Task[None]] = {}
+
+    async def _load_favorite_shadow(self, mode: str) -> dict[str, Any]:
+        persisted = await REPOSITORY.get_favorite_shadow_runtime(mode)
+        runtime = await self._favorite_shadow.load(
+            enabled=self._config.favorite_shadow_enabled,
+            mode=mode,
+            persisted=persisted,
+        )
+        await STATE.update(favorite_shadow=runtime)
+        return runtime
 
     async def _load_team1_profile(self, mode: str) -> dict[str, Any]:
         persisted = await REPOSITORY.get_team1_profile_runtime(mode)
