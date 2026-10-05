@@ -135,6 +135,21 @@ class LongSeriesGateTests(unittest.IsolatedAsyncioTestCase):
         runtime = await self.gate.finish_allowed_match("B")
         self.assertEqual(runtime["state"], "WAITING_FOR_LONG")
 
+    async def test_unused_allowance_can_be_released_for_next_candidate(self):
+        await self._finish("A", "A1 — A2", 6)
+        self.assertEqual(
+            await self.gate.claim_match("B", "B1 — B2"),
+            LongSeriesDecision.ALLOW,
+        )
+        runtime = await self.gate.release_allowed_match("B")
+        self.assertEqual(runtime["state"], "NEXT_MATCH_ALLOWED")
+        self.assertTrue(runtime["next_match_after_long_allowed"])
+        self.assertFalse(runtime["permission_consumed"])
+        self.assertEqual(
+            await self.gate.claim_match("C", "C1 — C2"),
+            LongSeriesDecision.ALLOW,
+        )
+
     async def test_step_five_is_short_and_keeps_waiting(self):
         runtime = await self._finish("A", "A1 — A2", 5)
         self.assertFalse(runtime["last_observed_is_long"])
