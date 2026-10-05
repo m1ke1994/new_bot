@@ -1148,6 +1148,8 @@ class DemoEngine:
                 with suppress(asyncio.CancelledError):
                     await task
 
+        await self._cancel_favorite_shadow_tasks()
+
         async with self._control_lock:
             if self._task is task:
                 self._task = None
@@ -1626,6 +1628,11 @@ class DemoEngine:
             await REPOSITORY.log("MATCH_ALREADY_STARTED", str(error))
             return
         await REPOSITORY.log("MATCH_OPENED", opened["url"])
+        await self._start_favorite_shadow_task(
+            selected_match=selected_match,
+            match_name=match_name,
+            match_url=opened["url"],
+        )
 
         readiness_elapsed_seconds = 0.0
         readiness_waiter = getattr(league, "wait_match_content_ready", None)
