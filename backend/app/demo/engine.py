@@ -319,6 +319,407 @@ class DemoEngine:
         await STATE.update(long_series=runtime)
         return runtime
 
+    async def _cancel_favorite_shadow_tasks(self) -> None:
+        tasks = [
+            task
+            for task in self._favorite_shadow_tasks.values()
+            if not task.done()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._favorite_shadow_tasks.clear()
+
+    async def _favorite_shadow_log(self, event: str, message: str) -> None:
+        await REPOSITORY.log(f"FAVORITE_SHADOW_{event}", message)
+
+    async def _start_favorite_shadow_task(
+        self,
+        *,
+        selected_match: dict[str, Any],
+        match_name: str,
+        match_url: str,
+    ) -> None:
+        if (
+            not self._config.favorite_shadow_enabled
+            or self._config.strategy_type != StrategyType.NEXT_GOAL
+        ):
+            return
+
+        match_id = next_goal_match_identity(selected_match) or str(match_url)
+        if not match_id or not match_url:
+            await REPOSITORY.log(
+                "FAVORITE_SHADOW_SKIPPED",
+                f"match={match_name}; reason=MISSING_MATCH_ID_OR_URL",
+            )
+            return
+        existing = self._favorite_shadow_tasks.get(match_id)
+        if existing is not None and not existing.done():
+            return
+        if await self._favorite_shadow.has_match(match_id):
+            return
+
+        task = asyncio.create_task(
+            self._run_favorite_shadow_observer(
+                match_id=match_id,
+                match_name=match_name,
+                match_url=match_url,
+                team1=str(selected_match.get("team1") or ""),
+                team2=str(selected_match.get("team2") or ""),
+            ),
+            name=f"favorite-shadow-{match_id}",
+        )
+        self._favorite_shadow_tasks[match_id] = task
+
+        def _drop_finished(done_task: asyncio.Task[None]) -> None:
+            if self._favorite_shadow_tasks.get(match_id) is done_task:
+                self._favorite_shadow_tasks.pop(match_id, None)
+
+        task.add_done_callback(_drop_finished)
+        await REPOSITORY.log(
+            "FAVORITE_SHADOW_TASK_STARTED",
+            f"match={match_name}; match_id={match_id}; max_steps={FAVORITE_SHADOW_MAX_STEPS}",
+        )
+
+    async def _favorite_shadow_initial_snapshot_and_odds(
+        self,
+        page: Page,
+        *,
+        match_id: str,
+        match_name: str,
+        team1: str,
+        team2: str,
+    ) -> tuple[ScoreboardSnapshot, Any] | None:
+        browser = MatchBrowser(page)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 60.0
+        last_error = "INITIAL_ODDS_NOT_READY"
+
+        while not self._stop_event.is_set() and loop.time() < deadline:
+            try:
+                snapshot = await browser.snapshot()
+            except Exception as error:
+                last_error = f"SCORE_READ_FAILED:{type(error).__name__}"
+                await asyncio.sleep(max(0.1, CONFIG.score_poll_interval))
+                continue
+
+            if snapshot.score.team1 != 0 or snapshot.score.team2 != 0:
+                runtime = await self._favorite_shadow.record_skipped(
+                    match_id=match_id,
+                    match_name=match_name,
+                    team1=team1 or snapshot.team1,
+                    team2=team2 or snapshot.team2,
+                    score=snapshot.score.text(),
+                    reason="START_SCORE_ALREADY_CHANGED",
+                )
+                await STATE.update(favorite_shadow=runtime)
+                await REPOSITORY.log(
+                    "FAVORITE_SHADOW_SKIPPED",
+                    (
+                        f"match={match_name}; score={snapshot.score.text()}; "
+                        "reason=START_SCORE_ALREADY_CHANGED"
+                    ),
+                )
+                return None
+
+            try:
+                odds = await read_next_goal_odds(
+                    page,
+                    snapshot.team1,
+                    snapshot.team2,
+                    snapshot.score.team1,
+                    snapshot.score.team2,
+                    self._favorite_shadow_log,
+                    read_only=True,
+                )
+                return snapshot, odds
+            except Exception as error:
+                last_error = f"{type(error).__name__}:{error}"
+                await asyncio.sleep(max(0.1, CONFIG.score_poll_interval))
+
+        runtime = await self._favorite_shadow.record_skipped(
+            match_id=match_id,
+            match_name=match_name,
+            team1=team1,
+            team2=team2,
+            score="0:0",
+            reason="INITIAL_ODDS_TIMEOUT",
+        )
+        await STATE.update(favorite_shadow=runtime)
+        await REPOSITORY.log(
+            "FAVORITE_SHADOW_SKIPPED",
+            f"match={match_name}; reason=INITIAL_ODDS_TIMEOUT; last_error={last_error}",
+        )
+        return None
+
+    async def _favorite_shadow_read_step_odds(
+        self,
+        page: Page,
+        snapshot: ScoreboardSnapshot,
+        favorite_side: Scorer,
+    ) -> tuple[float | None, bool]:
+        try:
+            odds = await read_next_goal_odds(
+                page,
+                snapshot.team1,
+                snapshot.team2,
+                snapshot.score.team1,
+                snapshot.score.team2,
+                self._favorite_shadow_log,
+                read_only=True,
+            )
+            selected_odd, _ = odds_for_selected_side(odds, favorite_side)
+            return float(selected_odd), True
+        except Exception as error:
+            await REPOSITORY.log(
+                "FAVORITE_SHADOW_MARKET_UNAVAILABLE",
+                (
+                    f"score={snapshot.score.text()}; side={favorite_side.value}; "
+                    f"{type(error).__name__}: {error}"
+                ),
+            )
+            return None, False
+
+    async def _favorite_shadow_wait_for_goal(
+        self,
+        page: Page,
+        baseline: ScoreboardSnapshot,
+    ) -> tuple[ScoreboardSnapshot, Scorer]:
+        browser = MatchBrowser(page)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 30.0 * 60.0
+        consecutive_errors = 0
+
+        while not self._stop_event.is_set() and loop.time() < deadline:
+            try:
+                current = await browser.snapshot()
+                consecutive_errors = 0
+            except Exception as error:
+                consecutive_errors += 1
+                if consecutive_errors >= 30:
+                    raise RuntimeError(
+                        f"SCORE_READ_FAILED:{type(error).__name__}:{error}"
+                    ) from error
+                await asyncio.sleep(max(0.1, CONFIG.score_poll_interval))
+                continue
+
+            if current.score == baseline.score:
+                await asyncio.sleep(max(0.1, CONFIG.score_poll_interval))
+                continue
+
+            scorer = detect_scorer(baseline.score, current.score)
+            if scorer in {Scorer.TEAM_1, Scorer.TEAM_2}:
+                return current, scorer
+            if scorer == Scorer.AMBIGUOUS_SCORE_CHANGE:
+                raise RuntimeError(
+                    f"AMBIGUOUS_MULTI_GOAL_DELTA:{baseline.score.text()}->{current.score.text()}"
+                )
+            raise RuntimeError(
+                f"INVALID_SCORE_TRANSITION:{baseline.score.text()}->{current.score.text()}"
+            )
+
+        if self._stop_event.is_set():
+            raise asyncio.CancelledError
+        raise RuntimeError("GOAL_WAIT_TIMEOUT")
+
+    async def _run_favorite_shadow_observer(
+        self,
+        *,
+        match_id: str,
+        match_name: str,
+        match_url: str,
+        team1: str,
+        team2: str,
+    ) -> None:
+        page: Page | None = None
+        observation_started = False
+        try:
+            create_aux_page = getattr(self.browser_manager, "create_aux_page", None)
+            if not callable(create_aux_page):
+                runtime = await self._favorite_shadow.record_skipped(
+                    match_id=match_id,
+                    match_name=match_name,
+                    team1=team1,
+                    team2=team2,
+                    reason="AUX_PAGE_UNAVAILABLE",
+                )
+                await STATE.update(favorite_shadow=runtime)
+                return
+
+            page = await create_aux_page()
+            await page.goto(
+                match_url,
+                wait_until="domcontentloaded",
+                timeout=15_000,
+            )
+            readiness = LeagueBrowser(
+                page,
+                exclude_teams_enabled=False,
+            )
+            await readiness.wait_match_content_ready(timeout_ms=30_000)
+
+            initial = await self._favorite_shadow_initial_snapshot_and_odds(
+                page,
+                match_id=match_id,
+                match_name=match_name,
+                team1=team1,
+                team2=team2,
+            )
+            if initial is None:
+                return
+            snapshot, initial_odds = initial
+            favorite = select_favorite_with_lower_odds(
+                snapshot.team1,
+                snapshot.team2,
+                initial_odds,
+            )
+            if favorite is None:
+                runtime = await self._favorite_shadow.record_skipped(
+                    match_id=match_id,
+                    match_name=match_name,
+                    team1=snapshot.team1,
+                    team2=snapshot.team2,
+                    score=snapshot.score.text(),
+                    reason="EQUAL_INITIAL_ODDS",
+                )
+                await STATE.update(favorite_shadow=runtime)
+                await REPOSITORY.log(
+                    "FAVORITE_SHADOW_SKIPPED",
+                    f"match={match_name}; reason=EQUAL_INITIAL_ODDS",
+                )
+                return
+
+            runtime = await self._favorite_shadow.start_observation(
+                match_id=match_id,
+                match_name=match_name,
+                team1=snapshot.team1,
+                team2=snapshot.team2,
+                favorite_team=favorite.selected_team,
+                favorite_side=favorite.selected_side.value,
+                initial_favorite_odds=favorite.selected_odds,
+                outsider_team=favorite.other_team,
+                initial_outsider_odds=favorite.other_odds,
+            )
+            observation_started = True
+            await STATE.update(favorite_shadow=runtime)
+            await REPOSITORY.log(
+                "FAVORITE_SHADOW_OBSERVATION_STARTED",
+                (
+                    f"match={match_name}; favorite={favorite.selected_team}; "
+                    f"side={favorite.selected_side.value}; favorite_odds={favorite.selected_odds}; "
+                    f"outsider={favorite.other_team}; outsider_odds={favorite.other_odds}"
+                ),
+            )
+
+            current_snapshot = snapshot
+            current_favorite_odds: float | None = float(favorite.selected_odds)
+            market_ready = True
+
+            for step in range(1, FAVORITE_SHADOW_MAX_STEPS + 1):
+                if self._stop_event.is_set():
+                    raise asyncio.CancelledError
+
+                if step > 1:
+                    current_favorite_odds, market_ready = (
+                        await self._favorite_shadow_read_step_odds(
+                            page,
+                            current_snapshot,
+                            favorite.selected_side,
+                        )
+                    )
+
+                runtime = await self._favorite_shadow.begin_step(
+                    match_id=match_id,
+                    step=step,
+                    score_before=current_snapshot.score.text(),
+                    favorite_odds=current_favorite_odds,
+                    market_ready=market_ready,
+                )
+                await STATE.update(favorite_shadow=runtime)
+
+                new_snapshot, scorer = await self._favorite_shadow_wait_for_goal(
+                    page,
+                    current_snapshot,
+                )
+                scorer_name = (
+                    new_snapshot.team1
+                    if scorer == Scorer.TEAM_1
+                    else new_snapshot.team2
+                )
+                result = "WIN" if scorer == favorite.selected_side else "LOSE"
+                runtime = await self._favorite_shadow.record_goal(
+                    match_id=match_id,
+                    step=step,
+                    result=result,
+                    score_before=current_snapshot.score.text(),
+                    score_after=new_snapshot.score.text(),
+                    scorer=scorer_name,
+                    favorite_odds=current_favorite_odds,
+                    market_ready=market_ready,
+                )
+                await STATE.update(favorite_shadow=runtime)
+                await REPOSITORY.log(
+                    "FAVORITE_SHADOW_STEP_SETTLED",
+                    (
+                        f"match={match_name}; step={step}; favorite={favorite.selected_team}; "
+                        f"result={result}; odds={current_favorite_odds}; "
+                        f"market_ready={str(market_ready).lower()}; "
+                        f"score={current_snapshot.score.text()}->{new_snapshot.score.text()}; "
+                        f"scorer={scorer_name}"
+                    ),
+                )
+                if result == "WIN":
+                    await REPOSITORY.log(
+                        "FAVORITE_SHADOW_COMPLETED",
+                        f"match={match_name}; favorite={favorite.selected_team}; winning_step={step}",
+                    )
+                    return
+                if step >= FAVORITE_SHADOW_MAX_STEPS:
+                    await REPOSITORY.log(
+                        "FAVORITE_SHADOW_EXHAUSTED",
+                        (
+                            f"match={match_name}; favorite={favorite.selected_team}; "
+                            f"no favorite goal in first {FAVORITE_SHADOW_MAX_STEPS} goals"
+                        ),
+                    )
+                    return
+
+                current_snapshot = new_snapshot
+
+        except asyncio.CancelledError:
+            if observation_started:
+                runtime = await self._favorite_shadow.interrupt(
+                    match_id=match_id,
+                    reason="WORKER_STOPPED",
+                )
+                await STATE.update(favorite_shadow=runtime)
+            raise
+        except Exception as error:
+            if observation_started:
+                runtime = await self._favorite_shadow.interrupt(
+                    match_id=match_id,
+                    reason=f"{type(error).__name__}:{error}",
+                )
+                await STATE.update(favorite_shadow=runtime)
+            else:
+                runtime = await self._favorite_shadow.record_skipped(
+                    match_id=match_id,
+                    match_name=match_name,
+                    team1=team1,
+                    team2=team2,
+                    reason=f"{type(error).__name__}:{error}",
+                )
+                await STATE.update(favorite_shadow=runtime)
+            await REPOSITORY.log(
+                "FAVORITE_SHADOW_ERROR",
+                f"match={match_name}; {type(error).__name__}: {error}",
+            )
+        finally:
+            close_aux_page = getattr(self.browser_manager, "close_aux_page", None)
+            if callable(close_aux_page):
+                await close_aux_page(page)
+
     async def _complete_long_series_allowed_match(
         self, match_id: str, *, reason: str = "allowed_match_finished"
     ) -> None:
