@@ -1360,6 +1360,15 @@ onBeforeUnmount(() => {
               >
             </div>
 
+            <label v-if="strategyConfig.strategy_type === 'NEXT_GOAL'" :class="['match-filter-option', { 'filter-disabled': !strategyConfig.favorite_shadow_enabled }]">
+              <input v-model="strategyConfig.favorite_shadow_enabled" type="checkbox" :disabled="state.running || actionPending" @change="saveMatchFilters">
+              <span class="filter-copy">
+                <strong>FAVORITE SHADOW</strong>
+                <small>Отдельно и без ставок отслеживать фаворита по меньшему стартовому кф до его гола. Сохраняются шаги 1–9 и доступность рынка на каждом шаге.</small>
+              </span>
+              <span class="filter-state">{{ strategyConfig.favorite_shadow_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
+            </label>
+
           </div>
 
           <div v-if="strategyConfig.strategy_type === 'NEXT_GOAL'" class="long-series-status">
@@ -1374,6 +1383,13 @@ onBeforeUnmount(() => {
             <div><span>Условие</span><strong>Команда 1</strong><small>выбрана по большему кф</small></div>
             <div><span>Коэффициент</span><strong>&lt; {{ strategyConfig.team1_profile_max_odds }}</strong></div>
             <div><span>Наблюдений</span><strong>{{ (team1Profile.observations || []).length }}</strong></div>
+          </div>
+
+          <div v-if="strategyConfig.strategy_type === 'NEXT_GOAL' && strategyConfig.favorite_shadow_enabled" class="long-series-status">
+            <div><span>FAVORITE SHADOW</span><strong>{{ favoriteShadow.state || 'READY' }}</strong></div>
+            <div><span>Активно</span><strong>{{ favoriteShadowActive.length }}</strong><small>отдельных read-only вкладок</small></div>
+            <div><span>Завершено</span><strong>{{ favoriteShadow.stats?.completed || 0 }}</strong></div>
+            <div><span>1 / 2 / 3 / 4 шаг</span><strong>{{ favoriteShadowWins['1'] || 0 }} / {{ favoriteShadowWins['2'] || 0 }} / {{ favoriteShadowWins['3'] || 0 }} / {{ favoriteShadowWins['4'] || 0 }}</strong></div>
           </div>
 
         </div>
@@ -1517,6 +1533,82 @@ onBeforeUnmount(() => {
 
             <strong v-else>—</strong>
 
+          </article>
+
+        </section>
+
+        <section v-if="strategyConfig.strategy_type === 'NEXT_GOAL' && (strategyConfig.favorite_shadow_enabled || favoriteShadow.enabled)" class="full-width-section observation-section">
+
+          <article class="panel observation-panel">
+            <header class="panel-header compact">
+              <div><span class="eyebrow amber">FAVORITE SHADOW</span><h2>Фаворит до следующего гола</h2></div>
+              <span :class="['observation-state', String(favoriteShadow.state || 'OFF').toLowerCase()]">FAVORITE: {{ favoriteShadow.state || 'OFF' }}</span>
+            </header>
+
+            <div v-if="!favoriteShadow.enabled" class="panel-empty">FAVORITE SHADOW выключен</div>
+            <template v-else>
+              <div class="observation-history">
+                <h3>Активные наблюдения</h3>
+                <div class="table-wrap">
+                  <table>
+                    <thead><tr><th>Матч</th><th>Фаворит</th><th>Сторона</th><th>Старт. кф</th><th>Шаг</th><th>Счёт</th><th>Кф шага</th><th>Рынок</th></tr></thead>
+                    <tbody>
+                      <tr v-for="item in favoriteShadowActive" :key="`favorite-active-${item.match_id}`">
+                        <td>{{ item.match_name }}</td>
+                        <td>{{ item.favorite_team }}</td>
+                        <td>{{ item.favorite_side_label }}</td>
+                        <td>{{ show(item.initial_favorite_odds) }}</td>
+                        <td>{{ item.shadow_step || 1 }} / {{ favoriteShadow.max_steps || 9 }}</td>
+                        <td>{{ show(item.score_before) }} → {{ show(item.score_after) }}</td>
+                        <td>{{ show(item.current_favorite_odds) }}</td>
+                        <td>{{ item.market_ready ? 'READY' : 'NO ODDS' }}</td>
+                      </tr>
+                      <tr v-if="!favoriteShadowActive.length"><td colspan="8" class="empty-row">Активных наблюдений сейчас нет</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div class="observation-history">
+                <h3>Распределение закрытия FAVORITE SHADOW</h3>
+                <div class="table-wrap">
+                  <table>
+                    <thead><tr><th>Шаг</th><th v-for="stepNumber in 9" :key="`favorite-step-head-${stepNumber}`">{{ stepNumber }}</th><th>9+</th><th>INTERRUPTED</th><th>SKIPPED</th></tr></thead>
+                    <tbody>
+                      <tr>
+                        <td>Серий</td>
+                        <td v-for="stepNumber in 9" :key="`favorite-step-value-${stepNumber}`">{{ favoriteShadowWins[String(stepNumber)] || 0 }}</td>
+                        <td>{{ favoriteShadow.stats?.exhausted || 0 }}</td>
+                        <td>{{ favoriteShadow.stats?.interrupted || 0 }}</td>
+                        <td>{{ favoriteShadow.stats?.skipped || 0 }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div class="observation-history">
+                <h3>Последние наблюдения фаворита</h3>
+                <div class="table-wrap">
+                  <table>
+                    <thead><tr><th>Матч</th><th>Фаворит</th><th>Старт. кф</th><th>Аутсайдер</th><th>Кф аутс.</th><th>Шаг гола</th><th>Статус</th><th>Причина</th></tr></thead>
+                    <tbody>
+                      <tr v-for="item in favoriteShadowHistory" :key="`favorite-${item.match_id}-${item.completed_at}`">
+                        <td>{{ item.match_name }}</td>
+                        <td>{{ show(item.favorite_team) }}</td>
+                        <td>{{ show(item.initial_favorite_odds) }}</td>
+                        <td>{{ show(item.outsider_team) }}</td>
+                        <td>{{ show(item.initial_outsider_odds) }}</td>
+                        <td>{{ item.winning_step || (item.completion_status === 'EXHAUSTED' ? '9+' : '—') }}</td>
+                        <td>{{ show(item.completion_status) }}</td>
+                        <td>{{ show(item.interruption_reason) }}</td>
+                      </tr>
+                      <tr v-if="!favoriteShadowHistory.length"><td colspan="8" class="empty-row">Наблюдений пока нет</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </template>
           </article>
 
         </section>
