@@ -115,6 +115,7 @@ const state = ref({
 
   long_series: {
     enabled: false,
+    min_step: 6,
     state: 'OFF',
     last_observed_series_length: null,
     last_observed_series_match: null,
@@ -1280,7 +1281,7 @@ onBeforeUnmount(() => {
 
               <input v-model="strategyConfig.long_series_enabled" type="checkbox" :disabled="state.running || actionPending" @change="saveMatchFilters">
 
-              <span class="filter-copy"><strong>LONG_SERIES</strong><small>Вход только в первый новый матч после длинной серии 6+</small></span>
+              <span class="filter-copy"><strong>LONG_SERIES</strong><small>Вход только в первый новый матч после длинной серии {{ state.long_series?.min_step || 6 }}+</small></span>
 
               <span class="filter-state">{{ strategyConfig.long_series_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
 
