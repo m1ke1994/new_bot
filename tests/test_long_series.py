@@ -304,6 +304,62 @@ class LongSeriesGateTests(unittest.IsolatedAsyncioTestCase):
             LongSeriesDecision.BYPASS,
         )
 
+    async def test_legacy_step_four_allowance_is_discarded_on_load(self):
+        gate = LongSeriesGate()
+        runtime = await gate.load(
+            enabled=True,
+            mode="LIVE",
+            persisted={
+                "enabled": True,
+                "state": "NEXT_MATCH_ALLOWED",
+                "last_observed_series_length": 4,
+                "last_observed_is_long": True,
+                "next_match_after_long_allowed": True,
+                "next_match": "ALLOWED",
+            },
+        )
+
+        self.assertEqual(runtime["min_step"], 6)
+        self.assertEqual(runtime["state"], "WAITING_FOR_LONG")
+        self.assertFalse(runtime["last_observed_is_long"])
+        self.assertFalse(runtime["next_match_after_long_allowed"])
+        self.assertEqual(
+            await gate.claim_match("B", "B1 — B2"),
+            LongSeriesDecision.SHADOW,
+        )
+
+    async def test_legacy_three_loss_active_flag_does_not_unlock_on_restart(self):
+        gate = LongSeriesGate()
+        runtime = await gate.load(
+            enabled=True,
+            mode="LIVE",
+            persisted={
+                "enabled": True,
+                "state": "WAITING_FOR_LONG",
+                "active_observation": {
+                    "match_id": "A",
+                    "match_name": "A1 — A2",
+                    "shadow_step": 3,
+                    "series_length": 3,
+                    "long_detected": True,
+                    "long_detected_at_step": 3,
+                    "steps": [
+                        {"step": 1, "result": "LOSE"},
+                        {"step": 2, "result": "LOSE"},
+                        {"step": 3, "result": "LOSE"},
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(runtime["state"], "WAITING_FOR_LONG")
+        self.assertFalse(runtime["next_match_after_long_allowed"])
+        self.assertIsNone(runtime["active_observation"])
+        self.assertEqual(
+            await gate.claim_match("B", "B1 — B2"),
+            LongSeriesDecision.SHADOW,
+        )
+
     async def test_restart_preserves_proven_long_from_active_observation(self):
         with tempfile.TemporaryDirectory() as directory:
             repository = DemoRepository(Path(directory))
