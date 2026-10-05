@@ -221,6 +221,7 @@ button { font: inherit; }
 .strategy-config .match-filter-option.filter-disabled { border-color: var(--line); background: #0d131c; opacity: .62; }
 .strategy-config .match-filter-option:has(input:disabled) { cursor: not-allowed; }
 .strategy-config .match-filter-option input[type="checkbox"] { width: 18px; min-height: 18px; margin: 0; padding: 0; accent-color: var(--green); }
+.strategy-config .profile-odds-input { grid-column: 2 / 4; width: 100%; min-height: 34px; margin: -2px 0 0; }
 .filter-copy strong, .filter-copy small { display: block; }
 .filter-copy strong { color: var(--text); font-size: 12px; letter-spacing: 0; }
 .filter-copy small { margin-top: 4px; color: var(--muted); font-size: 10px; font-weight: 500; letter-spacing: 0; line-height: 1.4; }
