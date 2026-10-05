@@ -68,6 +68,9 @@ class DemoRepository:
                 CREATE TABLE IF NOT EXISTS team1_profile_runtime (
                     mode TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS favorite_shadow_runtime (
+                    mode TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
             """)
             sequence_columns = {
                 str(row["name"])
@@ -188,6 +191,39 @@ class DemoRepository:
                 db.execute(
                     """
                     INSERT INTO team1_profile_runtime(mode, payload, updated_at)
+                    VALUES(?, ?, ?)
+                    ON CONFLICT(mode) DO UPDATE SET
+                        payload=excluded.payload,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        expected_mode,
+                        json.dumps(payload, ensure_ascii=False),
+                        local_now(),
+                    ),
+                )
+
+    async def get_favorite_shadow_runtime(self, mode: str) -> dict[str, Any] | None:
+        await self.initialize()
+        expected_mode = mode.strip().upper()
+        async with self._lock:
+            with self._connection() as db:
+                row = db.execute(
+                    "SELECT payload FROM favorite_shadow_runtime WHERE mode=?",
+                    (expected_mode,),
+                ).fetchone()
+        return json.loads(row["payload"]) if row is not None else None
+
+    async def save_favorite_shadow_runtime(
+        self, mode: str, payload: dict[str, Any]
+    ) -> None:
+        await self.initialize()
+        expected_mode = mode.strip().upper()
+        async with self._lock:
+            with self._connection() as db:
+                db.execute(
+                    """
+                    INSERT INTO favorite_shadow_runtime(mode, payload, updated_at)
                     VALUES(?, ?, ?)
                     ON CONFLICT(mode) DO UPDATE SET
                         payload=excluded.payload,
@@ -440,6 +476,7 @@ class DemoRepository:
                 db.execute("DELETE FROM sequence_blocked_matches")
                 db.execute("DELETE FROM long_series_runtime")
                 db.execute("DELETE FROM team1_profile_runtime")
+                db.execute("DELETE FROM favorite_shadow_runtime")
                 db.execute(
                     "INSERT INTO strategy_config VALUES (1, ?, ?, ?)",
                     (json.dumps(DEFAULT_STRATEGY_CONFIG.to_dict()), now, now),
