@@ -39,6 +39,8 @@ class StrategyConfig:
     blocked_events_switch_enabled: bool
     max_three_steps_enabled: bool
     long_series_enabled: bool
+    team1_profile_enabled: bool
+    team1_profile_max_odds: Decimal
     run_time_limit_enabled: bool
     run_duration_hours: int
     strategy_type: StrategyType
@@ -65,6 +67,10 @@ class StrategyConfig:
         long_series_enabled = _boolean_setting(
             payload, "long_series_enabled", default=False
         )
+        team1_profile_enabled = _boolean_setting(
+            payload, "team1_profile_enabled", default=False
+        )
+        team1_profile_max_odds = money(payload.get("team1_profile_max_odds", "2.00"))
         run_time_limit_enabled = _boolean_setting(
             payload, "run_time_limit_enabled", default=False
         )
@@ -87,6 +93,8 @@ class StrategyConfig:
             blocked_events_switch_enabled,
             max_three_steps_enabled,
             long_series_enabled,
+            team1_profile_enabled,
+            team1_profile_max_odds,
             run_time_limit_enabled,
             run_duration_hours,
             strategy_type,
@@ -103,6 +111,8 @@ class StrategyConfig:
             raise ValueError("max_steps must be at least one")
         if len(self.stakes) != self.max_steps or any(value <= 0 for value in self.stakes):
             raise ValueError("stakes must contain one positive amount per step")
+        if self.team1_profile_max_odds <= 0:
+            raise ValueError("team1_profile_max_odds must be greater than zero")
         if self.run_duration_hours not in {3, 6, 12, 24}:
             raise ValueError("run_duration_hours must be one of 3, 6, 12, 24")
 
@@ -118,6 +128,8 @@ class StrategyConfig:
             "blocked_events_switch_enabled": self.blocked_events_switch_enabled,
             "max_three_steps_enabled": self.max_three_steps_enabled,
             "long_series_enabled": self.long_series_enabled,
+            "team1_profile_enabled": self.team1_profile_enabled,
+            "team1_profile_max_odds": float(self.team1_profile_max_odds),
             "run_time_limit_enabled": self.run_time_limit_enabled,
             "run_duration_hours": self.run_duration_hours,
             "strategy_type": self.strategy_type.value,
