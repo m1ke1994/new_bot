@@ -31,6 +31,14 @@ class FrontendControlTests(unittest.TestCase):
         self.assertIn("Нет активной ставки · LONG_SERIES наблюдает матчи", self.source)
         self.assertIn("Последние наблюдения", self.source)
 
+    def test_team1_profile_filter_controls_and_observation_exist(self):
+        self.assertIn("team1_profile_enabled", self.source)
+        self.assertIn("team1_profile_max_odds", self.source)
+        self.assertIn("TEAM_1 + КФ ниже", self.source)
+        self.assertIn("TEAM_1 PROFILE SHADOW", self.source)
+        self.assertIn("team1ProfileObservationHistory", self.source)
+        self.assertIn("TEAM1 PROFILE наблюдает матч", self.source)
+
     def test_runtime_limit_controls_offer_only_supported_durations(self):
         self.assertIn("run_time_limit_enabled", self.source)
         self.assertIn("run_duration_hours", self.source)
