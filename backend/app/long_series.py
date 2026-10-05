@@ -395,6 +395,25 @@ class LongSeriesGate:
             await self._save_locked()
             return deepcopy(self._runtime)
 
+    async def release_allowed_match(self, match_id: str) -> dict[str, Any]:
+        """Return an unused LONG allowance when another entry filter rejects the match."""
+        async with self._lock:
+            if (
+                self._runtime["enabled"]
+                and self._runtime["state"] == LongSeriesState.LIVE_MATCH_ACTIVE.value
+                and str(match_id) == self._runtime.get("active_match_id")
+            ):
+                self._runtime.update(
+                    state=LongSeriesState.NEXT_MATCH_ALLOWED.value,
+                    next_match_after_long_allowed=True,
+                    permission_consumed=False,
+                    active_match_id=None,
+                    active_match=None,
+                    next_match="ALLOWED",
+                )
+                await self._save_locked()
+            return deepcopy(self._runtime)
+
     async def finish_allowed_match(self, match_id: str) -> dict[str, Any]:
         async with self._lock:
             if (
