@@ -1577,7 +1577,7 @@ onBeforeUnmount(() => {
                     <tbody>
                       <tr>
                         <td>Серий</td>
-                        <td v-for="stepNumber in 9" :key="`favorite-step-value-${stepNumber}`">{{ favoriteShadowWins[String(stepNumber)] || 0 }}</td>
+                        <td v-for="stepNumber in 9" :key="`favorite-step-value-${stepNumber}`">{{ favoriteShadowWins[stepNumber] || 0 }}</td>
                         <td>{{ favoriteShadow.stats?.exhausted || 0 }}</td>
                         <td>{{ favoriteShadow.stats?.interrupted || 0 }}</td>
                         <td>{{ favoriteShadow.stats?.skipped || 0 }}</td>
