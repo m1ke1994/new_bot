@@ -1011,6 +1011,12 @@ class DemoEngine:
             completed_match_ids = await REPOSITORY.completed_next_goal_match_ids(
                 mode=self._mode,
             )
+            profile_runtime = await self._team1_profile.snapshot()
+            profile_observed_match_ids = {
+                str(item.get("match_id"))
+                for item in (profile_runtime.get("observations") or [])
+                if item.get("match_id")
+            } if self._config.team1_profile_enabled else set()
             for item in matches:
                 excluded_team = excluded_team_in_match(
                     item["team1"],
@@ -1025,6 +1031,12 @@ class DemoEngine:
                     )
                     continue
                 match_id = next_goal_match_identity(item)
+                if match_id and match_id in profile_observed_match_ids:
+                    await REPOSITORY.log(
+                        "TEAM1_PROFILE_OBSERVED_MATCH_SKIPPED",
+                        f"match_id={match_id}; already recorded in observation",
+                    )
+                    continue
                 if match_id and match_id in completed_match_ids:
                     if match_id not in logged_completed_skips:
                         await REPOSITORY.log(
@@ -1271,7 +1283,10 @@ class DemoEngine:
             return
         odds_result = await (
             self._wait_for_odds(snapshot, selected_match, read_only=True)
-            if long_series_decision == LongSeriesDecision.SHADOW
+            if (
+                long_series_decision == LongSeriesDecision.SHADOW
+                or self._config.team1_profile_enabled
+            )
             else self._wait_for_odds(snapshot, selected_match)
         )
         if odds_result is None:
@@ -1324,7 +1339,80 @@ class DemoEngine:
                 selection=selection,
             )
             return
-        if not is_initial_odds_allowed(
+
+        if self._config.team1_profile_enabled:
+            profile_allowed = is_team1_profile_allowed(
+                selection.selected_side.value,
+                selection.selected_odds,
+                enabled=True,
+                max_odds=self._config.team1_profile_max_odds,
+            )
+            if not profile_allowed:
+                reason = team1_profile_rejection_reason(
+                    selection.selected_side.value,
+                    selection.selected_odds,
+                    max_odds=self._config.team1_profile_max_odds,
+                )
+                runtime = await self._team1_profile.start_observation(
+                    match_id=next_goal_match_identity(selected_match),
+                    match_name=match_name,
+                    selected_team=selection.selected_team,
+                    selected_side=selection.selected_side.value,
+                    initial_odds=selection.selected_odds,
+                    reason=reason,
+                )
+                await REPOSITORY.log(
+                    "TEAM1_PROFILE_MATCH_TO_OBSERVATION",
+                    (
+                        f"match={match_name}; selected_team={selection.selected_team}; "
+                        f"selected_side={selection.selected_side.value}; "
+                        f"selected_odds={selection.selected_odds}; "
+                        f"max_odds_exclusive={self._config.team1_profile_max_odds}; "
+                        f"reason={reason}"
+                    ),
+                )
+                await STATE.update(
+                    status=DemoStatus.MATCH_SKIPPED.value,
+                    message=(
+                        f"TEAM1 PROFILE: {match_name} только наблюдаем "
+                        f"({selection.selected_side.value}, кф {selection.selected_odds})"
+                    ),
+                    event="TEAM1_PROFILE_OBSERVATION_STARTED",
+                    selected_team=None,
+                    selected_side=None,
+                    initial_selected_odds=None,
+                    other_team=None,
+                    selection_reason=None,
+                    bet={
+                        "step": 0,
+                        "max_steps": self._config.max_steps,
+                        "amount": None,
+                        "market": "Следующий гол",
+                        "odds": None,
+                        "score_before": None,
+                        "next_goal_number": None,
+                        "status": "NO_ACTIVE_BET",
+                    },
+                    team1_profile=runtime,
+                )
+                await self._process_team1_profile_observation(
+                    selected_match=selected_match,
+                    match_name=match_name,
+                    snapshot=snapshot,
+                    initial_odds=initial_odds,
+                    selection=selection,
+                )
+                return
+            await REPOSITORY.log(
+                "TEAM1_PROFILE_MATCH_ALLOWED",
+                (
+                    f"match={match_name}; selected_team={selection.selected_team}; "
+                    f"selected_side=TEAM_1; selected_odds={selection.selected_odds}; "
+                    f"max_odds_exclusive={self._config.team1_profile_max_odds}"
+                ),
+            )
+
+        if not self._config.team1_profile_enabled and not is_initial_odds_allowed(
             selection.selected_odds,
             enabled=self._config.min_initial_odds_enabled,
         ):
