@@ -52,7 +52,11 @@ from backend.app.match_filters import (
     excluded_team_in_match,
     is_initial_odds_allowed,
 )
-from backend.app.long_series import LongSeriesDecision, LongSeriesGate
+from backend.app.long_series import (
+    LONG_SERIES_MIN_STEP,
+    LongSeriesDecision,
+    LongSeriesGate,
+)
 
 from .budget import DemoBudget
 from .config import CONFIG
@@ -1082,7 +1086,7 @@ class DemoEngine:
             )
             await REPOSITORY.log(
                 "LONG_SERIES_WAITING",
-                "Ожидаем серию >=4 шагов",
+                f"Ожидаем серию >={LONG_SERIES_MIN_STEP} шагов",
             )
         elif long_series_decision == LongSeriesDecision.ALLOW:
             runtime = await self._long_series.snapshot()
@@ -2412,13 +2416,13 @@ class DemoEngine:
                 await STATE.update(
                     event="LONG_SERIES_DETECTED",
                     message=(
-                        "LONG уже подтверждён тремя LOSE подряд; "
+                        f"LONG уже подтверждён {LONG_SERIES_MIN_STEP - 1} LOSE подряд; "
                         "продолжаем наблюдать текущий матч"
                     ),
                     long_series=runtime,
                 )
             if result == "WIN":
-                if shadow_step >= 4:
+                if shadow_step >= LONG_SERIES_MIN_STEP:
                     event = "LONG_SERIES_OBSERVATION_COMPLETED"
                     await REPOSITORY.log(
                         event,
