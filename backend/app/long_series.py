@@ -28,6 +28,7 @@ PersistCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 def default_long_series_runtime(*, enabled: bool = False) -> dict[str, Any]:
     return {
         "enabled": enabled,
+        "min_step": LONG_SERIES_MIN_STEP,
         "state": (
             LongSeriesState.WAITING_FOR_LONG.value
             if enabled
@@ -77,6 +78,22 @@ class LongSeriesGate:
             else:
                 restored = {**default_long_series_runtime(enabled=True), **(persisted or {})}
                 restored["enabled"] = True
+                restored["min_step"] = LONG_SERIES_MIN_STEP
+
+                if (
+                    restored.get("state") == LongSeriesState.NEXT_MATCH_ALLOWED.value
+                    and int(restored.get("last_observed_series_length") or 0)
+                    < LONG_SERIES_MIN_STEP
+                ):
+                    # Drop an allowance persisted under an older, lower
+                    # LONG_SERIES threshold. The new filter must only unlock
+                    # after a series that satisfies the current 6+ rule.
+                    restored["state"] = LongSeriesState.WAITING_FOR_LONG.value
+                    restored["last_observed_is_long"] = False
+                    restored["next_match_after_long_allowed"] = False
+                    restored["permission_consumed"] = False
+                    restored["active_match_id"] = None
+                    restored["active_match"] = None
                 if restored.get("state") in {
                     LongSeriesState.OFF.value,
                     LongSeriesState.LIVE_MATCH_ACTIVE.value,
@@ -96,10 +113,7 @@ class LongSeriesGate:
                     observation = restored.get("active_observation")
                     proven_long = bool(
                         observation
-                        and (
-                            observation.get("long_detected")
-                            or self._long_threshold_reached_locked(observation)
-                        )
+                        and self._long_threshold_reached_locked(observation)
                     )
                     if proven_long and observation is not None:
                         finalized = deepcopy(observation)
@@ -108,10 +122,7 @@ class LongSeriesGate:
                             classification="LONG",
                             completion_status="INTERRUPTED",
                             long_detected=True,
-                            long_detected_at_step=(
-                                finalized.get("long_detected_at_step")
-                                or LONG_SERIES_MIN_STEP - 1
-                            ),
+                            long_detected_at_step=LONG_SERIES_MIN_STEP - 1,
                             completed_at=finalized.get("completed_at") or utc_now(),
                         )
                         observations = list(restored.get("observations") or [])
