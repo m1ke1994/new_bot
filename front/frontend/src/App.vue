@@ -733,7 +733,13 @@ const configInvalid = computed(() => {
 
   const config = strategyConfig.value
 
-  return !(Number(config.initial_stake) > 0) || !(Number(config.progression_multiplier) > 1) || !Number.isInteger(Number(config.max_steps)) || Number(config.max_steps) < 1 || config.stakes.length !== Number(config.max_steps) || config.stakes.some((amount) => !Number.isFinite(Number(amount)) || Number(amount) <= 0)
+  return !(Number(config.initial_stake) > 0)
+    || !(Number(config.progression_multiplier) > 1)
+    || !Number.isInteger(Number(config.max_steps))
+    || Number(config.max_steps) < 1
+    || config.stakes.length !== Number(config.max_steps)
+    || config.stakes.some((amount) => !Number.isFinite(Number(amount)) || Number(amount) <= 0)
+    || (config.team1_profile_enabled && !(Number(config.team1_profile_max_odds) > 0))
 
 })
 
@@ -1314,7 +1320,7 @@ onBeforeUnmount(() => {
               <input v-model="strategyConfig.team1_profile_enabled" type="checkbox" :disabled="state.running || actionPending" @change="saveMatchFilters">
               <span class="filter-copy">
                 <strong>TEAM_1 + КФ ниже</strong>
-                <small>Ставим только если выбранная по большему кф команда стоит слева (Команда 1). Остальные матчи записываем в Наблюдение.</small>
+                <small>Ставим только если выбранная по большему кф команда стоит слева (Команда 1) и кф ниже порога. Остальные матчи записываем в Наблюдение. При включении профиль сам задаёт правило входа вместо минимума 1.93.</small>
               </span>
               <span class="filter-state">{{ strategyConfig.team1_profile_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
               <input
