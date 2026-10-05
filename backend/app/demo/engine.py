@@ -470,6 +470,7 @@ class DemoEngine:
         await STATE.restore(budget=budget, strategy_config=config_data, sequence=sequence, stats=await REPOSITORY.stats())
         await self._load_long_series(self._mode)
         await self._load_team1_profile(self._mode)
+        await self._load_favorite_shadow(self._mode)
         if active is not None:
             await STATE.update(
                 mode=str(active.get("mode") or "DEMO").upper(),
@@ -494,6 +495,7 @@ class DemoEngine:
         await STATE.restore(budget=await REPOSITORY.get_budget(), strategy_config=saved, sequence=sequence, stats=await REPOSITORY.stats())
         await self._load_long_series(self._mode)
         await self._load_team1_profile(self._mode)
+        await self._load_favorite_shadow(self._mode)
         return saved
 
     async def reset_sequence(self) -> dict[str, Any]:
@@ -608,6 +610,7 @@ class DemoEngine:
             self._current_series = None
             await self._load_long_series(requested_mode)
             await self._load_team1_profile(requested_mode)
+            await self._load_favorite_shadow(requested_mode)
             self._configure_run_time_limit()
             if requested_mode == "LIVE":
                 self.live_executor.reset()
@@ -622,6 +625,7 @@ class DemoEngine:
                 f"long_series_enabled={str(self._config.long_series_enabled).lower()} "
                 f"team1_profile_enabled={str(self._config.team1_profile_enabled).lower()} "
                 f"team1_profile_max_odds={self._config.team1_profile_max_odds} "
+                f"favorite_shadow_enabled={str(self._config.favorite_shadow_enabled).lower()} "
                 f"min_initial_odds={MIN_INITIAL_SELECTED_ODDS}",
             )
             await REPOSITORY.log(
@@ -633,6 +637,13 @@ class DemoEngine:
                 (
                     f"enabled={str(self._config.team1_profile_enabled).lower()}; "
                     f"selected_side=TEAM_1; max_odds_exclusive={self._config.team1_profile_max_odds}"
+                ),
+            )
+            await REPOSITORY.log(
+                "FAVORITE_SHADOW_CONFIG",
+                (
+                    f"enabled={str(self._config.favorite_shadow_enabled).lower()}; "
+                    f"max_steps={FAVORITE_SHADOW_MAX_STEPS}; selection=LOWER_ODDS"
                 ),
             )
             await REPOSITORY.log(
@@ -662,6 +673,7 @@ class DemoEngine:
                 run_time=self._run_time_state(),
                 long_series=await self._long_series.snapshot(),
                 team1_profile=await self._team1_profile.snapshot(),
+                favorite_shadow=await self._favorite_shadow.snapshot(),
             )
             try:
                 await REPOSITORY.log("BROWSER_STARTING", "Проверяем Playwright/browser/context/page")
