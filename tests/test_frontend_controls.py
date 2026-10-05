@@ -39,6 +39,13 @@ class FrontendControlTests(unittest.TestCase):
         self.assertIn("team1ProfileObservationHistory", self.source)
         self.assertIn("TEAM1 PROFILE наблюдает матч", self.source)
 
+    def test_favorite_shadow_controls_and_dashboard_exist(self):
+        self.assertIn("favorite_shadow_enabled", self.source)
+        self.assertIn("FAVORITE SHADOW", self.source)
+        self.assertIn("favoriteShadowActive", self.source)
+        self.assertIn("favoriteShadowHistory", self.source)
+        self.assertIn("Распределение закрытия FAVORITE SHADOW", self.source)
+
     def test_runtime_limit_controls_offer_only_supported_durations(self):
         self.assertIn("run_time_limit_enabled", self.source)
         self.assertIn("run_duration_hours", self.source)
