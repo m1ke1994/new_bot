@@ -101,6 +101,30 @@ class BrowserManager:
             except Exception as error:
                 return await self._recover_page_locked(error)
 
+    async def create_aux_page(self) -> Page:
+        """Create an isolated tab without replacing the main worker page."""
+        async with self.lock:
+            if not self._context_is_alive():
+                if self.context is not None:
+                    await self._recover_page_locked()
+                else:
+                    await self._launch_locked(recovered=True)
+            assert self.context is not None
+            page = await self.context.new_page()
+            await self._log("BROWSER_AUX_PAGE_CREATED", "Created isolated read-only observer tab")
+            return page
+
+    async def close_aux_page(self, page: Page | None) -> None:
+        if page is None:
+            return
+        async with self.lock:
+            try:
+                if not page.is_closed():
+                    await page.close()
+                    await self._log("BROWSER_AUX_PAGE_CLOSED", "Closed isolated observer tab")
+            except Exception:
+                pass
+
     async def recover_navigation(self, error: Exception) -> Page:
         """Recover page failures without recycling the browser on network resets."""
         async with self.lock:
