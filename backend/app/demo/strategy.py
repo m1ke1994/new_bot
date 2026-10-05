@@ -70,7 +70,9 @@ class StrategyConfig:
         team1_profile_enabled = _boolean_setting(
             payload, "team1_profile_enabled", default=False
         )
-        team1_profile_max_odds = money(payload.get("team1_profile_max_odds", "2.00"))
+        team1_profile_max_odds = Decimal(
+            str(payload.get("team1_profile_max_odds", "2.00"))
+        )
         run_time_limit_enabled = _boolean_setting(
             payload, "run_time_limit_enabled", default=False
         )
