@@ -134,6 +134,21 @@ const state = ref({
     observations: [],
   },
 
+  favorite_shadow: {
+    enabled: false,
+    max_steps: 9,
+    state: 'OFF',
+    active_observations: {},
+    observations: [],
+    stats: {
+      completed: 0,
+      exhausted: 0,
+      interrupted: 0,
+      skipped: 0,
+      wins_by_step: {},
+    },
+  },
+
   updated_at: null,
 
 })
@@ -169,6 +184,8 @@ const strategyConfig = ref({
   team1_profile_enabled: false,
 
   team1_profile_max_odds: 2,
+
+  favorite_shadow_enabled: false,
 
   run_time_limit_enabled: false,
 
@@ -616,6 +633,14 @@ const team1ProfileObserving = computed(() => (
   Boolean(team1Profile.value.enabled)
   && team1Profile.value.state === 'OBSERVING'
 ))
+
+const favoriteShadow = computed(() => state.value.favorite_shadow || {})
+
+const favoriteShadowActive = computed(() => Object.values(favoriteShadow.value.active_observations || {}))
+
+const favoriteShadowHistory = computed(() => [...(favoriteShadow.value.observations || [])].slice(-30).reverse())
+
+const favoriteShadowWins = computed(() => favoriteShadow.value.stats?.wins_by_step || {})
 
 const longSeriesWaiting = computed(() => (
   Boolean(longSeries.value.enabled)
