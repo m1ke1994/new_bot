@@ -41,6 +41,7 @@ class StrategyConfig:
     long_series_enabled: bool
     team1_profile_enabled: bool
     team1_profile_max_odds: Decimal
+    favorite_shadow_enabled: bool
     run_time_limit_enabled: bool
     run_duration_hours: int
     strategy_type: StrategyType
@@ -73,6 +74,9 @@ class StrategyConfig:
         team1_profile_max_odds = Decimal(
             str(payload.get("team1_profile_max_odds", "2.00"))
         )
+        favorite_shadow_enabled = _boolean_setting(
+            payload, "favorite_shadow_enabled", default=False
+        )
         run_time_limit_enabled = _boolean_setting(
             payload, "run_time_limit_enabled", default=False
         )
@@ -97,6 +101,7 @@ class StrategyConfig:
             long_series_enabled,
             team1_profile_enabled,
             team1_profile_max_odds,
+            favorite_shadow_enabled,
             run_time_limit_enabled,
             run_duration_hours,
             strategy_type,
@@ -132,6 +137,7 @@ class StrategyConfig:
             "long_series_enabled": self.long_series_enabled,
             "team1_profile_enabled": self.team1_profile_enabled,
             "team1_profile_max_odds": float(self.team1_profile_max_odds),
+            "favorite_shadow_enabled": self.favorite_shadow_enabled,
             "run_time_limit_enabled": self.run_time_limit_enabled,
             "run_duration_hours": self.run_duration_hours,
             "strategy_type": self.strategy_type.value,
