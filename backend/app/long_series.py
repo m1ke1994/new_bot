@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any, Awaitable, Callable
 
 
-LONG_SERIES_MIN_STEP = 4
+LONG_SERIES_MIN_STEP = 6
 
 
 class LongSeriesState(StrEnum):
@@ -90,7 +90,7 @@ class LongSeriesGate:
                     restored["active_match"] = None
                 if restored["state"] == LongSeriesState.WAITING_FOR_LONG.value:
                     # An unfinished shadow observation cannot be resumed after
-                    # restart. However, if three settled losses had already
+                    # restart. However, if five settled losses had already
                     # proved LONG, preserve that fact and unlock exactly one
                     # next match instead of silently discarding the signal.
                     observation = restored.get("active_observation")
@@ -339,8 +339,8 @@ class LongSeriesGate:
                 steps=steps,
             )
 
-            # LONG is proven as soon as steps 1..3 are all settled LOSE.
-            # From that point the winning step cannot be earlier than 4, so
+            # LONG is proven as soon as steps 1..5 are all settled LOSE.
+            # From that point the winning step cannot be earlier than 6, so
             # the classification is sticky even if the market/match is later
             # interrupted before a WIN is observed.
             threshold_reached = self._long_threshold_reached_locked(observation)
@@ -451,7 +451,7 @@ class LongSeriesGate:
 
     @staticmethod
     def _long_threshold_reached_locked(observation: dict[str, Any]) -> bool:
-        """LONG is proven by three consecutive settled losses from step 1."""
+        """LONG is proven by five consecutive settled losses from step 1."""
         by_step: dict[int, str] = {}
         for item in observation.get("steps") or []:
             try:
