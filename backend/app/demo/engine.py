@@ -1200,6 +1200,7 @@ class DemoEngine:
                 browser=await self.browser_manager.snapshot(),
             )
         finally:
+            await self._cancel_favorite_shadow_tasks()
             if self._stop_event.is_set():
                 await STATE.update(running=False)
 
