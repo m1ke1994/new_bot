@@ -9,6 +9,7 @@ from .strategy import DEFAULT_STRATEGY_CONFIG
 from .models import DemoStatus
 from backend.app.long_series import default_long_series_runtime
 from backend.app.team1_profile import default_team1_profile_runtime
+from backend.app.favorite_shadow import default_favorite_shadow_runtime
 
 
 STRATEGY_PRESENTATION = {
@@ -118,6 +119,7 @@ def initial_state() -> dict[str, Any]:
         },
         "long_series": default_long_series_runtime(),
         "team1_profile": default_team1_profile_runtime(),
+        "favorite_shadow": default_favorite_shadow_runtime(),
         "sequence": {
             "current_step": 1,
             "status": "WAITING_FOR_MATCH",
