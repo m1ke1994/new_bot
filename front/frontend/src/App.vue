@@ -126,6 +126,14 @@ const state = ref({
     observations: [],
   },
 
+  team1_profile: {
+    enabled: false,
+    max_odds: 2,
+    state: 'OFF',
+    active_observation: null,
+    observations: [],
+  },
+
   updated_at: null,
 
 })
@@ -157,6 +165,10 @@ const strategyConfig = ref({
   max_three_steps_enabled: false,
 
   long_series_enabled: false,
+
+  team1_profile_enabled: false,
+
+  team1_profile_max_odds: 2,
 
   run_time_limit_enabled: false,
 
@@ -593,6 +605,17 @@ const longSeries = computed(() => state.value.long_series || {})
 const activeObservation = computed(() => longSeries.value.active_observation || null)
 
 const observationHistory = computed(() => [...(longSeries.value.observations || [])].slice(-10).reverse())
+
+const team1Profile = computed(() => state.value.team1_profile || {})
+
+const team1ProfileActiveObservation = computed(() => team1Profile.value.active_observation || null)
+
+const team1ProfileObservationHistory = computed(() => [...(team1Profile.value.observations || [])].slice(-20).reverse())
+
+const team1ProfileObserving = computed(() => (
+  Boolean(team1Profile.value.enabled)
+  && team1Profile.value.state === 'OBSERVING'
+))
 
 const longSeriesWaiting = computed(() => (
   Boolean(longSeries.value.enabled)
@@ -1287,6 +1310,25 @@ onBeforeUnmount(() => {
 
             </label>
 
+            <div v-if="strategyConfig.strategy_type === 'NEXT_GOAL'" :class="['match-filter-option', { 'filter-disabled': !strategyConfig.team1_profile_enabled }]">
+              <input v-model="strategyConfig.team1_profile_enabled" type="checkbox" :disabled="state.running || actionPending" @change="saveMatchFilters">
+              <span class="filter-copy">
+                <strong>TEAM_1 + КФ ниже</strong>
+                <small>Ставим только если выбранная по большему кф команда стоит слева (Команда 1). Остальные матчи записываем в Наблюдение.</small>
+              </span>
+              <span class="filter-state">{{ strategyConfig.team1_profile_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
+              <input
+                v-model.number="strategyConfig.team1_profile_max_odds"
+                class="profile-odds-input"
+                type="number"
+                min="1.01"
+                step="0.001"
+                :disabled="state.running || actionPending || !strategyConfig.team1_profile_enabled"
+                title="Верхняя граница не включается: при 2.00 допускается только кф < 2.00"
+                @change="saveMatchFilters"
+              >
+            </div>
+
           </div>
 
           <div v-if="strategyConfig.strategy_type === 'NEXT_GOAL'" class="long-series-status">
@@ -1294,6 +1336,13 @@ onBeforeUnmount(() => {
             <div><span>Последняя серия</span><strong>{{ state.long_series?.last_observed_series_match || '—' }}</strong><small v-if="state.long_series?.last_observed_series_length">{{ state.long_series.last_observed_series_length }} шагов · {{ state.long_series.last_observed_is_long ? 'LONG' : 'SHORT' }}</small></div>
             <div><span>Текущий shadow-шаг</span><strong>{{ state.long_series?.shadow_series_step || '—' }}</strong></div>
             <div><span>Следующий матч</span><strong>{{ state.long_series?.next_match || (strategyConfig.long_series_enabled ? 'SKIP' : 'ALLOWED') }}</strong></div>
+          </div>
+
+          <div v-if="strategyConfig.strategy_type === 'NEXT_GOAL' && strategyConfig.team1_profile_enabled" class="long-series-status">
+            <div><span>TEAM_1 PROFILE</span><strong>{{ team1Profile.state || 'READY' }}</strong></div>
+            <div><span>Условие</span><strong>Команда 1</strong><small>выбрана по большему кф</small></div>
+            <div><span>Коэффициент</span><strong>&lt; {{ strategyConfig.team1_profile_max_odds }}</strong></div>
+            <div><span>Наблюдений</span><strong>{{ (team1Profile.observations || []).length }}</strong></div>
           </div>
 
         </div>
@@ -1441,6 +1490,62 @@ onBeforeUnmount(() => {
 
         </section>
 
+        <section v-if="strategyConfig.strategy_type === 'NEXT_GOAL' && (strategyConfig.team1_profile_enabled || team1Profile.enabled)" class="full-width-section observation-section">
+
+          <article class="panel observation-panel">
+            <header class="panel-header compact">
+              <div><span class="eyebrow amber">TEAM_1 PROFILE SHADOW</span><h2>Наблюдение фильтра</h2></div>
+              <span :class="['observation-state', String(team1Profile.state || 'OFF').toLowerCase()]">TEAM_1: {{ team1Profile.state || 'OFF' }}</span>
+            </header>
+
+            <div v-if="!team1Profile.enabled" class="panel-empty">Фильтр TEAM_1 + КФ выключен</div>
+            <template v-else>
+              <div v-if="team1ProfileActiveObservation" class="active-observation">
+                <div class="observation-summary">
+                  <div><span>МАТЧ</span><strong>{{ show(team1ProfileActiveObservation.match_name) }}</strong></div>
+                  <div><span>ВЫБРАНА</span><strong>{{ show(team1ProfileActiveObservation.selected_team) }}</strong><small>{{ show(team1ProfileActiveObservation.side_label) }}</small></div>
+                  <div><span>СТАРТОВЫЙ КФ</span><strong>{{ show(team1ProfileActiveObservation.initial_odds) }}</strong></div>
+                  <div><span>ПРИЧИНА НАБЛЮДЕНИЯ</span><strong>{{ show(team1ProfileActiveObservation.filter_reason) }}</strong></div>
+                  <div><span>SHADOW STEP</span><strong>{{ team1ProfileActiveObservation.shadow_step || 0 }}</strong></div>
+                  <div><span>СЧЁТ</span><strong>{{ show(team1ProfileActiveObservation.score_before) }} → {{ show(team1ProfileActiveObservation.score_after) }}</strong></div>
+                  <div><span>РЕЗУЛЬТАТ ШАГА</span><strong>{{ show(team1ProfileActiveObservation.step_result, 'WAITING') }}</strong></div>
+                  <div><span>СТАТУС</span><strong>{{ show(team1ProfileActiveObservation.status, 'OBSERVING') }}</strong></div>
+                </div>
+
+                <div class="table-wrap observation-steps">
+                  <table>
+                    <thead><tr><th>Шаг</th><th>Кф</th><th>Счёт до</th><th>Счёт после</th><th>Автор гола</th><th>Результат</th></tr></thead>
+                    <tbody>
+                      <tr v-for="stepItem in team1ProfileActiveObservation.steps || []" :key="stepItem.step">
+                        <td>{{ stepItem.step }}</td><td>{{ show(stepItem.odds) }}</td><td>{{ show(stepItem.score_before) }}</td><td>{{ show(stepItem.score_after) }}</td><td>{{ show(stepItem.scorer) }}</td><td><span :class="['table-result', String(stepItem.result).toLowerCase()]">{{ stepItem.result }}</span></td>
+                      </tr>
+                      <tr v-if="!(team1ProfileActiveObservation.steps || []).length"><td colspan="6" class="empty-row">Шаг {{ team1ProfileActiveObservation.shadow_step || 1 }} · ожидаем гол</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div v-else class="panel-empty">Нет активного наблюдения — ждём следующий матч, не прошедший профиль</div>
+
+              <div class="observation-history">
+                <h3>Последние наблюдения TEAM_1 фильтра</h3>
+                <div class="table-wrap">
+                  <table>
+                    <thead><tr><th>Матч</th><th>Выбрана</th><th>Сторона</th><th>Стартовый кф</th><th>Причина</th><th>Шаг закрытия</th><th>Завершение</th></tr></thead>
+                    <tbody>
+                      <tr v-for="item in team1ProfileObservationHistory" :key="`team1-${item.match_id}-${item.completed_at}`">
+                        <td>{{ item.match_name }}</td><td>{{ item.selected_team }}</td><td>{{ item.side_label }}</td><td>{{ show(item.initial_odds) }}</td><td>{{ show(item.filter_reason) }}</td><td>{{ item.series_length || '—' }}</td><td>{{ show(item.completion_status) }}</td>
+                      </tr>
+                      <tr v-if="!team1ProfileObservationHistory.length"><td colspan="7" class="empty-row">Завершённых наблюдений пока нет</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </template>
+          </article>
+
+        </section>
+
         <section class="full-width-section observation-section">
 
           <article class="panel observation-panel">
@@ -1528,6 +1633,8 @@ onBeforeUnmount(() => {
             </header>
 
             <div v-if="longSeriesWaiting" class="panel-empty">Нет активной ставки · LONG_SERIES наблюдает матчи</div>
+
+            <div v-else-if="team1ProfileObserving" class="panel-empty">Нет активной ставки · TEAM_1 PROFILE наблюдает матч</div>
 
             <div v-else class="bet-grid">
 
