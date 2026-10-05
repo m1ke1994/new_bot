@@ -119,11 +119,11 @@ class LongSeriesGateTests(unittest.IsolatedAsyncioTestCase):
             LongSeriesDecision.SHADOW,
         )
 
-    async def test_step_four_unlocks_exactly_one_next_match(self):
-        runtime = await self._finish("A", "A1 — A2", 4)
+    async def test_step_six_unlocks_exactly_one_next_match(self):
+        runtime = await self._finish("A", "A1 — A2", 6)
         self.assertEqual(runtime["state"], "NEXT_MATCH_ALLOWED")
         self.assertEqual(runtime["observations"][-1]["classification"], "LONG")
-        self.assertEqual(runtime["observations"][-1]["series_length"], 4)
+        self.assertEqual(runtime["observations"][-1]["series_length"], 6)
         self.assertEqual(
             await self.gate.claim_match("B", "B1 — B2"),
             LongSeriesDecision.ALLOW,
@@ -135,16 +135,16 @@ class LongSeriesGateTests(unittest.IsolatedAsyncioTestCase):
         runtime = await self.gate.finish_allowed_match("B")
         self.assertEqual(runtime["state"], "WAITING_FOR_LONG")
 
-    async def test_step_six_is_long_and_unlocks_next_match(self):
-        runtime = await self._finish("A", "A1 — A2", 6)
-        self.assertTrue(runtime["last_observed_is_long"])
-        self.assertEqual(runtime["last_observed_series_length"], 6)
+    async def test_step_five_is_short_and_keeps_waiting(self):
+        runtime = await self._finish("A", "A1 — A2", 5)
+        self.assertFalse(runtime["last_observed_is_long"])
+        self.assertEqual(runtime["last_observed_series_length"], 5)
         self.assertEqual(
             await self.gate.claim_match("B", "B1 — B2"),
-            LongSeriesDecision.ALLOW,
+            LongSeriesDecision.SHADOW,
         )
 
-    async def test_three_settled_losses_make_long_sticky_before_win(self):
+    async def test_five_settled_losses_make_long_sticky_before_win(self):
         self.assertEqual(
             await self.gate.claim_match("A", "A1 — A2"),
             LongSeriesDecision.SHADOW,
@@ -157,7 +157,7 @@ class LongSeriesGateTests(unittest.IsolatedAsyncioTestCase):
             initial_odds=2.05,
         )
         runtime = None
-        for step in range(1, 4):
+        for step in range(1, 6):
             await self.gate.begin_shadow_step(
                 match_id="A",
                 step=step,
@@ -178,15 +178,15 @@ class LongSeriesGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(runtime)
         observation = runtime["active_observation"]
         self.assertTrue(observation["long_detected"])
-        self.assertEqual(observation["long_detected_at_step"], 3)
+        self.assertEqual(observation["long_detected_at_step"], 5)
         self.assertEqual(observation["classification"], "LONG")
         self.assertEqual(observation["completion_status"], "ACTIVE")
 
         runtime = await self.gate.begin_shadow_step(
             match_id="A",
-            step=4,
+            step=6,
             current_odds=1.98,
-            score_before="0:3",
+            score_before="0:5",
         )
         self.assertEqual(runtime["active_observation"]["classification"], "LONG")
         self.assertTrue(runtime["active_observation"]["long_detected"])
@@ -245,7 +245,7 @@ class LongSeriesGateTests(unittest.IsolatedAsyncioTestCase):
             LongSeriesDecision.ALLOW,
         )
 
-    async def test_interrupted_before_three_losses_does_not_unlock(self):
+    async def test_interrupted_before_five_losses_does_not_unlock(self):
         self.assertEqual(
             await self.gate.claim_match("A", "A1 — A2"),
             LongSeriesDecision.SHADOW,
@@ -257,7 +257,7 @@ class LongSeriesGateTests(unittest.IsolatedAsyncioTestCase):
             selected_side="TEAM_1",
             initial_odds=2.05,
         )
-        for step in range(1, 3):
+        for step in range(1, 5):
             await self.gate.begin_shadow_step(
                 match_id="A",
                 step=step,
@@ -278,7 +278,7 @@ class LongSeriesGateTests(unittest.IsolatedAsyncioTestCase):
         runtime = await self.gate.finish_shadow_without_win(
             match_id="A",
             match_name="A1 — A2",
-            steps=2,
+            steps=4,
         )
         self.assertEqual(runtime["state"], "WAITING_FOR_LONG")
         self.assertIsNone(runtime["last_observed_is_long"])
@@ -287,7 +287,7 @@ class LongSeriesGateTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_parallel_candidates_consume_only_one_permission(self):
-        await self._finish("A", "A1 — A2", 4)
+        await self._finish("A", "A1 — A2", 6)
         decisions = await asyncio.gather(
             self.gate.claim_match("B", "B1 — B2"),
             self.gate.claim_match("C", "C1 — C2"),
@@ -320,7 +320,7 @@ class LongSeriesGateTests(unittest.IsolatedAsyncioTestCase):
                 selected_side="TEAM_1",
                 initial_odds=2.05,
             )
-            for step in range(1, 4):
+            for step in range(1, 6):
                 await gate.begin_shadow_step(
                     match_id="A",
                     step=step,
@@ -358,7 +358,7 @@ class LongSeriesGateTests(unittest.IsolatedAsyncioTestCase):
             gate = LongSeriesGate(repository.save_long_series_runtime)
             await gate.load(enabled=True, mode="LIVE")
             self.gate = gate
-            await self._finish("A", "A1 — A2", 4)
+            await self._finish("A", "A1 — A2", 6)
 
             restored = LongSeriesGate(repository.save_long_series_runtime)
             runtime = await restored.load(
@@ -519,7 +519,7 @@ class LongSeriesEngineTests(unittest.IsolatedAsyncioTestCase):
                     selected_side="TEAM_1",
                     initial_odds=2.1,
                 )
-                for step in range(1, 4):
+                for step in range(1, 6):
                     await engine._long_series.record_shadow_step(
                         match_id="A",
                         match_name="Alpha — Beta",
@@ -529,7 +529,7 @@ class LongSeriesEngineTests(unittest.IsolatedAsyncioTestCase):
                 await engine._long_series.record_shadow_step(
                     match_id="A",
                     match_name="Alpha — Beta",
-                    step=4,
+                    step=6,
                     result="WIN",
                 )
 
