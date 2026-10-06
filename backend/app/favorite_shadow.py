@@ -32,10 +32,14 @@ def favorite_team1_entry_selection(
     team1: str,
     team2: str,
     odds: NextGoalOdds,
+    *,
+    min_odds: float = 0.0,
 ) -> TeamSelection | None:
-    """Allow only a strict lower-odds favorite located on TEAM_1."""
+    """Allow only a strict TEAM_1 favorite at or above the configured minimum odds."""
     favorite = select_favorite_with_lower_odds(team1, team2, odds)
     if favorite is None or favorite.selected_side != Scorer.TEAM_1:
+        return None
+    if favorite.selected_odds < float(min_odds):
         return None
     return favorite
 
@@ -44,12 +48,16 @@ def favorite_team1_rejection_reason(
     team1: str,
     team2: str,
     odds: NextGoalOdds,
+    *,
+    min_odds: float = 0.0,
 ) -> str | None:
     favorite = select_favorite_with_lower_odds(team1, team2, odds)
     if favorite is None:
         return "EQUAL_INITIAL_ODDS"
     if favorite.selected_side != Scorer.TEAM_1:
         return "FAVORITE_IS_TEAM_2"
+    if favorite.selected_odds < float(min_odds):
+        return "FAVORITE_ODDS_BELOW_MIN"
     return None
 
 
