@@ -1030,6 +1030,7 @@ class DemoEngine:
                 f"team1_profile_max_odds={self._config.team1_profile_max_odds} "
                 f"favorite_shadow_enabled={str(self._config.favorite_shadow_enabled).lower()} "
                 f"favorite_team1_enabled={str(self._config.favorite_team1_enabled).lower()} "
+                f"favorite_team1_min_odds={self._config.favorite_team1_min_odds} "
                 f"min_initial_odds={MIN_INITIAL_SELECTED_ODDS}",
             )
             await REPOSITORY.log(
@@ -1055,6 +1056,7 @@ class DemoEngine:
                 (
                     f"enabled={str(self._config.favorite_team1_enabled).lower()}; "
                     "selection=LOWER_ODDS; required_side=TEAM_1; "
+                    f"favorite_min_odds_inclusive={self._config.favorite_team1_min_odds}; "
                     "min_initial_odds_filter=bypassed_when_enabled"
                 ),
             )
@@ -1755,11 +1757,13 @@ class DemoEngine:
                 snapshot.team1,
                 snapshot.team2,
                 initial_odds,
+                min_odds=float(self._config.favorite_team1_min_odds),
             )
             selection = favorite_team1_entry_selection(
                 snapshot.team1,
                 snapshot.team2,
                 initial_odds,
+                min_odds=float(self._config.favorite_team1_min_odds),
             )
             if rejection_reason is not None or selection is None:
                 if rejection_reason == "EQUAL_INITIAL_ODDS":
@@ -1776,10 +1780,18 @@ class DemoEngine:
                         initial_odds,
                     )
                     detail = (
-                        f"фаворит {favorite.selected_team} стоит справа "
-                        f"({favorite.selected_side.value}) @ {favorite.selected_odds}"
-                        if favorite is not None
-                        else "фаворит не определён"
+                        (
+                            f"кф фаворита {favorite.selected_odds} ниже минимума "
+                            f"{self._config.favorite_team1_min_odds}"
+                        )
+                        if rejection_reason == "FAVORITE_ODDS_BELOW_MIN"
+                        and favorite is not None
+                        else (
+                            f"фаворит {favorite.selected_team} стоит справа "
+                            f"({favorite.selected_side.value}) @ {favorite.selected_odds}"
+                            if favorite is not None
+                            else "фаворит не определён"
+                        )
                     )
                     selected_odds = (
                         favorite.selected_odds if favorite is not None else initial_odds.team1
@@ -1816,6 +1828,7 @@ class DemoEngine:
                 (
                     f"match={match_name}; favorite={selection.selected_team}; "
                     f"side=TEAM_1; favorite_odds={selection.selected_odds}; "
+                    f"min_odds_inclusive={self._config.favorite_team1_min_odds}; "
                     f"outsider={selection.other_team}; outsider_odds={selection.other_odds}"
                 ),
             )
