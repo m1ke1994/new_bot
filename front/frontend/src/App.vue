@@ -187,6 +187,8 @@ const strategyConfig = ref({
 
   favorite_shadow_enabled: false,
 
+  favorite_team1_enabled: false,
+
   run_time_limit_enabled: false,
 
   run_duration_hours: 3,
@@ -401,6 +403,20 @@ async function saveMatchFilters() {
 
   }
 
+}
+
+async function toggleTeam1ProfileFilter() {
+  if (strategyConfig.value.team1_profile_enabled) {
+    strategyConfig.value.favorite_team1_enabled = false
+  }
+  await saveMatchFilters()
+}
+
+async function toggleFavoriteTeam1Filter() {
+  if (strategyConfig.value.favorite_team1_enabled) {
+    strategyConfig.value.team1_profile_enabled = false
+  }
+  await saveMatchFilters()
 }
 
 async function selectStrategyType(strategyType) {
@@ -765,6 +781,7 @@ const configInvalid = computed(() => {
     || config.stakes.length !== Number(config.max_steps)
     || config.stakes.some((amount) => !Number.isFinite(Number(amount)) || Number(amount) <= 0)
     || (config.team1_profile_enabled && !(Number(config.team1_profile_max_odds) > 0))
+    || (config.team1_profile_enabled && config.favorite_team1_enabled)
 
 })
 
@@ -1342,7 +1359,7 @@ onBeforeUnmount(() => {
             </label>
 
             <div v-if="strategyConfig.strategy_type === 'NEXT_GOAL'" :class="['match-filter-option', { 'filter-disabled': !strategyConfig.team1_profile_enabled }]">
-              <input v-model="strategyConfig.team1_profile_enabled" type="checkbox" :disabled="state.running || actionPending" @change="saveMatchFilters">
+              <input v-model="strategyConfig.team1_profile_enabled" type="checkbox" :disabled="state.running || actionPending" @change="toggleTeam1ProfileFilter">
               <span class="filter-copy">
                 <strong>TEAM_1 + КФ ниже</strong>
                 <small>Ставим только если выбранная по большему кф команда стоит слева (Команда 1) и кф ниже порога. Остальные матчи записываем в Наблюдение. При включении профиль сам задаёт правило входа вместо минимума 1.93.</small>
@@ -1369,6 +1386,15 @@ onBeforeUnmount(() => {
               <span class="filter-state">{{ strategyConfig.favorite_shadow_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
             </label>
 
+            <label v-if="strategyConfig.strategy_type === 'NEXT_GOAL'" :class="['match-filter-option', { 'filter-disabled': !strategyConfig.favorite_team1_enabled }]">
+              <input v-model="strategyConfig.favorite_team1_enabled" type="checkbox" :disabled="state.running || actionPending" @change="toggleFavoriteTeam1Filter">
+              <span class="filter-copy">
+                <strong>FAVORITE + TEAM_1</strong>
+                <small>Реальная стратегия выбирает меньший стартовый кф и ставит только когда фаворит находится слева (Команда 1). Фаворит справа и равные кф — пропуск. Фильтр «кф от 1.93» при этом не применяется.</small>
+              </span>
+              <span class="filter-state">{{ strategyConfig.favorite_team1_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
+            </label>
+
           </div>
 
           <div v-if="strategyConfig.strategy_type === 'NEXT_GOAL'" class="long-series-status">
@@ -1390,6 +1416,13 @@ onBeforeUnmount(() => {
             <div><span>Активно</span><strong>{{ favoriteShadowActive.length }}</strong><small>отдельных read-only вкладок</small></div>
             <div><span>Завершено</span><strong>{{ favoriteShadow.stats?.completed || 0 }}</strong></div>
             <div><span>1 / 2 / 3 / 4 шаг</span><strong>{{ favoriteShadowWins['1'] || 0 }} / {{ favoriteShadowWins['2'] || 0 }} / {{ favoriteShadowWins['3'] || 0 }} / {{ favoriteShadowWins['4'] || 0 }}</strong></div>
+          </div>
+
+          <div v-if="strategyConfig.strategy_type === 'NEXT_GOAL' && strategyConfig.favorite_team1_enabled" class="long-series-status">
+            <div><span>FAVORITE + TEAM_1</span><strong>ВКЛ</strong></div>
+            <div><span>Выбор</span><strong>Меньший кф</strong><small>фаворит</small></div>
+            <div><span>Сторона</span><strong>Команда 1</strong><small>только слева</small></div>
+            <div><span>Остальные</span><strong>SKIP</strong><small>TEAM_2 / равные кф</small></div>
           </div>
 
         </div>
