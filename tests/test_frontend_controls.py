@@ -39,6 +39,13 @@ class FrontendControlTests(unittest.TestCase):
         self.assertIn("team1ProfileObservationHistory", self.source)
         self.assertIn("TEAM1 PROFILE наблюдает матч", self.source)
 
+    def test_favorite_team1_entry_filter_controls_exist(self):
+        self.assertIn("favorite_team1_enabled", self.source)
+        self.assertIn("FAVORITE + TEAM_1", self.source)
+        self.assertIn("toggleFavoriteTeam1Filter", self.source)
+        self.assertIn("меньший стартовый кф", self.source)
+        self.assertIn("фаворит находится слева", self.source)
+
     def test_favorite_shadow_controls_and_dashboard_exist(self):
         self.assertIn("favorite_shadow_enabled", self.source)
         self.assertIn("FAVORITE SHADOW", self.source)
