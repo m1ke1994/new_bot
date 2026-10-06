@@ -83,7 +83,7 @@ jobs:
 
       - name: Run FAVORITE SHADOW tests
         run: |
-          python -m unittest -v tests.test_favorite_shadow
+          python -m unittest -v tests.test_favorite_shadow tests.test_favorite_team1_filter
 
   frontend-build:
     runs-on: ubuntu-latest
