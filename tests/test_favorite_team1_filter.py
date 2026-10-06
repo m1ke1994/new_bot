@@ -101,6 +101,15 @@ class FavoriteTeam1FilterTests(unittest.TestCase):
                 }
             )
 
+    def test_engine_tracks_rejected_favorite_matches_for_current_run(self):
+        from pathlib import Path
+
+        source = Path("backend/app/demo/engine.py").read_text(encoding="utf-8")
+        self.assertIn("_favorite_team1_rejected_match_ids", source)
+        self.assertIn("FAVORITE_TEAM1_REJECTED_MATCH_SKIPPED", source)
+        self.assertIn("FAVORITE_TEAM1_SWITCHING_TO_NEXT_MATCH", source)
+        self.assertIn("_favorite_team1_rejected_match_ids.clear()", source)
+
 
 if __name__ == "__main__":
     unittest.main()
