@@ -26,6 +26,31 @@ class FavoriteTeam1FilterTests(unittest.TestCase):
             None,
         )
 
+    def test_minimum_odds_is_inclusive(self):
+        allowed = favorite_team1_entry_selection(
+            "Alpha",
+            "Beta",
+            NextGoalOdds(2.00, 2.30),
+            min_odds=2.00,
+        )
+        rejected = favorite_team1_entry_selection(
+            "Alpha",
+            "Beta",
+            NextGoalOdds(1.99, 2.30),
+            min_odds=2.00,
+        )
+        self.assertIsNotNone(allowed)
+        self.assertIsNone(rejected)
+        self.assertEqual(
+            favorite_team1_rejection_reason(
+                "Alpha",
+                "Beta",
+                NextGoalOdds(1.99, 2.30),
+                min_odds=2.00,
+            ),
+            "FAVORITE_ODDS_BELOW_MIN",
+        )
+
     def test_right_side_favorite_is_rejected(self):
         selection = favorite_team1_entry_selection(
             "Alpha",
@@ -60,6 +85,12 @@ class FavoriteTeam1FilterTests(unittest.TestCase):
         self.assertFalse(disabled.favorite_team1_enabled)
         self.assertTrue(enabled.favorite_team1_enabled)
         self.assertTrue(enabled.to_dict()["favorite_team1_enabled"])
+        self.assertEqual(enabled.favorite_team1_min_odds, 2)
+        configured = StrategyConfig.from_payload(
+            {"favorite_team1_enabled": True, "favorite_team1_min_odds": 2.05}
+        )
+        self.assertEqual(configured.favorite_team1_min_odds, 2.05)
+        self.assertEqual(configured.to_dict()["favorite_team1_min_odds"], 2.05)
 
     def test_conflicting_team1_filters_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "mutually exclusive"):
