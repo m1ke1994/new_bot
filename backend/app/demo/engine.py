@@ -1027,6 +1027,7 @@ class DemoEngine:
                 f"team1_profile_enabled={str(self._config.team1_profile_enabled).lower()} "
                 f"team1_profile_max_odds={self._config.team1_profile_max_odds} "
                 f"favorite_shadow_enabled={str(self._config.favorite_shadow_enabled).lower()} "
+                f"favorite_team1_enabled={str(self._config.favorite_team1_enabled).lower()} "
                 f"min_initial_odds={MIN_INITIAL_SELECTED_ODDS}",
             )
             await REPOSITORY.log(
@@ -1045,6 +1046,14 @@ class DemoEngine:
                 (
                     f"enabled={str(self._config.favorite_shadow_enabled).lower()}; "
                     f"max_steps={FAVORITE_SHADOW_MAX_STEPS}; selection=LOWER_ODDS"
+                ),
+            )
+            await REPOSITORY.log(
+                "FAVORITE_TEAM1_FILTER_CONFIG",
+                (
+                    f"enabled={str(self._config.favorite_team1_enabled).lower()}; "
+                    "selection=LOWER_ODDS; required_side=TEAM_1; "
+                    "min_initial_odds_filter=bypassed_when_enabled"
                 ),
             )
             await REPOSITORY.log(
@@ -1738,7 +1747,80 @@ class DemoEngine:
                 f"Счёт изменился до создания первой ставки: {snapshot.score.text()}",
             )
             return
-        selection = select_team_with_higher_odds(snapshot.team1, snapshot.team2, initial_odds)
+        selection_reason = "HIGHER_ODDS"
+        if self._config.favorite_team1_enabled:
+            selection = select_favorite_with_lower_odds(
+                snapshot.team1,
+                snapshot.team2,
+                initial_odds,
+            )
+            if selection is None:
+                message = (
+                    f"{match_name}: FAVORITE TEAM_1 пропуск; "
+                    f"равные стартовые кф {initial_odds.team1} / {initial_odds.team2}"
+                )
+                await REPOSITORY.log(
+                    "FAVORITE_TEAM1_MATCH_SKIPPED",
+                    f"{message}; reason=EQUAL_INITIAL_ODDS",
+                )
+                if long_series_decision == LongSeriesDecision.ALLOW:
+                    long_runtime = await self._long_series.release_allowed_match(
+                        next_goal_match_identity(selected_match)
+                    )
+                    await STATE.update(long_series=long_runtime)
+                await self._status(
+                    DemoStatus.MATCH_SKIPPED,
+                    message,
+                    "FAVORITE_TEAM1_MATCH_SKIPPED",
+                    odds=self._odds_state(
+                        initial_odds, initial_odds.team1, initial_odds.team2
+                    ),
+                )
+                return
+            selection_reason = "LOWER_ODDS_FAVORITE_TEAM_1"
+            if selection.selected_side != Scorer.TEAM_1:
+                message = (
+                    f"{match_name}: FAVORITE TEAM_1 пропуск; "
+                    f"фаворит {selection.selected_team} стоит справа "
+                    f"({selection.selected_side.value}) @ {selection.selected_odds}"
+                )
+                await REPOSITORY.log(
+                    "FAVORITE_TEAM1_MATCH_SKIPPED",
+                    f"{message}; reason=FAVORITE_IS_TEAM_2",
+                )
+                if long_series_decision == LongSeriesDecision.ALLOW:
+                    long_runtime = await self._long_series.release_allowed_match(
+                        next_goal_match_identity(selected_match)
+                    )
+                    await REPOSITORY.log(
+                        "LONG_SERIES_ALLOWANCE_RELEASED_BY_FAVORITE_TEAM1",
+                        f"match={match_name}; next matching candidate remains allowed",
+                    )
+                    await STATE.update(long_series=long_runtime)
+                await self._status(
+                    DemoStatus.MATCH_SKIPPED,
+                    message,
+                    "FAVORITE_TEAM1_MATCH_SKIPPED",
+                    odds=self._odds_state(
+                        initial_odds, selection.selected_odds, selection.other_odds
+                    ),
+                )
+                return
+            await REPOSITORY.log(
+                "FAVORITE_TEAM1_MATCH_ALLOWED",
+                (
+                    f"match={match_name}; favorite={selection.selected_team}; "
+                    f"side=TEAM_1; favorite_odds={selection.selected_odds}; "
+                    f"outsider={selection.other_team}; outsider_odds={selection.other_odds}"
+                ),
+            )
+        else:
+            selection = select_team_with_higher_odds(
+                snapshot.team1,
+                snapshot.team2,
+                initial_odds,
+            )
+
         if long_series_decision == LongSeriesDecision.SHADOW:
             runtime = await self._long_series.start_observation(
                 match_id=next_goal_match_identity(selected_match),
@@ -1769,7 +1851,7 @@ class DemoEngine:
             )
             await REPOSITORY.log(
                 "TEAM_SELECTED",
-                f"{selection.selected_team} @ {selection.selected_odds} / HIGHER_ODDS",
+                f"{selection.selected_team} @ {selection.selected_odds} / {selection_reason}",
             )
             await self._process_long_series_shadow_match(
                 selected_match=selected_match,
@@ -1861,9 +1943,13 @@ class DemoEngine:
                 ),
             )
 
-        if not self._config.team1_profile_enabled and not is_initial_odds_allowed(
-            selection.selected_odds,
-            enabled=self._config.min_initial_odds_enabled,
+        if (
+            not self._config.team1_profile_enabled
+            and not self._config.favorite_team1_enabled
+            and not is_initial_odds_allowed(
+                selection.selected_odds,
+                enabled=self._config.min_initial_odds_enabled,
+            )
         ):
             message = (
                 f"{snapshot.team1} — {snapshot.team2}: "
@@ -1883,17 +1969,22 @@ class DemoEngine:
             return
         await STATE.update(
             status=DemoStatus.TEAM_SELECTED.value,
-            message=f"Выбрана команда {selection.selected_team}: коэффициент выше",
+            message=(
+                f"Выбран фаворит слева {selection.selected_team}: коэффициент ниже"
+                if self._config.favorite_team1_enabled
+                else f"Выбрана команда {selection.selected_team}: коэффициент выше"
+            ),
             event="TEAM_SELECTED",
             selected_team=selection.selected_team,
             selected_side=selection.selected_side.value,
             initial_selected_odds=selection.selected_odds,
             other_team=selection.other_team,
-            selection_reason="HIGHER_ODDS",
+            selection_reason=selection_reason,
             odds=self._odds_state(initial_odds, selection.selected_odds, selection.other_odds),
         )
         await REPOSITORY.log(
-            "TEAM_SELECTED", f"{selection.selected_team} @ {selection.selected_odds} / HIGHER_ODDS"
+            "TEAM_SELECTED",
+            f"{selection.selected_team} @ {selection.selected_odds} / {selection_reason}",
         )
         await REPOSITORY.save_sequence(
             status="PENDING" if self._mode == "LIVE" else "ACTIVE",
