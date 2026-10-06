@@ -289,6 +289,7 @@ class DemoEngine:
             REPOSITORY.save_favorite_shadow_runtime
         )
         self._favorite_shadow_tasks: dict[str, asyncio.Task[None]] = {}
+        self._favorite_team1_rejected_match_ids: set[str] = set()
 
     async def _load_favorite_shadow(self, mode: str) -> dict[str, Any]:
         persisted = await REPOSITORY.get_favorite_shadow_runtime(mode)
@@ -1011,6 +1012,7 @@ class DemoEngine:
             self._auth_status = "UNKNOWN"
             self._mode = requested_mode
             self._current_series = None
+            self._favorite_team1_rejected_match_ids.clear()
             await self._load_long_series(requested_mode)
             await self._load_team1_profile(requested_mode)
             await self._load_favorite_shadow(requested_mode)
@@ -1479,6 +1481,19 @@ class DemoEngine:
                     )
                     continue
                 match_id = next_goal_match_identity(item)
+                if (
+                    self._config.favorite_team1_enabled
+                    and match_id
+                    and match_id in self._favorite_team1_rejected_match_ids
+                ):
+                    await REPOSITORY.log(
+                        "FAVORITE_TEAM1_REJECTED_MATCH_SKIPPED",
+                        (
+                            f"match_id={match_id}; "
+                            "match already rejected by FAVORITE + TEAM_1 filter in this run"
+                        ),
+                    )
+                    continue
                 if match_id and match_id in profile_observed_match_ids:
                     await REPOSITORY.log(
                         "TEAM1_PROFILE_OBSERVED_MATCH_SKIPPED",
@@ -1799,6 +1814,9 @@ class DemoEngine:
                     other_odds = (
                         favorite.other_odds if favorite is not None else initial_odds.team2
                     )
+                match_id = next_goal_match_identity(selected_match)
+                if match_id:
+                    self._favorite_team1_rejected_match_ids.add(match_id)
                 message = f"{match_name}: FAVORITE TEAM_1 пропуск; {detail}"
                 await REPOSITORY.log(
                     "FAVORITE_TEAM1_MATCH_SKIPPED",
@@ -1819,6 +1837,13 @@ class DemoEngine:
                     "FAVORITE_TEAM1_MATCH_SKIPPED",
                     odds=self._odds_state(
                         initial_odds, selected_odds, other_odds
+                    ),
+                )
+                await REPOSITORY.log(
+                    "FAVORITE_TEAM1_SWITCHING_TO_NEXT_MATCH",
+                    (
+                        f"match={match_name}; match_id={match_id or 'unknown'}; "
+                        "current match excluded for this run, scanning next candidate"
                     ),
                 )
                 return
