@@ -28,6 +28,31 @@ def select_favorite_with_lower_odds(
     return TeamSelection(team2, Scorer.TEAM_2, odds.team2, team1, odds.team1)
 
 
+def favorite_team1_entry_selection(
+    team1: str,
+    team2: str,
+    odds: NextGoalOdds,
+) -> TeamSelection | None:
+    """Allow only a strict lower-odds favorite located on TEAM_1."""
+    favorite = select_favorite_with_lower_odds(team1, team2, odds)
+    if favorite is None or favorite.selected_side != Scorer.TEAM_1:
+        return None
+    return favorite
+
+
+def favorite_team1_rejection_reason(
+    team1: str,
+    team2: str,
+    odds: NextGoalOdds,
+) -> str | None:
+    favorite = select_favorite_with_lower_odds(team1, team2, odds)
+    if favorite is None:
+        return "EQUAL_INITIAL_ODDS"
+    if favorite.selected_side != Scorer.TEAM_1:
+        return "FAVORITE_IS_TEAM_2"
+    return None
+
+
 def default_favorite_shadow_runtime(*, enabled: bool = False) -> dict[str, Any]:
     return {
         "enabled": bool(enabled),
