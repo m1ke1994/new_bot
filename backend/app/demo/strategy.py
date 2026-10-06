@@ -42,6 +42,7 @@ class StrategyConfig:
     team1_profile_enabled: bool
     team1_profile_max_odds: Decimal
     favorite_shadow_enabled: bool
+    favorite_team1_enabled: bool
     run_time_limit_enabled: bool
     run_duration_hours: int
     strategy_type: StrategyType
@@ -77,6 +78,9 @@ class StrategyConfig:
         favorite_shadow_enabled = _boolean_setting(
             payload, "favorite_shadow_enabled", default=False
         )
+        favorite_team1_enabled = _boolean_setting(
+            payload, "favorite_team1_enabled", default=False
+        )
         run_time_limit_enabled = _boolean_setting(
             payload, "run_time_limit_enabled", default=False
         )
@@ -102,6 +106,7 @@ class StrategyConfig:
             team1_profile_enabled,
             team1_profile_max_odds,
             favorite_shadow_enabled,
+            favorite_team1_enabled,
             run_time_limit_enabled,
             run_duration_hours,
             strategy_type,
@@ -120,6 +125,10 @@ class StrategyConfig:
             raise ValueError("stakes must contain one positive amount per step")
         if self.team1_profile_max_odds <= 0:
             raise ValueError("team1_profile_max_odds must be greater than zero")
+        if self.team1_profile_enabled and self.favorite_team1_enabled:
+            raise ValueError(
+                "team1_profile_enabled and favorite_team1_enabled are mutually exclusive"
+            )
         if self.run_duration_hours not in {3, 6, 12, 24}:
             raise ValueError("run_duration_hours must be one of 3, 6, 12, 24")
 
@@ -138,6 +147,7 @@ class StrategyConfig:
             "team1_profile_enabled": self.team1_profile_enabled,
             "team1_profile_max_odds": float(self.team1_profile_max_odds),
             "favorite_shadow_enabled": self.favorite_shadow_enabled,
+            "favorite_team1_enabled": self.favorite_team1_enabled,
             "run_time_limit_enabled": self.run_time_limit_enabled,
             "run_duration_hours": self.run_duration_hours,
             "strategy_type": self.strategy_type.value,
