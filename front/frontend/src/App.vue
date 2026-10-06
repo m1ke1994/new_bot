@@ -189,6 +189,8 @@ const strategyConfig = ref({
 
   favorite_team1_enabled: false,
 
+  favorite_team1_min_odds: 2,
+
   run_time_limit_enabled: false,
 
   run_duration_hours: 3,
@@ -781,6 +783,7 @@ const configInvalid = computed(() => {
     || config.stakes.length !== Number(config.max_steps)
     || config.stakes.some((amount) => !Number.isFinite(Number(amount)) || Number(amount) <= 0)
     || (config.team1_profile_enabled && !(Number(config.team1_profile_max_odds) > 0))
+    || (config.favorite_team1_enabled && !(Number(config.favorite_team1_min_odds) > 0))
     || (config.team1_profile_enabled && config.favorite_team1_enabled)
 
 })
@@ -1386,14 +1389,24 @@ onBeforeUnmount(() => {
               <span class="filter-state">{{ strategyConfig.favorite_shadow_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
             </label>
 
-            <label v-if="strategyConfig.strategy_type === 'NEXT_GOAL'" :class="['match-filter-option', { 'filter-disabled': !strategyConfig.favorite_team1_enabled }]">
+            <div v-if="strategyConfig.strategy_type === 'NEXT_GOAL'" :class="['match-filter-option', { 'filter-disabled': !strategyConfig.favorite_team1_enabled }]">
               <input v-model="strategyConfig.favorite_team1_enabled" type="checkbox" :disabled="state.running || actionPending" @change="toggleFavoriteTeam1Filter">
               <span class="filter-copy">
                 <strong>FAVORITE + TEAM_1</strong>
-                <small>Реальная стратегия выбирает меньший стартовый кф и ставит только когда фаворит находится слева (Команда 1). Фаворит справа и равные кф — пропуск. Фильтр «кф от 1.93» при этом не применяется.</small>
+                <small>Реальная стратегия выбирает меньший стартовый кф и ставит только когда фаворит находится слева (Команда 1) и его кф не ниже заданного порога. Фаворит справа, равные кф и кф ниже порога — пропуск. Общий фильтр «кф от 1.93» при этом не применяется.</small>
               </span>
               <span class="filter-state">{{ strategyConfig.favorite_team1_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
-            </label>
+              <input
+                v-model.number="strategyConfig.favorite_team1_min_odds"
+                class="profile-odds-input"
+                type="number"
+                min="1.01"
+                step="0.001"
+                :disabled="state.running || actionPending || !strategyConfig.favorite_team1_enabled"
+                title="Нижняя граница включается: при 2.00 бот ставит только при кф фаворита ≥ 2.00"
+                @change="saveMatchFilters"
+              >
+            </div>
 
           </div>
 
@@ -1422,7 +1435,8 @@ onBeforeUnmount(() => {
             <div><span>FAVORITE + TEAM_1</span><strong>ВКЛ</strong></div>
             <div><span>Выбор</span><strong>Меньший кф</strong><small>фаворит</small></div>
             <div><span>Сторона</span><strong>Команда 1</strong><small>только слева</small></div>
-            <div><span>Остальные</span><strong>SKIP</strong><small>TEAM_2 / равные кф</small></div>
+            <div><span>КФ от</span><strong>{{ formatNumber(strategyConfig.favorite_team1_min_odds, 3) }}</strong><small>граница включительно</small></div>
+            <div><span>Остальные</span><strong>SKIP</strong><small>TEAM_2 / равные / кф ниже порога</small></div>
           </div>
 
         </div>
