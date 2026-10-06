@@ -65,6 +65,8 @@ from backend.app.team1_profile import (
 from backend.app.favorite_shadow import (
     FAVORITE_SHADOW_MAX_STEPS,
     FavoriteShadowRuntime,
+    favorite_team1_entry_selection,
+    favorite_team1_rejection_reason,
     select_favorite_with_lower_odds,
 )
 
@@ -1749,44 +1751,46 @@ class DemoEngine:
             return
         selection_reason = "HIGHER_ODDS"
         if self._config.favorite_team1_enabled:
-            selection = select_favorite_with_lower_odds(
+            rejection_reason = favorite_team1_rejection_reason(
                 snapshot.team1,
                 snapshot.team2,
                 initial_odds,
             )
-            if selection is None:
-                message = (
-                    f"{match_name}: FAVORITE TEAM_1 пропуск; "
-                    f"равные стартовые кф {initial_odds.team1} / {initial_odds.team2}"
-                )
-                await REPOSITORY.log(
-                    "FAVORITE_TEAM1_MATCH_SKIPPED",
-                    f"{message}; reason=EQUAL_INITIAL_ODDS",
-                )
-                if long_series_decision == LongSeriesDecision.ALLOW:
-                    long_runtime = await self._long_series.release_allowed_match(
-                        next_goal_match_identity(selected_match)
+            selection = favorite_team1_entry_selection(
+                snapshot.team1,
+                snapshot.team2,
+                initial_odds,
+            )
+            if rejection_reason is not None or selection is None:
+                if rejection_reason == "EQUAL_INITIAL_ODDS":
+                    detail = (
+                        f"равные стартовые кф "
+                        f"{initial_odds.team1} / {initial_odds.team2}"
                     )
-                    await STATE.update(long_series=long_runtime)
-                await self._status(
-                    DemoStatus.MATCH_SKIPPED,
-                    message,
-                    "FAVORITE_TEAM1_MATCH_SKIPPED",
-                    odds=self._odds_state(
-                        initial_odds, initial_odds.team1, initial_odds.team2
-                    ),
-                )
-                return
-            selection_reason = "LOWER_ODDS_FAVORITE_TEAM_1"
-            if selection.selected_side != Scorer.TEAM_1:
-                message = (
-                    f"{match_name}: FAVORITE TEAM_1 пропуск; "
-                    f"фаворит {selection.selected_team} стоит справа "
-                    f"({selection.selected_side.value}) @ {selection.selected_odds}"
-                )
+                    selected_odds = initial_odds.team1
+                    other_odds = initial_odds.team2
+                else:
+                    favorite = select_favorite_with_lower_odds(
+                        snapshot.team1,
+                        snapshot.team2,
+                        initial_odds,
+                    )
+                    detail = (
+                        f"фаворит {favorite.selected_team} стоит справа "
+                        f"({favorite.selected_side.value}) @ {favorite.selected_odds}"
+                        if favorite is not None
+                        else "фаворит не определён"
+                    )
+                    selected_odds = (
+                        favorite.selected_odds if favorite is not None else initial_odds.team1
+                    )
+                    other_odds = (
+                        favorite.other_odds if favorite is not None else initial_odds.team2
+                    )
+                message = f"{match_name}: FAVORITE TEAM_1 пропуск; {detail}"
                 await REPOSITORY.log(
                     "FAVORITE_TEAM1_MATCH_SKIPPED",
-                    f"{message}; reason=FAVORITE_IS_TEAM_2",
+                    f"{message}; reason={rejection_reason or 'NOT_ALLOWED'}",
                 )
                 if long_series_decision == LongSeriesDecision.ALLOW:
                     long_runtime = await self._long_series.release_allowed_match(
@@ -1802,10 +1806,11 @@ class DemoEngine:
                     message,
                     "FAVORITE_TEAM1_MATCH_SKIPPED",
                     odds=self._odds_state(
-                        initial_odds, selection.selected_odds, selection.other_odds
+                        initial_odds, selected_odds, other_odds
                     ),
                 )
                 return
+            selection_reason = "LOWER_ODDS_FAVORITE_TEAM_1"
             await REPOSITORY.log(
                 "FAVORITE_TEAM1_MATCH_ALLOWED",
                 (
