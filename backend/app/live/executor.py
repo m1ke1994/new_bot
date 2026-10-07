@@ -106,12 +106,6 @@ ACCEPTED_COUPON_CLEANUP_SECONDS = 0.35
 SUCCESS_MODAL_ACTION_TIMEOUT_MS = 900
 SUCCESS_MODAL_CLOSE_RETRIES = 3
 
-# ТЕСТОВЫЙ АККАУНТ:
-# автоподтверждение включено прямо в коде, ENV больше не требуется.
-# Перед использованием другого аккаунта переключите значение на False.
-TEST_AUTO_CONFIRM = True
-
-
 def _amount_text(amount: float) -> str:
     decimal = Decimal(str(amount))
     return str(int(decimal)) if decimal == decimal.to_integral_value() else format(decimal, "f")
@@ -1460,26 +1454,15 @@ class LiveExecutor:
                     raise LivePreparationError(
                         "LIVE_AMOUNT_VERIFICATION_FAILED", "Сумма ставки изменилась перед подтверждением."
                     )
-                # Сохраняем handle и listener: это оставляет прежний ручной режим рабочим,
-                # когда автоподтверждение тестового аккаунта выключено.
+                # LIVE всегда отправляет реальную ставку автоматически:
+                # сумма текущего шага уже введена и перепроверена выше.
                 await self._arm_confirm_button(confirm, decision.attempt_id)
-
-                if not TEST_AUTO_CONFIRM:
-                    await self._publish(
-                        decision.attempt_id,
-                        LiveStatus.READY_FOR_MANUAL_CONFIRMATION,
-                        "Coupon проверен. Нажмите «Сделать ставку» один раз вручную.",
-                        publish,
-                    )
-                    return
-
-                # ТЕСТОВЫЙ АККАУНТ: после полной проверки coupon автоматически
-                # нажимаем ту же кнопку, которую раньше должен был нажать пользователь.
                 await self._log(
-                    "TEST_AUTO_CONFIRM",
+                    "LIVE_AUTO_SUBMIT",
                     (
-                        f"attempt={decision.attempt_id} "
-                        f"step={decision.strategy_step} amount={expected_text}"
+                        f"attempt={decision.attempt_id}; "
+                        f"step={decision.strategy_step}; amount={expected_text}; "
+                        "action=click_make_bet"
                     ),
                 )
 
@@ -1605,8 +1588,8 @@ class LiveExecutor:
                             ),
                         )
                         click_message = (
-                            "Тестовый режим: кнопка «Сделать ставку» нажата автоматически; "
-                            "ждём ответ сайта"
+                            "LIVE: сумма шага введена, «Сделать ставку» нажата; "
+                            "ждём подтверждение принятия"
                         )
                         break
 
