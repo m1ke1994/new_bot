@@ -1466,7 +1466,11 @@ class DemoEngine:
             # A temporarily unreadable card must not freeze the worker forever.
             # Allow known upcoming matches after several consecutive incomplete scans.
             fallback_scan = unclassified_scan_streak >= 3
-            matches = await league.scan(allow_unclassified=fallback_scan)
+            matches = (
+                await league.scan(allow_unclassified=True)
+                if fallback_scan
+                else await league.scan()
+            )
             stats = league.last_scan_stats
             await REPOSITORY.log("MATCHES_FOUND", str(stats["total"]))
             await REPOSITORY.log(
