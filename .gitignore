@@ -1,34 +1,30 @@
+
+!.env.example
+# Browser / Playwright profile
 # Diagnostics
-backend/diagnostics/canvas/*.png
-backend/diagnostics/canvas/latest_analysis.json
-backend/diagnostics/canvas/*.json
+# Frontend
+# Logs
+# Python cache
+# Secrets / local configuration
+# Virtual environments
+*.log
+*.pyc
+*.pyo
+.env
+.env.*
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
+backend/data/
 backend/data/*.jsonl
 backend/data/*.sqlite3
 backend/data/*.sqlite3-*
-backend/data/
-
-# Python cache
-__pycache__/
-*.pyc
-*.pyo
-.pytest_cache/
-.ruff_cache/
-
-# Browser / Playwright profile
+backend/diagnostics/canvas/*.json
+backend/diagnostics/canvas/*.png
+backend/diagnostics/canvas/latest_analysis.json
 browser_profile/
-
-# Secrets / local configuration
-.env
-.env.*
-!.env.example
-
-# Frontend
-node_modules/
+browser_profile_cdp/
 dist/
-
-# Virtual environments
-.venv/
+node_modules/
 venv/
-
-# Logs
-*.log
