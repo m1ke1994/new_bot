@@ -94,7 +94,7 @@ class LeagueBrowser:
                 await self.page.wait_for_timeout(MATCH_CARD_RETRY_DELAY_MS)
         return item
 
-    async def scan(self) -> list[dict[str, Any]]:
+    async def scan(self, *, allow_unclassified: bool = False) -> list[dict[str, Any]]:
         container = await find_league_container(self.page)
         if container is None:
             raise RuntimeError("Контейнер целевой лиги не найден.")
@@ -169,7 +169,7 @@ class LeagueBrowser:
 
         # Never choose a later match while an earlier card is temporarily
         # unreadable. The next engine scan will retry the league DOM.
-        if unclassified:
+        if unclassified and not allow_unclassified:
             return []
         return upcoming
 
