@@ -314,6 +314,47 @@ class LeagueTeamFilterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(browser.skipped_unclassified[0]["id"], "nearest")
         write_front.assert_awaited_once_with([later])
 
+    async def test_bounded_fallback_uses_confirmed_upcoming_matches(self):
+        class FakeLinks:
+            async def count(self):
+                return 2
+
+            def nth(self, index):
+                return index
+
+        unknown = {
+            "id": "unknown",
+            "team1": "Nice",
+            "team2": "West Ham",
+            "finished": False,
+            "is_upcoming": False,
+            "period": "",
+            "time": "",
+            "time_seconds": None,
+        }
+        candidate = {
+            "id": "candidate",
+            "team1": "PSG",
+            "team2": "Bayern",
+            "finished": False,
+            "is_upcoming": True,
+            "period": "",
+            "time": "02:00",
+            "time_seconds": 120,
+        }
+        with (
+            patch("backend.app.browser.league.find_league_container", AsyncMock(return_value=object())),
+            patch("backend.app.browser.league.league_match_links", return_value=FakeLinks()),
+            patch("backend.app.browser.league.match_card_for_link", side_effect=lambda item: item),
+            patch("backend.app.browser.league.parse_match", AsyncMock(side_effect=[unknown] * 4 + [candidate])),
+            patch("backend.app.browser.league.write_front", AsyncMock()),
+        ):
+            browser = LeagueBrowser(AsyncMock(), exclude_teams_enabled=False)
+            result = await browser.scan(allow_unclassified=True)
+
+        self.assertEqual([item["id"] for item in result], ["candidate"])
+        self.assertEqual(browser.last_scan_stats["unclassified"], 1)
+
     async def test_open_match_does_not_wait_for_spa_navigation_inside_click(self):
         href = "/ru/live/fifa/2860561-fc-25-3x3-conference-league/123-test"
         target_url = "https://example.test" + href
