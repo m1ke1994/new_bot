@@ -23,10 +23,19 @@ class DemoBudgetTests(unittest.TestCase):
         second = budget.settle("bet-2", "LOSE", 44)
         third = budget.settle("bet-3", "WIN", 97)
 
-        self.assertEqual(first["budget_after"], 4122)
-        self.assertEqual(second["budget_after"], 4078)
-        self.assertEqual(third["budget_after"], 4175)
-        self.assertEqual(budget.current_budget, 4175)
+        self.assertEqual(
+            first["budget_after"],
+            float(DEMO_START_BUDGET - Decimal("20.00")),
+        )
+        self.assertEqual(
+            second["budget_after"],
+            float(DEMO_START_BUDGET - Decimal("64.00")),
+        )
+        self.assertEqual(
+            third["budget_after"],
+            float(DEMO_START_BUDGET + Decimal("33.00")),
+        )
+        self.assertEqual(budget.current_budget, DEMO_START_BUDGET + Decimal("33.00"))
         self.assertEqual(budget.session_profit, 33)
         self.assertEqual(budget.initial_budget, DEMO_START_BUDGET)
 
@@ -37,7 +46,7 @@ class DemoBudgetTests(unittest.TestCase):
 
         self.assertIsNotNone(applied)
         self.assertIsNone(duplicate)
-        self.assertEqual(budget.current_budget, 4239)
+        self.assertEqual(budget.current_budget, DEMO_START_BUDGET + Decimal("97.00"))
 
 
 class DemoJournalTests(unittest.IsolatedAsyncioTestCase):

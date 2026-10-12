@@ -191,6 +191,7 @@ class SelectorConfig:
     match_time: str
     match_period: str
     score: str
+    match_translation_button: str
     match_market: str
     market_name: str
     market_value: str
@@ -282,6 +283,12 @@ class SelectorConfig:
             match_time=one("SELECTOR_MATCH_TIME"),
             match_period=one("SELECTOR_MATCH_PERIOD"),
             score=one("SELECTOR_SCORE"),
+            # Keep the known stable data-test selector available for existing
+            # local .env files until they are updated from .env.example.
+            match_translation_button=(
+                one("SELECTOR_MATCH_TRANSLATION_BUTTON")
+                or 'button[data-test="betting-dashboard-action-translation"]'
+            ),
             match_market=one("SELECTOR_MATCH_MARKET"),
             market_name=one("SELECTOR_MARKET_NAME"),
             market_value=one("SELECTOR_MARKET_VALUE"),

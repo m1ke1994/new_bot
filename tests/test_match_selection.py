@@ -2,7 +2,12 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from backend.app.browser.league import LeagueBrowser
-from matches import is_upcoming_match, sort_upcoming_matches
+from matches import (
+    TRANSLATION_BUTTON_SELECTOR,
+    has_translation_button,
+    is_upcoming_match,
+    sort_upcoming_matches,
+)
 
 
 class MatchSelectionTests(unittest.TestCase):
@@ -24,8 +29,122 @@ class MatchSelectionTests(unittest.TestCase):
         result = sort_upcoming_matches(matches)
         self.assertEqual([item["id"] for item in result], ["nearest", "late"])
 
+    def test_translation_button_is_an_initial_demo_filter_only(self):
+        card = {
+            "period": "",
+            "finished": False,
+            "time_seconds": 42,
+            "has_translation_button": True,
+        }
+        self.assertFalse(
+            is_upcoming_match(
+                **card,
+                initial_demo_filter_enabled=True,
+            )
+        )
+        self.assertTrue(
+            is_upcoming_match(
+                **card,
+                initial_demo_filter_enabled=False,
+            )
+        )
+
+
+class TranslationButtonTests(unittest.IsolatedAsyncioTestCase):
+    async def test_translation_check_is_scoped_to_the_given_card(self):
+        class ButtonLocator:
+            def __init__(self, count):
+                self._count = count
+
+            async def count(self):
+                return self._count
+
+        class Card:
+            def __init__(self, button_count):
+                self.button_count = button_count
+                self.selectors = []
+
+            def locator(self, selector):
+                self.selectors.append(selector)
+                return ButtonLocator(self.button_count)
+
+        live_card = Card(1)
+        future_card = Card(0)
+
+        self.assertTrue(await has_translation_button(live_card))
+        self.assertFalse(await has_translation_button(future_card))
+        self.assertEqual(live_card.selectors, [TRANSLATION_BUTTON_SELECTOR])
+        self.assertEqual(future_card.selectors, [TRANSLATION_BUTTON_SELECTOR])
+
 
 class LeagueTeamFilterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_initial_demo_filter_skips_only_cards_with_translation_button(self):
+        class FakeLinks:
+            async def count(self):
+                return len(items)
+
+            def nth(self, index):
+                return index
+
+        items = [
+            {
+                "id": "already-live",
+                "team1": "Fenerbahçe",
+                "team2": "ПСЖ",
+                "finished": False,
+                "is_upcoming": False,
+                "initial_live_skipped": True,
+                "period": "",
+                "time_seconds": 10,
+            },
+            {
+                "id": "future",
+                "team1": "Arsenal",
+                "team2": "Milan",
+                "finished": False,
+                "is_upcoming": True,
+                "initial_live_skipped": False,
+                "period": "",
+                "time_seconds": 20,
+            },
+        ]
+        parse_match = AsyncMock(side_effect=items)
+        with (
+            patch(
+                "backend.app.browser.league.find_league_container",
+                AsyncMock(return_value=object()),
+            ),
+            patch(
+                "backend.app.browser.league.league_match_links",
+                return_value=FakeLinks(),
+            ),
+            patch(
+                "backend.app.browser.league.match_card_for_link",
+                side_effect=lambda item: item,
+            ),
+            patch("backend.app.browser.league.parse_match", parse_match),
+            patch("backend.app.browser.league.write_front", AsyncMock()),
+        ):
+            browser = LeagueBrowser(
+                AsyncMock(),
+                exclude_teams_enabled=False,
+                initial_demo_filter_enabled=True,
+            )
+            result = await browser.scan()
+
+        self.assertEqual([item["id"] for item in result], ["future"])
+        self.assertEqual(
+            [item["id"] for item in browser.skipped_initial_live],
+            ["already-live"],
+        )
+        self.assertEqual(browser.last_scan_stats["initial_live_skipped"], 1)
+        self.assertTrue(
+            all(
+                call.kwargs["initial_demo_filter_enabled"]
+                for call in parse_match.await_args_list
+            )
+        )
+
     async def test_scan_excludes_banned_teams_before_nearest_match_selection(self):
         class FakeLinks:
             async def count(self):
@@ -256,6 +375,41 @@ class LeagueTeamFilterTests(unittest.IsolatedAsyncioTestCase):
             timeout=15_000,
         )
         self.assertEqual(opened["url"], target_url)
+
+    async def test_revalidation_keeps_selected_match_after_it_turns_live(self):
+        match = {
+            "number": 1,
+            "href": "/ru/live/fifa/league/789-test",
+            "is_upcoming": True,
+        }
+        link = AsyncMock()
+        link.first = link
+        page = AsyncMock()
+        page.locator = MagicMock(return_value=link)
+        block = object()
+        current = {
+            "finished": False,
+            "is_upcoming": False,
+            "period": "1-й тайм",
+        }
+        parse_match = AsyncMock(return_value=current)
+        browser = LeagueBrowser(page, initial_demo_filter_enabled=True)
+
+        with (
+            patch(
+                "backend.app.browser.league.match_card_for_link",
+                return_value=block,
+            ),
+            patch("backend.app.browser.league.parse_match", parse_match),
+        ):
+            result = await browser.revalidate_upcoming(match)
+
+        self.assertIs(result, current)
+        parse_match.assert_awaited_once_with(
+            block,
+            1,
+            initial_demo_filter_enabled=False,
+        )
 
     async def test_disabled_filter_keeps_excluded_team_in_candidates(self):
         class FakeLinks:

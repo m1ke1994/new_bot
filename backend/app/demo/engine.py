@@ -290,6 +290,8 @@ class DemoEngine:
         )
         self._favorite_shadow_tasks: dict[str, asyncio.Task[None]] = {}
         self._favorite_team1_rejected_match_ids: set[str] = set()
+        self._initial_demo_filter_pending = True
+        self._initial_demo_filter_announced = False
 
     async def _load_favorite_shadow(self, mode: str) -> dict[str, Any]:
         persisted = await REPOSITORY.get_favorite_shadow_runtime(mode)
@@ -974,6 +976,47 @@ class DemoEngine:
     def mode(self) -> str:
         return self._mode
 
+    def _initial_demo_filter_active(self) -> bool:
+        return self._mode == "DEMO" and self._initial_demo_filter_pending
+
+    async def _announce_initial_demo_filter(self) -> None:
+        if not self._initial_demo_filter_active() or self._initial_demo_filter_announced:
+            return
+        self._initial_demo_filter_announced = True
+        await REPOSITORY.log(
+            "DEMO_INITIAL_FILTER_STARTED",
+            "[DEMO] Запуск первоначального отбора матчей",
+        )
+
+    async def _finish_initial_demo_filter(self, match_name: str) -> None:
+        """Consume the translation-button filter exactly once per DEMO start."""
+        if not self._initial_demo_filter_active():
+            return
+        self._initial_demo_filter_pending = False
+        await REPOSITORY.log(
+            "DEMO_INITIAL_FILTER_COMPLETED",
+            (
+                f"[ВЫБРАН] Ближайший подходящий матч: {match_name}\n"
+                "[DEMO] Стартовый фильтр завершён\n"
+                "[DEMO] Стандартная стратегия активирована"
+            ),
+        )
+
+    async def _log_initial_live_skips(self, league: LeagueBrowser) -> None:
+        if not self._initial_demo_filter_active():
+            return
+        for item in getattr(league, "skipped_initial_live", []):
+            await REPOSITORY.log(
+                "DEMO_INITIAL_LIVE_MATCH_SKIPPED",
+                (
+                    f"[ПРОВЕРКА] {item.get('team1') or '<не прочитано>'} — "
+                    f"{item.get('team2') or '<не прочитано>'}\n"
+                    "[ПРОПУСК] Обнаружена кнопка видеотрансляции\n"
+                    "[ПРИЧИНА] Матч уже идёт по стартовому фильтру\n"
+                    "[ПОИСК] Переход к следующему матчу"
+                ),
+            )
+
     async def start(self, mode: str = "DEMO") -> dict[str, Any]:
         requested_mode = mode.strip().upper()
         if requested_mode not in {"DEMO", "LIVE"}:
@@ -1011,6 +1054,8 @@ class DemoEngine:
             self._authorized_generation = -1
             self._auth_status = "UNKNOWN"
             self._mode = requested_mode
+            self._initial_demo_filter_pending = requested_mode == "DEMO"
+            self._initial_demo_filter_announced = False
             self._current_series = None
             self._favorite_team1_rejected_match_ids.clear()
             await self._load_long_series(requested_mode)
@@ -1364,6 +1409,7 @@ class DemoEngine:
             page,
             exclude_teams_enabled=self._config.exclude_teams_enabled,
         )
+        league.initial_demo_filter_enabled = self._initial_demo_filter_active()
         await self._status(DemoStatus.OPENING_LEAGUE, "Открываем страницу лиги", "LEAGUE_OPENING")
         await league.open()
         await REPOSITORY.log("LEAGUE_OPENED", CONFIG.league_name)
@@ -1409,6 +1455,8 @@ class DemoEngine:
                 page,
                 exclude_teams_enabled=self._config.exclude_teams_enabled,
             )
+            league.initial_demo_filter_enabled = self._initial_demo_filter_active()
+            await self._announce_initial_demo_filter()
             await self._status(
                 DemoStatus.SCANNING_MATCHES,
                 "Считываем актуальный DOM списка матчей",
@@ -1422,9 +1470,11 @@ class DemoEngine:
                 f"Всего: {stats['total']}; Started: {stats['started']}; "
                 f"Finished: {stats.get('finished', 0)}; "
                 f"Excluded: {stats.get('excluded', 0)}; "
+                f"Initial LIVE skipped: {stats.get('initial_live_skipped', 0)}; "
                 f"Unclassified: {stats.get('unclassified', 0)}; "
                 f"Upcoming: {stats['upcoming']}",
             )
+            await self._log_initial_live_skips(league)
             for item in league.skipped_started:
                 await REPOSITORY.log(
                     "MATCH_SKIPPED_STARTED",
@@ -1559,6 +1609,9 @@ class DemoEngine:
             )
             if selected_candidate is not None:
                 selected_match = selected_candidate
+                await self._finish_initial_demo_filter(
+                    f"{selected_match['team1']} — {selected_match['team2']}"
+                )
                 break
             if blocked_match_ids:
                 await self._status(
@@ -2312,21 +2365,30 @@ class DemoEngine:
                 "cycle_id": cycle_id,
                 "match_id": selected_match.get("match_id"),
                 "match": match_name,
+                # Keep the complete accepted-bet identity in SQLite.  In
+                # particular, settlement must never depend on a market row or
+                # odds that can already have changed after a goal.
+                "team1": snapshot.team1,
+                "team2": snapshot.team2,
                 "selected_team": selection.selected_team,
                 "selected_side": selection.selected_side.value,
                 "side_label": selected_side_label,
                 "step": step,
                 "amount": amount,
+                "stake_amount": amount,
                 "odds": selected_odd,
+                "accepted_odds": selected_odd,
                 "score_before": score_before.text(),
                 "score_after": None,
                 "scorer": None,
                 "result": "ACTIVE",
                 "status": active_status,
+                "strategy_state": "BET_ACCEPTED",
                 "settled": False,
                 "market": current_odds.market,
                 "next_goal_number": current_odds.next_goal_number,
                 "created_at": created_at,
+                "accepted_at": created_at,
                 "resolved_at": None,
                 "budget_before": float(self._budget.current_budget),
                 "budget_change": None,
@@ -2389,28 +2451,12 @@ class DemoEngine:
                 event=f"{self._mode}_BET_CREATED",
                 odds=self._odds_state(current_odds, selected_odd, opponent_odd),
                 bet={
-                    "id": bet_id,
-                    "step": step,
+                    **active_record,
                     "max_steps": self._config.max_steps,
-                    "amount": amount,
-                    "selected_team": selection.selected_team,
-                    "selected_side": selection.selected_side.value,
-                    "side_label": selected_side_label,
-                    "match": match_name,
-                    "market": current_odds.market,
-                    "odds": selected_odd,
-                    "score_before": score_before.text(),
-                    "next_goal_number": current_odds.next_goal_number,
                     "status": (
                         "WAITING_FOR_MATCH_START"
                         if waiting_for_match_start
                         else "WAITING_FOR_GOAL"
-                    ),
-                    "created_at": created_at,
-                    "budget_before": (
-                        float(self._budget.current_budget)
-                        if self._mode == "DEMO"
-                        else None
                     ),
                 },
                 budget=self._budget.snapshot(),
@@ -2459,10 +2505,47 @@ class DemoEngine:
                             ),
                         )
 
-                started_snapshot = await self._wait_for_match_start(selected_match)
+                started_snapshot = await self._wait_for_match_start(
+                    selected_match,
+                    baseline=snapshot,
+                )
                 if started_snapshot is None:
                     return
                 snapshot = started_snapshot
+
+                # The virtual coupon was already validated and persisted
+                # before this wait.  Once the scoreboard is live (or a goal
+                # proves it has started), make that durable state explicit
+                # before inspecting the score delta.  This is important for a
+                # page refresh between MATCH_STARTED and settlement.
+                active_record = {
+                    **active_record,
+                    "status": "ACTIVE",
+                    "strategy_state": DemoStatus.BET_ACTIVE.value,
+                    "match_started_at": local_now(),
+                }
+                await REPOSITORY.save_bet(active_record)
+                await STATE.update(
+                    status=DemoStatus.BET_ACTIVE.value,
+                    event="DEMO_BET_ACCEPTED",
+                    message=(
+                        "Матч начался; принятая виртуальная ставка "
+                        "ожидает следующий гол"
+                    ),
+                    bet={
+                        **active_record,
+                        "max_steps": self._config.max_steps,
+                        "status": "WAITING_FOR_GOAL",
+                    },
+                )
+                await REPOSITORY.log(
+                    "DEMO_BET_ACCEPTED",
+                    (
+                        f"bet_id={bet_id}; step={step}; "
+                        f"accepted_at={active_record['accepted_at']}; "
+                        f"score_before={score_before.text()}"
+                    ),
+                )
 
                 # The first accepted bet belongs to goal №1 from score 0:0.
                 # The bookmaker can expose the LIVE scoreboard only after that
@@ -3363,6 +3446,7 @@ class DemoEngine:
             page,
             exclude_teams_enabled=self._config.exclude_teams_enabled,
         )
+        league.initial_demo_filter_enabled = self._initial_demo_filter_active()
         await self._status(
             DemoStatus.OPENING_LEAGUE,
             "Открываем страницу Conference League 3x3",
@@ -3405,12 +3489,15 @@ class DemoEngine:
                 await self.browser_manager.ensure_page(),
                 exclude_teams_enabled=self._config.exclude_teams_enabled,
             )
+            league.initial_demo_filter_enabled = self._initial_demo_filter_active()
+            await self._announce_initial_demo_filter()
             await self._status(
                 DemoStatus.SCANNING_MATCHES,
                 "Ищем следующий ближайший матч для ничьей в 1-м тайме",
                 "FIRST_HALF_DRAW_SEARCHING_MATCH",
             )
             matches = await league.scan()
+            await self._log_initial_live_skips(league)
             processed = await REPOSITORY.processed_match_ids(
                 StrategyType.FIRST_HALF_DRAW.value,
                 mode=self._mode,
@@ -3443,6 +3530,9 @@ class DemoEngine:
             )
             if eligible:
                 selected_match, selected_identity = eligible[0]
+                await self._finish_initial_demo_filter(
+                    f"{selected_match['team1']} — {selected_match['team2']}"
+                )
                 break
             await self._status(
                 DemoStatus.NO_UPCOMING_MATCHES,
@@ -4100,7 +4190,10 @@ class DemoEngine:
         return None
 
     async def _wait_for_match_start(
-        self, selected_match: dict[str, Any]
+        self,
+        selected_match: dict[str, Any],
+        *,
+        baseline: ScoreboardSnapshot | None = None,
     ) -> ScoreboardSnapshot | None:
         await self._status(
             DemoStatus.WAITING_FOR_MATCH_START,
@@ -4112,14 +4205,33 @@ class DemoEngine:
             page = await self.browser_manager.ensure_page()
             try:
                 snapshot = await MatchBrowser(page).snapshot()
-                if not snapshot.period:
+                if baseline is not None and (
+                    snapshot.team1 != baseline.team1
+                    or snapshot.team2 != baseline.team2
+                ):
+                    raise RecoverableDemoError(
+                        "SCOREBOARD_TEAMS_CHANGED",
+                        "Порядок или названия команд в scoreboard изменились.",
+                    )
+
+                scorer_after_baseline = (
+                    detect_scorer(baseline.score, snapshot.score)
+                    if baseline is not None
+                    else Scorer.UNKNOWN
+                )
+                score_proves_started = scorer_after_baseline != Scorer.UNKNOWN
+                if not snapshot.period and not score_proves_started:
                     await self._publish_snapshot(snapshot, selected_match, state="UPCOMING")
                     await self._sleep_or_stop(CONFIG.score_poll_interval)
                     continue
                 await self._publish_snapshot(
                     snapshot,
                     selected_match,
-                    state="LIVE" if snapshot.period else "UPCOMING",
+                    # Some bookmaker updates publish the changed score before
+                    # the textual period.  A monotonic score delta is just as
+                    # strong evidence that the match started and must release
+                    # an already accepted virtual bet for settlement.
+                    state="LIVE",
                 )
                 await self._status(
                     DemoStatus.MATCH_STARTED,
@@ -4127,6 +4239,15 @@ class DemoEngine:
                     "MATCH_STARTED",
                 )
                 await REPOSITORY.log("MATCH_STARTED", snapshot.score.text())
+                if score_proves_started and not snapshot.period:
+                    await REPOSITORY.log(
+                        "MATCH_STARTED_INFERRED_FROM_SCORE",
+                        (
+                            f"score={baseline.score.text()}->{snapshot.score.text()}; "
+                            f"scorer={scorer_after_baseline.value}; "
+                            "period is empty"
+                        ),
+                    )
                 return snapshot
             except ScoreReadError as error:
                 retries += 1

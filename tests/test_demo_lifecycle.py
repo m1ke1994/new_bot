@@ -308,6 +308,28 @@ class DemoLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("min_initial_odds_enabled=true", filter_logs[0]["message"])
                 await engine.stop()
 
+    async def test_new_demo_start_rearms_initial_translation_filter(self):
+        manager = FakeBrowserManager()
+        with tempfile.TemporaryDirectory() as directory:
+            repository = DemoRepository(Path(directory))
+            with patch("backend.app.demo.engine.REPOSITORY", repository):
+                engine = DemoEngine(manager)
+
+                async def worker():
+                    await engine._stop_event.wait()
+
+                engine._run_guarded = worker
+                await engine.start("DEMO")
+                self.assertTrue(engine._initial_demo_filter_active())
+                await engine._finish_initial_demo_filter("A — B")
+                self.assertFalse(engine._initial_demo_filter_active())
+                await engine.stop("DEMO")
+
+                engine._run_guarded = worker
+                await engine.start("DEMO")
+                self.assertTrue(engine._initial_demo_filter_active())
+                await engine.stop("DEMO")
+
     async def test_second_start_reuses_running_task(self):
         manager = FakeBrowserManager()
         with tempfile.TemporaryDirectory() as directory:

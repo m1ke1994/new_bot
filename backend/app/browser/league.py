@@ -38,19 +38,30 @@ MATCH_CONTENT_MARKET_SELECTORS = SELECTORS.match_content_market_surfaces
 
 
 class LeagueBrowser:
-    def __init__(self, page: Page, *, exclude_teams_enabled: bool = True) -> None:
+    def __init__(
+        self,
+        page: Page,
+        *,
+        exclude_teams_enabled: bool = True,
+        initial_demo_filter_enabled: bool = False,
+    ) -> None:
         self.page = page
         self.exclude_teams_enabled = exclude_teams_enabled
+        # The engine enables this only before the first DEMO match is chosen.
+        # It is intentionally not a permanent scanner rule.
+        self.initial_demo_filter_enabled = initial_demo_filter_enabled
         self.last_scan_stats = {
             "total": 0,
             "started": 0,
             "finished": 0,
             "excluded": 0,
+            "initial_live_skipped": 0,
             "unclassified": 0,
             "upcoming": 0,
         }
         self.skipped_started: list[dict[str, Any]] = []
         self.skipped_excluded: list[dict[str, Any]] = []
+        self.skipped_initial_live: list[dict[str, Any]] = []
         self.skipped_unclassified: list[dict[str, Any]] = []
 
     async def open(self) -> None:
@@ -67,10 +78,15 @@ class LeagueBrowser:
         """Retry a card while the bookmaker is between countdown render frames."""
         item: dict[str, Any] | None = None
         for attempt in range(MATCH_CARD_READ_ATTEMPTS):
-            item = await parse_match(match_card_for_link(link), number)
+            item = await parse_match(
+                match_card_for_link(link),
+                number,
+                initial_demo_filter_enabled=self.initial_demo_filter_enabled,
+            )
             if item is not None and (
                 item.get("finished")
                 or item.get("is_upcoming")
+                or item.get("initial_live_skipped")
                 or bool(item.get("period"))
             ):
                 return item
@@ -90,6 +106,7 @@ class LeagueBrowser:
         started: list[dict[str, Any]] = []
         finished: list[dict[str, Any]] = []
         excluded: list[dict[str, Any]] = []
+        initial_live_skipped: list[dict[str, Any]] = []
         unclassified: list[dict[str, Any]] = []
 
         for index in range(total):
@@ -105,6 +122,9 @@ class LeagueBrowser:
                         "reason": "parse_match_returned_none",
                     }
                 )
+                continue
+            if item.get("initial_live_skipped"):
+                initial_live_skipped.append(item)
                 continue
             if item["finished"]:
                 finished.append(item)
@@ -135,12 +155,14 @@ class LeagueBrowser:
         await write_front(upcoming)
         self.skipped_started = started
         self.skipped_excluded = excluded
+        self.skipped_initial_live = initial_live_skipped
         self.skipped_unclassified = unclassified
         self.last_scan_stats = {
             "total": total,
             "started": len(started),
             "finished": len(finished),
             "excluded": len(excluded),
+            "initial_live_skipped": len(initial_live_skipped),
             "unclassified": len(unclassified),
             "upcoming": len(upcoming),
         }
@@ -158,11 +180,18 @@ class LeagueBrowser:
         link = self.page.locator(exact_match_link_selector(href)).first
         await link.wait_for(state="attached", timeout=10_000)
         block = match_card_for_link(link)
-        current = await parse_match(block, int(match.get("number") or 1))
-        if current is None or not current.get("is_upcoming"):
+        # The initial DEMO filter has already completed for a selected href.
+        # If this exact card turns LIVE before click/navigation, keep following
+        # it instead of selecting another match.
+        current = await parse_match(
+            block,
+            int(match.get("number") or 1),
+            initial_demo_filter_enabled=False,
+        )
+        if current is None or current.get("finished"):
             period = (current or {}).get("period") or ""
             raise MatchAlreadyStarted(
-                f"Матч уже начался перед открытием; period={period or '<empty>'}"
+                f"Матч завершился или недоступен перед открытием; period={period or '<empty>'}"
             )
         return current
 

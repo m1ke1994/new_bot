@@ -43,6 +43,7 @@ MARKET_NAME_SELECTOR = SELECTORS.market_name
 MARKET_VALUE_SELECTOR = SELECTORS.market_value
 MATCH_LINK_SELECTOR = SELECTORS.match_link
 SCORE_SELECTOR = SELECTORS.score
+TRANSLATION_BUTTON_SELECTOR = SELECTORS.match_translation_button
 
 LEAGUE_PATH = urlparse(MATCHES_URL).path.rstrip("/")
 LEAGUE_MATCH_HREF_FRAGMENT = f"{LEAGUE_PATH}/"
@@ -107,9 +108,23 @@ def is_upcoming_match(
     period: str | None,
     finished: bool,
     time_seconds: int | None,
+    initial_demo_filter_enabled: bool = False,
+    has_translation_button: bool = False,
 ) -> bool:
-    """Pure rule used by both the scanner and unit tests."""
-    return not finished and not clean_text(period) and time_seconds is not None
+    """Return whether a card can be considered by the normal upcoming matcher.
+
+    The translation-button check is deliberately limited to the first DEMO
+    selection.  It must not run while the already selected match is being
+    tracked by the strategy.
+    """
+    return (
+        not finished
+        and not clean_text(period)
+        and time_seconds is not None
+        and not (
+            initial_demo_filter_enabled and has_translation_button
+        )
+    )
 
 
 def sort_upcoming_matches(matches):
@@ -239,6 +254,14 @@ async def get_match_href(game):
         return None
 
 
+async def has_translation_button(game) -> bool:
+    """Check the stream action only inside this exact match card."""
+    try:
+        return await game.locator(TRANSLATION_BUTTON_SELECTOR).count() > 0
+    except Exception:
+        return False
+
+
 def get_match_id(href: str | None):
     if not href:
         return None
@@ -250,7 +273,12 @@ def get_match_id(href: str | None):
     return result.group(1) if result else None
 
 
-async def parse_match(game, number: int):
+async def parse_match(
+    game,
+    number: int,
+    *,
+    initial_demo_filter_enabled: bool = False,
+):
     teams = game.locator(TEAM_SELECTOR)
     if await teams.count() < 2:
         return None
@@ -274,12 +302,23 @@ async def parse_match(game, number: int):
         )
     )
 
+    # Do not even query this selector after the first DEMO match has been
+    # selected: it is a one-time startup gate, not strategy input.
+    has_translation = (
+        await has_translation_button(game)
+        if initial_demo_filter_enabled
+        else False
+    )
+    initial_live_skipped = has_translation
+
     # По текущему DOM будущие матчи имеют countdown MM:SS,
     # но не имеют текста периода (1-й тайм / 2-й тайм / завершена).
     is_upcoming = is_upcoming_match(
         period=period,
         finished=finished,
         time_seconds=time_seconds,
+        initial_demo_filter_enabled=initial_demo_filter_enabled,
+        has_translation_button=has_translation,
     )
 
     odds_team1 = await get_market_value(game, "П1")
@@ -304,6 +343,8 @@ async def parse_match(game, number: int):
         "time_seconds": time_seconds,
         "period": period,
         "is_upcoming": is_upcoming,
+        "has_translation_button": has_translation,
+        "initial_live_skipped": initial_live_skipped,
         "score": score,
         "odds_team1": odds_team1,
         "odds_draw": odds_draw,

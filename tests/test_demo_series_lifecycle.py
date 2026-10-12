@@ -400,6 +400,12 @@ class DemoSeriesLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         (live_after_first_goal, second_odds),
                     ]
                 )
+                engine._prepare_demo_virtual_until_ready = AsyncMock(
+                    side_effect=[
+                        (prematch, first_odds, 2.05, 1.80),
+                        (live_after_first_goal, second_odds, 1.95, 1.82),
+                    ]
+                )
                 engine._wait_for_match_start = AsyncMock(
                     return_value=live_after_first_goal
                 )
@@ -444,6 +450,111 @@ class DemoSeriesLifecycleTests(unittest.IsolatedAsyncioTestCase):
         events = [item["event"] for item in logs]
         self.assertIn("ACTIVE_BET_RESOLVED_DURING_LIVE_START", events)
         self.assertNotIn("CANVAS_2D_LIVE_MONITOR_REMAP_STALE", events)
+
+    async def test_accepted_team_two_bet_settles_when_score_changes_before_period_text(self):
+        """A score delta releases an accepted bet even when period is still blank.
+
+        This reproduces the broken WAITING_FOR_MATCH_START path: the bookmaker
+        may publish 0:1 before it publishes the textual LIVE period.  The
+        virtual bet has already passed coupon validation at that point, so it
+        must settle from its stored TEAM_2 identity rather than wait forever.
+        """
+        FakeLeagueBrowser.scan_calls = 0
+        FakeLeagueBrowser.open_match_calls = 0
+        prematch = ScoreboardSnapshot(
+            MATCH["team1"],
+            MATCH["team2"],
+            Score(0, 0),
+            "",
+            "",
+        )
+        score_after_goal_without_period = ScoreboardSnapshot(
+            MATCH["team1"],
+            MATCH["team2"],
+            Score(0, 1),
+            "",
+            "",
+        )
+        accepted_odds = NextGoalOdds(
+            1.80,
+            2.14,
+            market="Next goal #1",
+            next_goal_number=1,
+        )
+
+        class ScoreboardWithEarlyGoal:
+            async def snapshot(self):
+                return score_after_goal_without_period
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = DemoRepository(Path(directory))
+            with (
+                patch("backend.app.demo.engine.REPOSITORY", repository),
+                patch("backend.app.demo.engine.LeagueBrowser", FakeLeagueBrowser),
+                patch(
+                    "backend.app.demo.engine.MatchBrowser",
+                    return_value=ScoreboardWithEarlyGoal(),
+                ),
+                # DemoRepository mirrors logs to stdout.  Keep the durable
+                # SQLite log assertions while avoiding the Windows legacy
+                # console codec in this focused test.
+                patch("builtins.print"),
+            ):
+                engine = DemoEngine(FakeManager())
+                engine._mode = "DEMO"
+                engine._config = StrategyConfig.from_payload(
+                    {
+                        "initial_stake": 20,
+                        "progression_multiplier": 2.2,
+                        "max_steps": 1,
+                        "stakes": [20],
+                        "blocked_events_switch_enabled": False,
+                        "min_initial_odds_enabled": False,
+                    }
+                )
+                engine._sleep_or_stop = AsyncMock()
+                engine._wait_for_initial_zero_score = AsyncMock(
+                    return_value=prematch
+                )
+                engine._wait_for_odds = AsyncMock(
+                    return_value=(prematch, accepted_odds)
+                )
+                engine._read_fresh_score = AsyncMock(return_value=prematch)
+                engine._prepare_demo_virtual_until_ready = AsyncMock(
+                    return_value=(prematch, accepted_odds, 2.14, 1.80)
+                )
+                engine._wait_for_goal = AsyncMock()
+
+                await engine._process_next_match(object())
+
+                history = await repository.history(mode="DEMO")
+                sequence = await repository.get_sequence()
+                logs = await repository.logs()
+                budget = await repository.get_budget()
+
+        self.assertEqual(len(history), 1)
+        bet = history[0]
+        self.assertEqual(bet["result"], "WIN")
+        self.assertEqual(bet["status"], "SETTLED")
+        self.assertTrue(bet["settled"])
+        self.assertEqual(bet["selected_side"], Scorer.TEAM_2.value)
+        self.assertEqual(bet["score_before"], "0:0")
+        self.assertEqual(bet["score_after"], "0:1")
+        self.assertEqual(bet["accepted_odds"], 2.14)
+        self.assertEqual(bet["stake_amount"], 20.0)
+        self.assertTrue(bet["accepted_at"])
+        self.assertEqual(bet["team1"], MATCH["team1"])
+        self.assertEqual(bet["team2"], MATCH["team2"])
+        self.assertEqual(
+            budget["current_budget"],
+            budget["initial_budget"] + 22.8,
+        )
+        self.assertEqual(sequence["current_step"], 1)
+        engine._wait_for_goal.assert_not_awaited()
+        events = [item["event"] for item in logs]
+        self.assertIn("MATCH_STARTED_INFERRED_FROM_SCORE", events)
+        self.assertIn("ACTIVE_BET_RESOLVED_DURING_LIVE_START", events)
+        self.assertIn("WIN", events)
 
 
 if __name__ == "__main__":

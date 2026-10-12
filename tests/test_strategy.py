@@ -216,6 +216,21 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(selection.selected_side, Scorer.TEAM_2)
         self.assertEqual((selected, opponent), (1.80, 2.10))
 
+    def test_next_goal_result_uses_stored_side_and_score_delta(self):
+        """Settlement never reselects a team from odds read after the goal."""
+        cases = (
+            (Scorer.TEAM_2, Score(0, 1), "WIN"),
+            (Scorer.TEAM_2, Score(1, 0), "LOSE"),
+            (Scorer.TEAM_1, Score(1, 0), "WIN"),
+            (Scorer.TEAM_1, Score(0, 1), "LOSE"),
+        )
+        for selected_side, score_after, expected in cases:
+            with self.subTest(selected_side=selected_side, score_after=score_after):
+                scorer = detect_scorer(Score(0, 0), score_after)
+                self.assertIn(scorer, {Scorer.TEAM_1, Scorer.TEAM_2})
+                result = "WIN" if scorer == selected_side else "LOSE"
+                self.assertEqual(result, expected)
+
     def test_reference_lose_lose_win_series_keeps_team_and_steps(self):
         selection = select_team_with_higher_odds(
             "Лилль",

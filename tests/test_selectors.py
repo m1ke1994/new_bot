@@ -1,5 +1,7 @@
 import unittest
 
+from xbet_config import URL_CONFIG
+
 from backend.app.browser.scoreboard import (
     SCOREBOARD_ROOT_SELECTOR,
     SCOREBOARD_ROOT_SELECTORS,
@@ -29,6 +31,7 @@ from matches import (
     SCORE_SELECTOR,
     TEAM_SELECTOR,
     TIME_SELECTOR,
+    TRANSLATION_BUTTON_SELECTOR,
     is_league_match_href,
 )
 
@@ -43,11 +46,16 @@ class SelectorTests(unittest.TestCase):
             SCORE_SELECTOR,
             ".ui-game-scores__item--total .ui-game-scores__num",
         )
+        self.assertEqual(
+            TRANSLATION_BUTTON_SELECTOR,
+            'button[data-test="betting-dashboard-action-translation"]',
+        )
 
     def test_match_links_are_limited_to_configured_league(self):
+        league_path = URL_CONFIG.next_goal_league_path.rstrip("/")
         self.assertTrue(
             is_league_match_href(
-                "/ru/live/fifa/2860561-fc-25-3x3-conference-league/749-test"
+                f"{league_path}/749-test"
             )
         )
         self.assertFalse(
@@ -95,6 +103,7 @@ class SelectorTests(unittest.TestCase):
             TIME_SELECTOR,
             PERIOD_SELECTOR,
             SCORE_SELECTOR,
+            TRANSLATION_BUTTON_SELECTOR,
             SCOREBOARD_ROOT_SELECTOR,
             SCOREBOARD_TIMER_SELECTOR,
             SCOREBOARD_TEAM_SELECTOR,
