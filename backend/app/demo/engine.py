@@ -1424,6 +1424,7 @@ class DemoEngine:
         )
         logged_blocked_skips: set[str] = set()
         logged_completed_skips: set[str] = set()
+        unclassified_scan_streak = 0
         await STATE.update(
             selected_team=None,
             selected_side=None,
@@ -1462,7 +1463,10 @@ class DemoEngine:
                 "Считываем актуальный DOM списка матчей",
                 "MATCHES_REFRESHING",
             )
-            matches = await league.scan()
+            # A temporarily unreadable card must not freeze the worker forever.
+            # Allow known upcoming matches after several consecutive incomplete scans.
+            fallback_scan = unclassified_scan_streak >= 3
+            matches = await league.scan(allow_unclassified=fallback_scan)
             stats = league.last_scan_stats
             await REPOSITORY.log("MATCHES_FOUND", str(stats["total"]))
             await REPOSITORY.log(
@@ -1496,7 +1500,8 @@ class DemoEngine:
                         f"reason={item.get('reason', 'unknown')}"
                     ),
                 )
-            if stats.get("unclassified", 0):
+            if stats.get("unclassified", 0) and not fallback_scan:
+                unclassified_scan_streak += 1
                 await REPOSITORY.log(
                     "MATCH_SCAN_INCOMPLETE",
                     (
@@ -1507,6 +1512,13 @@ class DemoEngine:
                 await STATE.update(scanner={**stats, "selected": None})
                 await self._sleep_or_stop(CONFIG.league_retry_interval)
                 continue
+            if stats.get("unclassified", 0):
+                await REPOSITORY.log(
+                    "MATCH_SCAN_PARTIAL_FALLBACK",
+                    "После трёх неполных сканирований используем только подтверждённые предстоящие матчи; сомнительные карточки игнорируем",
+                )
+            else:
+                unclassified_scan_streak = 0
             allowed_matches = []
             completed_match_ids = await REPOSITORY.completed_next_goal_match_ids(
                 mode=self._mode,
