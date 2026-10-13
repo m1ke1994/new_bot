@@ -24,6 +24,13 @@ class OneBetPerMatchConfigTests(unittest.TestCase):
                 "favorite_team1_enabled": True,
             })
 
+    def test_max_three_conflict(self):
+        with self.assertRaises(ValueError):
+            StrategyConfig.from_payload({
+                "one_bet_per_match_enabled": True,
+                "max_three_steps_enabled": True,
+            })
+
     def test_long_series_conflict(self):
         with self.assertRaises(ValueError):
             StrategyConfig.from_payload({
