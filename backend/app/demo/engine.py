@@ -1419,6 +1419,7 @@ class DemoEngine:
             if (
                 self._config.blocked_events_switch_enabled
                 or self._config.max_three_steps_enabled
+                or (self._mode == "DEMO" and self._config.one_bet_per_match_enabled)
             )
             else set()
         )
@@ -2871,6 +2872,35 @@ class DemoEngine:
                     "NEXT_GOAL_AFTER_WIN"
                 ):
                     return
+                break
+
+            if self._mode == "DEMO" and self._config.one_bet_per_match_enabled:
+                # One accepted and settled virtual bet per match, regardless of result.
+                # Preserve the next progression step and exclude this match from
+                # the ongoing series before returning to the league scanner.
+                match_id = next_goal_match_identity(selected_match)
+                await REPOSITORY.add_blocked_match(cycle_id, match_id)
+                if step < self._config.max_steps:
+                    next_step = step + 1
+                    next_sequence = await REPOSITORY.save_sequence(
+                        current_step=next_step,
+                        status="WAITING_FOR_MATCH",
+                        current_match_id=None,
+                        selected_team=None,
+                    )
+                    self._current_series = None
+                    await REPOSITORY.log(
+                        "ONE_BET_PER_MATCH_NEXT",
+                        f"LOSE: {match_name}; следующий матч, шаг={next_step}",
+                    )
+                    await self._status(
+                        DemoStatus.WAITING_NEXT_MATCH,
+                        f"Одна ставка в матче завершена LOSE. Ищем следующий матч, шаг {next_step}",
+                        "ONE_BET_PER_MATCH_NEXT",
+                        sequence=next_sequence,
+                    )
+                    return
+                # Final step: follow the original exhausted-series handling.
                 break
 
             if self._max_three_switch_ready(
