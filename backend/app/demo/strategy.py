@@ -141,6 +141,8 @@ class StrategyConfig:
             raise ValueError("One bet per match requires outsider selection; disable favorite_team1")
         if self.one_bet_per_match_enabled and self.long_series_enabled:
             raise ValueError("One bet per match cannot be combined with LONG_SERIES")
+        if self.one_bet_per_match_enabled and self.max_three_steps_enabled:
+            raise ValueError("One bet per match cannot be combined with max_three_steps")
         if self.team1_profile_enabled and self.favorite_team1_enabled:
             raise ValueError(
                 "team1_profile_enabled and favorite_team1_enabled are mutually exclusive"
