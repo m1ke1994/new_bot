@@ -179,6 +179,8 @@ const strategyConfig = ref({
 
   max_three_steps_enabled: false,
 
+  one_bet_per_match_enabled: false,
+
   long_series_enabled: false,
 
   team1_profile_enabled: false,
@@ -407,6 +409,15 @@ async function saveMatchFilters() {
 
 }
 
+async function toggleOneBetPerMatch() {
+  if (strategyConfig.value.one_bet_per_match_enabled) {
+    strategyConfig.value.favorite_team1_enabled = false
+    strategyConfig.value.long_series_enabled = false
+    strategyConfig.value.max_three_steps_enabled = false
+  }
+  await saveMatchFilters()
+}
+
 async function toggleTeam1ProfileFilter() {
   if (strategyConfig.value.team1_profile_enabled) {
     strategyConfig.value.favorite_team1_enabled = false
@@ -417,6 +428,7 @@ async function toggleTeam1ProfileFilter() {
 async function toggleFavoriteTeam1Filter() {
   if (strategyConfig.value.favorite_team1_enabled) {
     strategyConfig.value.team1_profile_enabled = false
+    strategyConfig.value.one_bet_per_match_enabled = false
   }
   await saveMatchFilters()
 }
@@ -1328,6 +1340,16 @@ onBeforeUnmount(() => {
               <span class="filter-copy"><strong>Коэффициент от 1.93</strong><small>Минимальный коэффициент выбранной команды для входа в новую серию</small></span>
 
               <span class="filter-state">{{ strategyConfig.min_initial_odds_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
+
+            </label>
+
+            <label v-if="strategyConfig.strategy_type === 'NEXT_GOAL'" :class="['match-filter-option', { 'filter-disabled': !strategyConfig.one_bet_per_match_enabled }]">
+
+              <input v-model="strategyConfig.one_bet_per_match_enabled" type="checkbox" :disabled="state.running || actionPending" @change="toggleOneBetPerMatch">
+
+              <span class="filter-copy"><strong>Одна ставка на матч — аутсайдер (DEMO)</strong><small>На 0:0 выбираем больший КФ, после WIN сброс, после LOSE следующий шаг в другом матче. В LIVE не применяется.</small></span>
+
+              <span class="filter-state">{{ strategyConfig.one_bet_per_match_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</span>
 
             </label>
 
