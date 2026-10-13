@@ -38,6 +38,7 @@ class StrategyConfig:
     min_initial_odds_enabled: bool
     blocked_events_switch_enabled: bool
     max_three_steps_enabled: bool
+    one_bet_per_match_enabled: bool
     long_series_enabled: bool
     team1_profile_enabled: bool
     team1_profile_max_odds: Decimal
@@ -66,6 +67,9 @@ class StrategyConfig:
         )
         max_three_steps_enabled = _boolean_setting(
             payload, "max_three_steps_enabled", default=False
+        )
+        one_bet_per_match_enabled = _boolean_setting(
+            payload, "one_bet_per_match_enabled", default=False
         )
         long_series_enabled = _boolean_setting(
             payload, "long_series_enabled", default=False
@@ -106,6 +110,7 @@ class StrategyConfig:
             min_initial_odds_enabled,
             blocked_events_switch_enabled,
             max_three_steps_enabled,
+            one_bet_per_match_enabled,
             long_series_enabled,
             team1_profile_enabled,
             team1_profile_max_odds,
@@ -132,6 +137,10 @@ class StrategyConfig:
             raise ValueError("team1_profile_max_odds must be greater than zero")
         if self.favorite_team1_min_odds <= 0:
             raise ValueError("favorite_team1_min_odds must be greater than zero")
+        if self.one_bet_per_match_enabled and self.favorite_team1_enabled:
+            raise ValueError("One bet per match requires outsider selection; disable favorite_team1")
+        if self.one_bet_per_match_enabled and self.long_series_enabled:
+            raise ValueError("One bet per match cannot be combined with LONG_SERIES")
         if self.team1_profile_enabled and self.favorite_team1_enabled:
             raise ValueError(
                 "team1_profile_enabled and favorite_team1_enabled are mutually exclusive"
@@ -150,6 +159,7 @@ class StrategyConfig:
             "min_initial_odds_enabled": self.min_initial_odds_enabled,
             "blocked_events_switch_enabled": self.blocked_events_switch_enabled,
             "max_three_steps_enabled": self.max_three_steps_enabled,
+            "one_bet_per_match_enabled": self.one_bet_per_match_enabled,
             "long_series_enabled": self.long_series_enabled,
             "team1_profile_enabled": self.team1_profile_enabled,
             "team1_profile_max_odds": float(self.team1_profile_max_odds),
