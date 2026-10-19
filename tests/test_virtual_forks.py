@@ -1,13 +1,14 @@
 import asyncio
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from backend.app.virtual_forks import (
     ForkStore, VirtualForkObserver, cash, clock_seconds, finished,
-    split_virtual_stakes,
+    split_virtual_stakes, select_nearest_unstarted, MatchStartGate,
 )
 
 
@@ -58,6 +59,58 @@ class VirtualForkCalculationTests(unittest.TestCase):
             store.upsert(item)
             self.assertEqual(len(store.history()), 1)
             self.assertEqual(store.history()[0]["status"], "SETTLED")
+
+
+class ForkPrematchSelectionTests(unittest.TestCase):
+    def test_selects_nearest_eligible_countdown_not_active(self):
+        cards = [
+            dict(match_id="live", team1="A", team2="B", score="0:0",
+                 time="05:47", time_seconds=347, period="2-й тайм",
+                 is_upcoming=False, finished=False),
+            dict(match_id="later", team1="C", team2="D", score="0:0",
+                 time="01:40", time_seconds=100, period="",
+                 is_upcoming=True, finished=False),
+            dict(match_id="nearest", team1="E", team2="F", score="0:0",
+                 time="00:45", time_seconds=45, period="",
+                 is_upcoming=True, finished=False),
+            dict(match_id="done", team1="G", team2="H", score="0:0",
+                 time="00:15", time_seconds=15, period="",
+                 is_upcoming=True, finished=True),
+        ]
+        self.assertEqual(select_nearest_unstarted(cards)["match_id"], "nearest")
+        self.assertEqual(
+            select_nearest_unstarted(cards, {"nearest"})["match_id"], "later",
+        )
+        self.assertIsNone(select_nearest_unstarted(cards, {"nearest", "later"}))
+
+    def test_score_and_missing_countdown_are_not_prematch(self):
+        self.assertIsNone(select_nearest_unstarted([
+            dict(match_id="a", is_upcoming=True, time_seconds=None, score="0:0"),
+            dict(match_id="b", is_upcoming=True, time_seconds=45, score="1:0"),
+            dict(match_id="c", is_upcoming=True, time_seconds=0, score="0:0"),
+            dict(match_id="d", is_upcoming=True, time_seconds=30,
+                 score="0:0", period="1-й тайм"),
+        ]))
+
+    @staticmethod
+    def snap(timer, period="", goals1=0, goals2=0):
+        score = SimpleNamespace(team1=goals1, team2=goals2)
+        return SimpleNamespace(timer=timer, period=period, score=score)
+
+    def test_pregame_5_minute_timer_is_not_live_window(self):
+        gate = MatchStartGate()
+        self.assertFalse(gate.observe(self.snap("05:30")))
+        self.assertFalse(gate.observe(self.snap("05:15")))
+        self.assertFalse(gate.observe(self.snap("05:00")))
+        self.assertFalse(gate.observe(self.snap("00:00")))
+        self.assertTrue(gate.observe(self.snap("00:01")))
+
+    def test_live_period_or_goal_confirms_start(self):
+        gate = MatchStartGate()
+        self.assertFalse(gate.observe(self.snap("00:20", "Не начался")))
+        self.assertTrue(gate.observe(self.snap("00:01", "1-й тайм")))
+        self.assertTrue(gate.started)
+        self.assertTrue(MatchStartGate().observe(self.snap("00:15", "", goals1=1)))
 
 
 class VirtualForkLifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -157,6 +210,102 @@ class VirtualForkLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(observer.snapshot()["scanner"]["unclassified"], 1)
                 self.assertTrue(any(
                     "непрочитанных=1" in line["message"]
+                    for line in observer.store.logs()
+                ))
+
+    async def test_waits_for_live_before_reading_odds_and_skips_late(self):
+        from urllib.parse import urlparse
+        from backend.app.demo.config import CONFIG
+
+        class Score:
+            team1 = 0
+            team2 = 0
+            def text(self):
+                return "0:0"
+
+        def snap(timer, period):
+            return SimpleNamespace(
+                timer=timer, period=period, score=Score(),
+                team1="Команда А", team2="Команда Б",
+            )
+
+        match = dict(
+            match_id="upcoming-1", href="/match/upcoming-1",
+            team1="Команда А", team2="Команда Б",
+            time="00:30", time_seconds=30, period="", score="0:0",
+            is_upcoming=True, finished=False,
+        )
+
+        class FakePage:
+            url = "https://example.test" + urlparse(CONFIG.league_url).path
+
+        with TemporaryDirectory() as tmp:
+            observer = VirtualForkObserver(ForkStore(Path(tmp) / "forks.sqlite3"))
+            observer._session = "timing-test"
+            with patch("backend.app.virtual_forks.LeagueBrowser") as league_cls, \
+                 patch("backend.app.virtual_forks.read_scoreboard", new_callable=AsyncMock) as scores, \
+                 patch("backend.app.virtual_forks.read_next_goal_odds", new_callable=AsyncMock) as odds, \
+                 patch.object(observer, "pause", new_callable=AsyncMock):
+                league = league_cls.return_value
+                league.scan = AsyncMock(return_value=[match])
+                league.open = AsyncMock()
+                league.revalidate_upcoming = AsyncMock(return_value=match)
+                league.open_match = AsyncMock()
+                league.last_scan_stats = {
+                    "total": 1, "upcoming": 1, "started": 0,
+                    "finished": 0, "excluded": 0,
+                    "initial_live_skipped": 0, "unclassified": 0,
+                }
+                # 05:15 is still countdown; it must NEVER trigger a wager.
+                # When live is finally confirmed, we are already past 05:30.
+                scores.side_effect = [
+                    snap("05:15", ""), snap("05:00", ""),
+                    snap("00:01", "1-й тайм"),
+                    snap("05:31", "2-й тайм"),
+                ]
+                await observer._scan_one(FakePage())
+                league.open.assert_not_awaited()
+                league.open_match.assert_awaited_once()
+                odds.assert_not_awaited()
+                self.assertIn("upcoming-1", observer._completed_match_ids)
+                self.assertTrue(any(
+                    line["event"] == "MATCH_LIVE_STARTED"
+                    for line in observer.store.logs()
+                ))
+                self.assertTrue(any(
+                    line["event"] == "WINDOW_CLOSED"
+                    for line in observer.store.logs()
+                ))
+
+    async def test_revalidation_rejects_match_started_before_open(self):
+        from urllib.parse import urlparse
+        from backend.app.demo.config import CONFIG
+
+        match = dict(
+            match_id="m1", href="/match/m1", team1="А", team2="Б",
+            time="00:30", time_seconds=30, period="",
+            is_upcoming=True, score="0:0", finished=False,
+        )
+
+        class FakePage:
+            url = "https://example.test" + urlparse(CONFIG.league_url).path
+
+        with TemporaryDirectory() as tmp:
+            observer = VirtualForkObserver(ForkStore(Path(tmp) / "forks.sqlite3"))
+            observer._session = "strict-test"
+            with patch("backend.app.virtual_forks.LeagueBrowser") as cls:
+                league = cls.return_value
+                league.scan = AsyncMock(return_value=[match])
+                league.last_scan_stats = {"total": 1, "upcoming": 1}
+                league.open = AsyncMock()
+                league.open_match = AsyncMock()
+                league.revalidate_upcoming = AsyncMock(return_value={
+                    **match, "is_upcoming": False, "period": "1-й тайм",
+                })
+                await observer._scan_one(FakePage())
+                league.open_match.assert_not_awaited()
+                self.assertTrue(any(
+                    line["event"] == "MATCH_STARTED_BEFORE_ENTRY"
                     for line in observer.store.logs()
                 ))
 
