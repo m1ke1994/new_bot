@@ -68,12 +68,28 @@ class VirtualForkLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 await observer._stop_event.wait()
             with patch.object(observer, "_run", side_effect=mocked_worker):
                 with patch("backend.app.virtual_forks.ENGINE") as engine:
-                    engine.task.return_value = None
+                    # task is an @property on DemoEngine, not a method.
+                    engine.task = None
                     state = await observer.start(5000, 10)
                     self.assertTrue(state["running"])
                     self.assertEqual(state["balance"], 5000)
                     self.assertEqual(state["allocated_percent"], 10)
                     self.assertTrue((await observer.stop())["phase"] == "STOPPED")
+
+    async def test_start_rejects_concurrent_main_engine_task(self):
+        with TemporaryDirectory() as tmp:
+            observer = VirtualForkObserver(ForkStore(Path(tmp) / "forks.sqlite3"))
+            other_task = asyncio.create_task(asyncio.Event().wait())
+            try:
+                with patch("backend.app.virtual_forks.ENGINE") as engine:
+                    engine.task = other_task
+                    with self.assertRaisesRegex(RuntimeError, "основную стратегию"):
+                        await observer.start(5000, 10)
+                self.assertFalse(observer.running)
+            finally:
+                other_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await other_task
 
     async def test_unresolved_pair_is_not_falsely_settled(self):
         with TemporaryDirectory() as tmp:
