@@ -173,7 +173,9 @@ class VirtualForkObserver:
         return self._task is not None and not self._task.done()
 
     def snapshot(self) -> dict[str, Any]:
-        return deepcopy(self._state)
+        state = deepcopy(self._state)
+        state["running"] = self.running
+        return state
 
     def _update(self, **changes: Any) -> None:
         self._state.update(changes, updated_at=utc_time(), running=self.running)
@@ -404,7 +406,6 @@ class VirtualForkObserver:
     async def _settle(self, page: Any, initial: Any) -> None:
         """Score delta is definitive only when exactly ONE goal was observed."""
         start = asyncio.get_running_loop().time()
-        last_score = initial.score
         while not self._stop_event.is_set() and asyncio.get_running_loop().time() - start < 120:
             try:
                 snap = await read_scoreboard(page)
@@ -430,7 +431,6 @@ class VirtualForkObserver:
             if elapsed is not None and elapsed >= MATCH_DURATION + END_GRACE_SECONDS:
                 await self._review("Конец матча не подтверждён статусом; исход «нет гола» неизвестен")
                 return
-            last_score = snap.score
             await self.pause(0.4)
         if self._position and self._position["status"] == "PENDING":
             await self._review("Не получен достоверный финальный исход за время ожидания")
