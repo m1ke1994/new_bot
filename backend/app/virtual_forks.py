@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 import json
 from pathlib import Path
+from urllib.parse import urlparse
 import re
 import sqlite3
 from typing import Any
@@ -23,6 +24,7 @@ from backend.app.browser.canvas_2d_adapter import read_next_goal_odds
 from backend.app.browser.league import LeagueBrowser
 from backend.app.browser.scoreboard import read_scoreboard
 from backend.app.browser.manager import BROWSER_MANAGER
+from backend.app.browser.navigation import NavigationLoadError, is_network_transport_error
 from backend.app.demo.config import CONFIG
 from backend.app.demo.engine import ENGINE
 
@@ -255,36 +257,109 @@ class VirtualForkObserver:
             except asyncio.TimeoutError:
                 pass
 
-    async def _run(self) -> None:
-        try:
-            page = await BROWSER_MANAGER.ensure_page()
-            while not self._stop_event.is_set():
-                self._update(phase="AUTH_CHECK")
-                auth = await authorize(page, self._stop_event)
-                if self._stop_event.is_set():
-                    break
-                if not auth.get("ok") or auth.get("status") == "AUTH_TIMEOUT":
-                    await self._log("AUTH", "Требуется ручной вход на сайте — ожидаем")
-                    await self.pause(3)
-                    continue
-                break
-
-            if self._stop_event.is_set():
-                return
-            # Dedicated tab, same cookies/profile, avoids accidentally using the
-            # old strategy's page or its coupon.
-            page = await BROWSER_MANAGER.create_aux_page()
+    @staticmethod
+    def _is_closed_page_error(error: Exception, page: Any | None) -> bool:
+        """Detect a disposed tab/context without mistaking a network reset for one."""
+        if page is not None:
             try:
-                while not self._stop_event.is_set():
-                    try:
-                        await self._scan_one(page)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as error:
-                        await self._log("ERROR", f"Ошибка наблюдения: {type(error).__name__}: {error}")
-                    await self.pause(2.0)
-            finally:
-                await BROWSER_MANAGER.close_aux_page(page)
+                if page.is_closed():
+                    return True
+            except Exception:
+                return True
+        message = str(error).casefold()
+        return any(part in message for part in (
+            "targetclosederror",
+            "target page, context or browser has been closed",
+            "target page has been closed",
+            "вкладка chromium закрыта",
+            "browser has been closed",
+            "context has been closed",
+        ))
+
+    async def _run(self) -> None:
+        """Own only the manager's recoverable main page, never a stale auxiliary tab.
+
+        The existing DEMO/LIVE task cannot run simultaneously (start guard).
+        After the user closes Chromium, BrowserManager.ensure_page() can recreate
+        the page/context and authorize() will be run again on that generation.
+        """
+        authorized_page = None
+        authorized_generation = None
+        try:
+            while not self._stop_event.is_set():
+                page = None
+                try:
+                    page = await BROWSER_MANAGER.ensure_page()
+                    if page.is_closed():
+                        raise RuntimeError("Вкладка Chromium закрыта до начала наблюдения")
+                    generation = BROWSER_MANAGER.generation
+                    if page is not authorized_page or generation != authorized_generation:
+                        self._update(phase="AUTH_CHECK", match=None, quote=None)
+                        auth = await authorize(page, self._stop_event)
+                        if self._stop_event.is_set():
+                            break
+                        if not auth.get("ok"):
+                            if self._state.get("phase") != "WAITING_AUTH":
+                                await self._log(
+                                    "AUTH_WAITING",
+                                    "Ожидается ручная авторизация в восстановленном браузере",
+                                )
+                            self._update(phase="WAITING_AUTH")
+                            await self.pause(3)
+                            continue
+                        authorized_page = page
+                        authorized_generation = generation
+                        await self._log(
+                            "BROWSER_READY",
+                            "Авторизация проверена; используем управляемую вкладку без дублирования",
+                        )
+
+                    await self._scan_one(page)
+                    # Do not navigate to the same heavy SPA page every 2 seconds.
+                    await self.pause(5.0)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    if self._stop_event.is_set():
+                        break
+                    if self._is_closed_page_error(error, page):
+                        authorized_page = None
+                        authorized_generation = None
+                        self._update(phase="RECOVERING_BROWSER", match=None, quote=None)
+                        await self._log(
+                            "BROWSER_PAGE_LOST",
+                            "Вкладка или контекст Chromium закрыты. Ожидаем и "
+                            "восстанавливаем через BrowserManager; профиль и cookies не удаляются. "
+                            f"Причина: {type(error).__name__}: {error}",
+                        )
+                        await self.pause(3.0)
+                        continue
+                    if isinstance(error, NavigationLoadError):
+                        authorized_page = None
+                        authorized_generation = None
+                        self._update(phase="RECOVERING_BROWSER", quote=None)
+                        await self._log(
+                            "NAVIGATION_RECOVERY",
+                            f"Навигация не завершилась: {type(error).__name__}: {error}",
+                        )
+                        if is_network_transport_error(error):
+                            await self.pause(15.0)
+                        else:
+                            try:
+                                await BROWSER_MANAGER.recover_navigation(error)
+                            except Exception as recovery_error:
+                                await self._log(
+                                    "RECOVERY_RETRY",
+                                    f"Восстановление не завершено: {type(recovery_error).__name__}",
+                                )
+                            await self.pause(3.0)
+                        continue
+                    self._update(phase="ERROR")
+                    await self._log(
+                        "SCAN_ERROR",
+                        f"Ошибка чтения матчей: {type(error).__name__}: {error}",
+                    )
+                    await self.pause(5.0)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -297,10 +372,49 @@ class VirtualForkObserver:
     async def _scan_one(self, page: Any) -> None:
         self._update(phase="SEARCHING_MATCH", match=None, quote=None)
         league = LeagueBrowser(page, exclude_teams_enabled=False)
-        await league.open()
+        # Reuse a loaded league DOM on repeated scans. Reopening the SPA page
+        # on every empty poll can interrupt hydration and hide match cards.
+        expected = urlparse(CONFIG.league_url).path.rstrip("/")
+        current = urlparse(str(page.url or "")).path.rstrip("/")
+        if current != expected:
+            await league.open()
         matches = await league.scan()
+        stats = dict(league.last_scan_stats)
+        self._update(scanner=stats)
         if not matches:
-            await self._log("NO_MATCHES", "Ближайшие матчи не определены — повторяем сканирование")
+            sample = (league.skipped_unclassified or [])[:2]
+            reasons = ", ".join(
+                f"{item.get('team1', '?')} — {item.get('team2', '?')}: "
+                f"time={item.get('time')!r}, period={item.get('period')!r}, "
+                f"reason={item.get('reason', 'unknown')}"
+                for item in sample
+            )
+            if stats.get("unclassified"):
+                reason = "Карточки ещё не прочитаны / DOM не готов"
+                self._update(phase="WAITING_CARDS")
+            elif not stats.get("total"):
+                reason = "На странице пока нет карточек целевой лиги"
+                self._update(phase="NO_MATCH_CARDS")
+            else:
+                reason = "Нет ближайших предстоящих матчей"
+                self._update(phase="NO_UPCOMING_MATCHES")
+            signature = (reason, tuple(sorted(stats.items())), reasons)
+            now = asyncio.get_running_loop().time()
+            if (
+                signature != getattr(self, "_last_empty_scan_signature", None)
+                or now - getattr(self, "_last_empty_scan_logged_at", -100.0) >= 20
+            ):
+                self._last_empty_scan_signature = signature
+                self._last_empty_scan_logged_at = now
+                await self._log(
+                    "MATCH_SCAN_EMPTY",
+                    f"{reason}. Всего={stats.get('total', 0)}, "
+                    f"будущих={stats.get('upcoming', 0)}, "
+                    f"начатых={stats.get('started', 0)}, "
+                    f"завершённых={stats.get('finished', 0)}, "
+                    f"непрочитанных={stats.get('unclassified', 0)}; "
+                    f"URL={page.url}; примеры: {reasons or 'нет'}",
+                )
             return
         match = matches[0]
         match_id = str(match.get("match_id") or match.get("href") or "")
