@@ -65,6 +65,9 @@ const stage = computed(() => ({
   READING_ODDS:'Canvas: чтение коэффициентов', WAITING_MARKET:'Рынок недоступен',
   WATCHING_QUOTES:'Ожидание вилки', WAITING_RESULT:'Ждём следующий гол',
   SETTLED:'Рассчитано', NEEDS_REVIEW:'Требуется проверка',
+  RECOVERING_BROWSER:'Восстановление Chromium', WAITING_AUTH:'Ожидание входа',
+  WAITING_CARDS:'Ожидание карточек матчей', NO_MATCH_CARDS:'Карточки отсутствуют',
+  NO_UPCOMING_MATCHES:'Ожидание ближайшего матча', ERROR:'Ошибка сканирования',
 })[state.value.phase] || state.value.phase)
 function rub(v) {
   if (v === null || v === undefined || !Number.isFinite(Number(v))) return '—'
