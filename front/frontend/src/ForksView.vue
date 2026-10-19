@@ -63,6 +63,7 @@ const stage = computed(() => ({
   STOPPED:'Остановлен', AUTH_CHECK:'Ожидание авторизации', SEARCHING_MATCH:'Поиск ближайшего матча',
   OPENING_MATCH:'Открытие будущего матча', WAITING_MATCH_START:'Ожидание начала LIVE',
   WAITING_TIMER:'Чтение игрового времени', WAITING_WINDOW:'Ожидание LIVE 05:00',
+  OBSERVING_ODDS:'Чтение коэффициентов до 05:00 (без ставок)',
   READING_ODDS:'Canvas: чтение коэффициентов', WAITING_MARKET:'Рынок недоступен',
   WATCHING_QUOTES:'Ожидание вилки', WAITING_RESULT:'Ждём следующий гол',
   SETTLED:'Рассчитано', NEEDS_REVIEW:'Требуется проверка',
@@ -107,9 +108,15 @@ onBeforeUnmount(() => { clearInterval(poller) })
         <div class="fork-label">02 / ТЕКУЩИЙ МАТЧ <span>{{ stage }}</span></div>
         <h2>{{ match.name || 'Ожидаем ближайший матч' }}</h2>
         <div class="fork-timer">{{ match.timer || '—:—' }} <small>{{ match.state === 'UPCOMING' ? 'Обратный отсчёт ДО начала — ожидаем LIVE' : match.state === 'LIVE' ? 'Игровое время LIVE · окно 05:00 — 05:30' : 'Ожидаем ближайший ещё не начавшийся матч' }}</small></div>
-        <p class="fork-muted">Счёт: {{ match.score || '—' }} · Следующий гол №{{ quote.goal_number ?? '—' }}</p>
-        <div class="fork-odds"><div><small>{{ quote.team1 || 'Команда 1' }}</small><strong>{{ odd(quote.odd1) }}</strong></div><div><small>{{ quote.team2 || 'Команда 2' }}</small><strong>{{ odd(quote.odd2) }}</strong></div></div>
-        <div :class="['fork-indicator',{positive:signal}]"><b>{{ quote.blocked ? 'Рынок заблокирован' : signal ? 'Условная вилка обнаружена' : 'Ожидаем соотношение коэффициентов' }}</b><span>Обратные коэффициенты: {{ Number.isFinite(quote.inverse_sum) ? (quote.inverse_sum * 100).toFixed(2) + '%' : '—' }} · {{ quote.source || 'Источник неизвестен' }}</span></div>
+        <p class="fork-muted">Статус: {{ match.state === 'LIVE' ? 'LIVE' : match.state === 'UPCOMING' ? 'До начала' : '—' }} · {{ match.period || 'Тайм не определён' }} · Счёт: {{ match.score || '—' }} · Следующий гол №{{ quote.goal_number ?? match.next_goal_number ?? '—' }}</p>
+        <div class="fork-odds"><div><small>{{ quote.team1 || match.team1 || 'Команда 1' }}</small><strong>{{ odd(quote.odd1) }}</strong></div><div><small>{{ quote.team2 || match.team2 || 'Команда 2' }}</small><strong>{{ odd(quote.odd2) }}</strong></div></div>
+        <div :class="['fork-indicator',{positive:signal && quote.entry_window}]">
+          <b>{{ quote.blocked ? 'Рынок заблокирован' : signal && quote.entry_window ? 'Условная вилка в разрешённом окне' : signal ? 'Условная вилка — только наблюдение до 05:00' : state.odds_error ? 'Не удалось прочитать коэффициенты' : quote.odd1 ? 'Коэффициенты наблюдаются, ждём окно входа' : 'Ожидаем коэффициенты и игровое время' }}</b>
+          <span>Обратные коэффициенты: {{ Number.isFinite(quote.inverse_sum) ? (quote.inverse_sum * 100).toFixed(2) + '%' : '—' }} · {{ quote.source || 'Источник не определён' }}</span>
+          <span v-if="quote.updated_at">Получены: {{ date(quote.updated_at) }} · {{ quote.entry_window ? 'Окно виртуальных ставок открыто' : 'Только мониторинг, виртуальные ставки запрещены' }}</span>
+          <span v-if="state.odds_error">Диагностика Canvas: {{ state.odds_error }}</span>
+          <span v-if="match.state === 'LIVE' && !match.timer">Таймер LIVE не найден в DOM; вход автоматически заблокирован</span>
+        </div>
         <p class="fork-muted">{{ state.message }}</p>
       </article>
       <article class="fork-card">
@@ -123,7 +130,7 @@ onBeforeUnmount(() => { clearInterval(poller) })
           <div class="fork-line"><span>Убыток без гола</span><b class="red">{{ rub(position.no_goal_loss) }}</b></div>
         </div>
         <div v-else-if="preview">
-          <p class="fork-muted">Предварительный расчёт — ещё не виртуальная ставка</p>
+          <p class="fork-muted">Предварительный расчёт — не виртуальная ставка. До 05:00 расчёт только информационный.</p>
           <div class="fork-line"><span>{{ quote.team1 }} @ {{ odd(quote.odd1) }}</span><b>{{ rub(preview.stake1) }}</b></div>
           <div class="fork-line"><span>{{ quote.team2 }} @ {{ odd(quote.odd2) }}</span><b>{{ rub(preview.stake2) }}</b></div>
           <div class="fork-line"><span>На пару</span><b>{{ rub(preview.total) }}</b></div>
