@@ -646,6 +646,7 @@ class VirtualForkObserver:
             return
         self._update(phase="OPENING_MATCH", match={
             "id": match_id, "name": f'{match.get("team1")} — {match.get("team2")}',
+            "team1": match.get("team1"), "team2": match.get("team2"),
             "timer": fresh.get("time"), "score": fresh.get("score"),
             "state": "UPCOMING", "countdown": fresh.get("time"),
         }, scanned=int(self._state["scanned"]) + 1)
@@ -690,6 +691,7 @@ class VirtualForkObserver:
             if self._state.get("match") is not None:
                 self._state["match"].update(
                     timer=before.timer, score=before.score.text(), period=before.period,
+                    team1=before.team1, team2=before.team2,
                     state="LIVE" if gate.started else "UPCOMING",
                     next_goal_number=before.score.team1 + before.score.team2 + 1,
                 )
