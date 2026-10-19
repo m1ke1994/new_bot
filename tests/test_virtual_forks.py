@@ -3,7 +3,7 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from backend.app.virtual_forks import (
     ForkStore, VirtualForkObserver, cash, clock_seconds, finished,
@@ -90,6 +90,75 @@ class VirtualForkLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 other_task.cancel()
                 with self.assertRaises(asyncio.CancelledError):
                     await other_task
+
+    async def test_recovers_closed_browser_page_without_stale_reuse(self):
+        with TemporaryDirectory() as tmp:
+            observer = VirtualForkObserver(ForkStore(Path(tmp) / "forks.sqlite3"))
+
+            class FakePage:
+                def __init__(self):
+                    self.closed = False
+                def is_closed(self):
+                    return self.closed
+
+            first, second = FakePage(), FakePage()
+
+            async def scan(page):
+                if page is first:
+                    page.closed = True
+                    raise RuntimeError("Target page, context or browser has been closed")
+                observer._stop_event.set()
+
+            with patch("backend.app.virtual_forks.ENGINE") as engine, \
+                 patch("backend.app.virtual_forks.BROWSER_MANAGER") as manager, \
+                 patch("backend.app.virtual_forks.authorize", new_callable=AsyncMock) as auth:
+                engine.task = None
+                manager.generation = 1
+                manager.ensure_page = AsyncMock(side_effect=[first, second])
+                auth.return_value = {"ok": True, "status": "AUTHORIZED"}
+                with patch.object(observer, "_scan_one", new_callable=AsyncMock) as scan_mock, \
+                     patch.object(observer, "pause", new_callable=AsyncMock):
+                    scan_mock.side_effect = scan
+                    await observer.start(5000, 10)
+                    await asyncio.wait_for(observer._task, timeout=3)
+                    self.assertEqual(manager.ensure_page.await_count, 2)
+                    self.assertEqual(auth.await_count, 2)
+                    self.assertEqual(scan_mock.await_count, 2)
+            messages = observer.store.logs()
+            self.assertTrue(any(item["event"] == "BROWSER_PAGE_LOST" for item in messages))
+
+    async def test_empty_scan_diagnostic_does_not_reload_ready_league(self):
+        from urllib.parse import urlparse
+        from backend.app.demo.config import CONFIG
+
+        with TemporaryDirectory() as tmp:
+            observer = VirtualForkObserver(ForkStore(Path(tmp) / "forks.sqlite3"))
+            observer._session = "scan-test"
+
+            class FakePage:
+                url = "https://test.local" + urlparse(CONFIG.league_url).path
+
+            with patch("backend.app.virtual_forks.LeagueBrowser") as league_class:
+                league = league_class.return_value
+                league.scan = AsyncMock(return_value=[])
+                league.open = AsyncMock()
+                league.last_scan_stats = {
+                    "total": 2, "upcoming": 1, "started": 0,
+                    "finished": 0, "excluded": 0,
+                    "initial_live_skipped": 0, "unclassified": 1,
+                }
+                league.skipped_unclassified = [{
+                    "team1": "А", "team2": "Б", "time": "",
+                    "period": "", "reason": "countdown_or_period_not_ready",
+                }]
+                await observer._scan_one(FakePage())
+                league.open.assert_not_awaited()
+                self.assertEqual(observer.snapshot()["phase"], "WAITING_CARDS")
+                self.assertEqual(observer.snapshot()["scanner"]["unclassified"], 1)
+                self.assertTrue(any(
+                    "непрочитанных=1" in line["message"]
+                    for line in observer.store.logs()
+                ))
 
     async def test_unresolved_pair_is_not_falsely_settled(self):
         with TemporaryDirectory() as tmp:
