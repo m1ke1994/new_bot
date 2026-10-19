@@ -4,6 +4,7 @@ from backend.app.demo.engine import BrowserStartError, ENGINE, ModeConflictError
 from backend.app.demo.history import REPOSITORY
 from backend.app.demo.state import STATE
 from backend.app.session_control import stop_and_reset_session
+from backend.app.virtual_forks import FORKS
 
 
 router = APIRouter(prefix="/api/live", tags=["live"])
@@ -11,6 +12,8 @@ router = APIRouter(prefix="/api/live", tags=["live"])
 
 @router.post("/start")
 async def start_live():
+    if FORKS.running:
+        raise HTTPException(status_code=409, detail="Остановите виртуальный мониторинг вилок перед запуском стратегии")
     try:
         return await ENGINE.start("LIVE")
     except BrowserStartError as error:
