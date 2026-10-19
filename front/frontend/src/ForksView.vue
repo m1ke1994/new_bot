@@ -61,7 +61,8 @@ const preview = computed(() => {
 })
 const stage = computed(() => ({
   STOPPED:'Остановлен', AUTH_CHECK:'Ожидание авторизации', SEARCHING_MATCH:'Поиск ближайшего матча',
-  OPENING_MATCH:'Открытие матча', WAITING_TIMER:'Чтение таймера', WAITING_WINDOW:'Ожидание 05:00',
+  OPENING_MATCH:'Открытие будущего матча', WAITING_MATCH_START:'Ожидание начала LIVE',
+  WAITING_TIMER:'Чтение игрового времени', WAITING_WINDOW:'Ожидание LIVE 05:00',
   READING_ODDS:'Canvas: чтение коэффициентов', WAITING_MARKET:'Рынок недоступен',
   WATCHING_QUOTES:'Ожидание вилки', WAITING_RESULT:'Ждём следующий гол',
   SETTLED:'Рассчитано', NEEDS_REVIEW:'Требуется проверка',
@@ -105,7 +106,7 @@ onBeforeUnmount(() => { clearInterval(poller) })
       <article class="fork-card">
         <div class="fork-label">02 / ТЕКУЩИЙ МАТЧ <span>{{ stage }}</span></div>
         <h2>{{ match.name || 'Ожидаем ближайший матч' }}</h2>
-        <div class="fork-timer">{{ match.timer || '—:—' }} <small>Окно входа: 05:00 — 05:30</small></div>
+        <div class="fork-timer">{{ match.timer || '—:—' }} <small>{{ match.state === 'UPCOMING' ? 'Обратный отсчёт ДО начала — ожидаем LIVE' : match.state === 'LIVE' ? 'Игровое время LIVE · окно 05:00 — 05:30' : 'Ожидаем ближайший ещё не начавшийся матч' }}</small></div>
         <p class="fork-muted">Счёт: {{ match.score || '—' }} · Следующий гол №{{ quote.goal_number ?? '—' }}</p>
         <div class="fork-odds"><div><small>{{ quote.team1 || 'Команда 1' }}</small><strong>{{ odd(quote.odd1) }}</strong></div><div><small>{{ quote.team2 || 'Команда 2' }}</small><strong>{{ odd(quote.odd2) }}</strong></div></div>
         <div :class="['fork-indicator',{positive:signal}]"><b>{{ quote.blocked ? 'Рынок заблокирован' : signal ? 'Условная вилка обнаружена' : 'Ожидаем соотношение коэффициентов' }}</b><span>Обратные коэффициенты: {{ Number.isFinite(quote.inverse_sum) ? (quote.inverse_sum * 100).toFixed(2) + '%' : '—' }} · {{ quote.source || 'Источник неизвестен' }}</span></div>
