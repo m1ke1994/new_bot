@@ -57,6 +57,79 @@ def finished(period: str) -> bool:
     return any(word in value for word in FINISHED_WORDS)
 
 
+
+def select_nearest_unstarted(
+    matches: list[dict[str, Any]],
+    excluded_ids: set[str] | None = None,
+) -> dict[str, Any] | None:
+    """Only a true UPCOMING countdown qualifies, never an already live card.
+
+    The normal league scanner already sorts upcoming matches, but this
+    validates the input again to protect a virtual fork worker against
+    reusing an active match accidentally.
+    """
+    excluded = excluded_ids or set()
+    candidates: list[dict[str, Any]] = []
+    for match in matches:
+        match_id = str(match.get("match_id") or match.get("href") or "")
+        timer = match.get("time_seconds")
+        if (
+            not match_id
+            or match_id in excluded
+            or match.get("finished")
+            or not match.get("is_upcoming")
+            or str(match.get("period") or "").strip()
+            or not isinstance(timer, int)
+            or timer <= 0
+            or str(match.get("score") or "0:0").strip() != "0:0"
+        ):
+            continue
+        candidates.append(match)
+    return min(candidates, key=lambda item: item["time_seconds"], default=None)
+
+
+def live_period(period: str) -> bool:
+    value = str(period or "").strip().casefold()
+    if not value or finished(value):
+        return False
+    return not any(word in value for word in (
+        "не нач", "not started", "upcoming", "до начала", "ожидани",
+        "starts in", "prematch",
+    ))
+
+
+class MatchStartGate:
+    """Prevent prematch COUNTDOWN from being interpreted as LIVE elapsed time."""
+
+    def __init__(self) -> None:
+        self.started = False
+        self._previous_seconds: int | None = None
+        self._observed_zero = False
+
+    def observe(self, scoreboard: Any) -> bool:
+        seconds = clock_seconds(scoreboard.timer)
+        if finished(scoreboard.period):
+            return self.started
+        if live_period(scoreboard.period):
+            self.started = True
+        elif scoreboard.score.team1 + scoreboard.score.team2 > 0:
+            self.started = True
+        elif (
+            self._observed_zero
+            and seconds is not None
+            and self._previous_seconds is not None
+            and seconds > self._previous_seconds
+        ):
+            # An empty-period scoreboard may change from prematch 00:00 to
+            # elapsed 00:01 before the period label is painted.
+            self.started = True
+        if seconds == 0:
+            self._observed_zero = True
+        if seconds is not None:
+            self._previous_seconds = seconds
+        return self.started
+
+
 def split_virtual_stakes(total: Decimal, odd1: Any, odd2: Any) -> dict[str, Any] | None:
     """Same-event, two-side conditional hedge, NOT a 3-outcome surebet."""
     try:
@@ -174,6 +247,7 @@ class VirtualForkObserver:
         self._initial = Decimal(0)
         self._allocation_pct = Decimal("10")
         self._position: dict[str, Any] | None = None
+        self._completed_match_ids: set[str] = set()
         self._state: dict[str, Any] = {
             "running": False, "phase": "STOPPED",
             "message": "Наблюдатель остановлен", "window": "05:00–05:30",
@@ -220,6 +294,7 @@ class VirtualForkObserver:
         self._balance = self._initial
         self._allocation_pct = share
         self._position = None
+        self._completed_match_ids = set()
         self._stop_event = asyncio.Event()
         self._state.update({
             "phase": "STARTING", "message": "Запуск наблюдателя вилок",
@@ -416,20 +491,52 @@ class VirtualForkObserver:
                     f"URL={page.url}; примеры: {reasons or 'нет'}",
                 )
             return
-        match = matches[0]
-        match_id = str(match.get("match_id") or match.get("href") or "")
-        if not match_id:
-            await self._log("NO_MATCH_ID", "У карточки отсутствует ID")
+        match = select_nearest_unstarted(matches, self._completed_match_ids)
+        if match is None:
+            self._update(phase="NO_UPCOMING_MATCHES")
+            await self._log(
+                "NO_ELIGIBLE_UPCOMING",
+                "Среди карточек нет матчей с подтверждённым обратным отсчётом "
+                "(прошедшие и уже LIVE исключены)",
+            )
+            return
+        match_id = str(match.get("match_id") or match.get("href"))
+        # Double-check the exact selected card immediately before opening.
+        # The shared LeagueBrowser deliberately tolerates LIVE transitions,
+        # so the forks observer must apply a stricter prematch entry rule.
+        fresh = await league.revalidate_upcoming(match)
+        if not select_nearest_unstarted([fresh], self._completed_match_ids):
+            await self._log(
+                "MATCH_STARTED_BEFORE_ENTRY",
+                f'{match.get("team1")} — {match.get("team2")} уже начал матч '
+                "или обратный отсчёт исчез до входа; пропускаем",
+            )
+            self._completed_match_ids.add(match_id)
             return
         self._update(phase="OPENING_MATCH", match={
             "id": match_id, "name": f'{match.get("team1")} — {match.get("team2")}',
-            "timer": match.get("time"), "score": match.get("score"),
+            "timer": fresh.get("time"), "score": fresh.get("score"),
+            "state": "UPCOMING", "countdown": fresh.get("time"),
         }, scanned=int(self._state["scanned"]) + 1)
-        await self._log("MATCH_SELECTED", f'Выбран ближайший матч: {self._state["match"]["name"]}')
-        await league.open_match(match)
-        await league.wait_match_content_ready(timeout_ms=12000)
-
-        deadline = asyncio.get_running_loop().time() + 440
+        await self._log(
+            "UPCOMING_MATCH_SELECTED",
+            f'Ближайший НЕ начавшийся матч: {self._state["match"]["name"]}; '
+            f'до начала {fresh.get("time")}; id={match_id}',
+        )
+        await league.open_match(fresh)
+        # Only wait for the scoreboard now. The market/canvas may not exist
+        # prematch, and waiting for it can lose the entire 30-second window.
+        gate = MatchStartGate()
+        self._update(phase="WAITING_MATCH_START")
+        await self._log(
+            "WAITING_MATCH_START",
+            "Матч открыт до начала. Ждём LIVE и затем игровую отметку "
+            "05:00; время до начала не считается игровым.",
+        )
+        countdown = int(fresh["time_seconds"])
+        deadline = asyncio.get_running_loop().time() + max(
+            480, min(10800, countdown + MATCH_DURATION + 180),
+        )
         while not self._stop_event.is_set() and asyncio.get_running_loop().time() < deadline:
             try:
                 before = await read_scoreboard(page)
@@ -440,19 +547,45 @@ class VirtualForkObserver:
             if self._state.get("match") is not None:
                 self._state["match"].update(
                     timer=before.timer, score=before.score.text(), period=before.period,
+                    state="LIVE" if gate.started else "UPCOMING",
                 )
             if finished(before.period):
+                self._completed_match_ids.add(match_id)
+                await self._log(
+                    "MATCH_FINISHED",
+                    f'Матч завершён: {before.score.text()}; возвращаемся к следующему',
+                )
                 return
+            was_started = gate.started
+            now_started = gate.observe(before)
+            if not now_started:
+                self._update(phase="WAITING_MATCH_START", quote=None)
+                await self.pause(0.4)
+                continue
+            if not was_started:
+                self._update(phase="WAITING_WINDOW", quote=None)
+                await self._log(
+                    "MATCH_LIVE_STARTED",
+                    f'Подтверждено начало LIVE: {before.team1} — {before.team2}; '
+                    f'игровой таймер {before.timer or "не определён"}',
+                )
+            if self._state.get("match") is not None:
+                self._state["match"]["state"] = "LIVE"
             if seconds is None:
                 self._update(phase="WAITING_TIMER", quote=None)
-                await self.pause(0.5)
+                await self.pause(0.4)
                 continue
             if seconds < OPEN_SECOND:
                 self._update(phase="WAITING_WINDOW", quote=None)
-                await self.pause(min(0.6, max(0.15, (OPEN_SECOND - seconds) / 3)))
+                await self.pause(0.4)
                 continue
             if seconds > CLOSE_SECOND:
-                await self._log("WINDOW_CLOSED", f"Окно 05:00–05:30 закрыто (таймер {before.timer})")
+                self._completed_match_ids.add(match_id)
+                await self._log(
+                    "WINDOW_CLOSED",
+                    f'Время LIVE {before.timer} — позже 05:30; '
+                    "ставок в этом матче не делаем, выбираем следующий будущий матч",
+                )
                 return
 
             self._update(phase="READING_ODDS")
@@ -528,8 +661,10 @@ class VirtualForkObserver:
                 'Если голов больше не будет — обе ставки проиграют.',
             )
             await self._settle(page, before)
+            self._completed_match_ids.add(match_id)
             return
-        await self._log("MATCH_TIMEOUT", "Ожидание матча превысило лимит")
+        self._completed_match_ids.add(match_id)
+        await self._log("MATCH_TIMEOUT", "Истёк лимит ожидания начала/окна. Переходим к следующему матчу")
 
     async def _settle(self, page: Any, initial: Any) -> None:
         """Score delta is definitive only when exactly ONE goal was observed."""
