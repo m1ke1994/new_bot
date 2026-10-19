@@ -22,11 +22,12 @@ from uuid import uuid4
 from auth import authorize
 from backend.app.browser.canvas_2d_adapter import read_next_goal_odds
 from backend.app.browser.league import LeagueBrowser
-from backend.app.browser.scoreboard import read_scoreboard
+from backend.app.browser.scoreboard import read_scoreboard, parse_timer_and_period
 from backend.app.browser.manager import BROWSER_MANAGER
 from backend.app.browser.navigation import NavigationLoadError, is_network_transport_error
 from backend.app.demo.config import CONFIG
 from backend.app.demo.engine import ENGINE
+from backend.app.demo.models import ScoreboardSnapshot
 
 CENT = Decimal("0.01")
 OPEN_SECOND = 300
@@ -35,6 +36,24 @@ MATCH_DURATION = 360
 END_GRACE_SECONDS = 35
 FINISHED_WORDS = ("заверш", "окончен", "finished", "full time", "game over")
 DATA_FILE = CONFIG.data_dir / "virtual_forks.sqlite3"
+
+# The live timer may render OUTSIDE scoreboard-compact-view-tab-panel__body.
+# Read only narrow scoreboard status/header selectors, never the full page
+# (which may also contain unrelated match countdowns and market values).
+LIVE_TIMER_SELECTORS = (
+    '[data-test="betting-scoreboard-status-time"]',
+    '[data-test="betting-scoreboard-status-time"] .ui-game-timer__label',
+    '[data-test="betting-scoreboard-status-time"] .ui-game-timer__time',
+    '.scoreboard-layout-head__footer .scoreboard-timer',
+    '.scoreboard-layout-head__footer .ui-game-timer',
+    '.scoreboard-layout-head__footer .scoreboard-live__status',
+    '.scoreboard-compact-view-tab-panel__body .ui-game-timer',
+    '.scoreboard-timer .ui-caption',
+)
+LIVE_CLOCK_PATTERN = re.compile(r"(?<!\d)(\d{1,3}):([0-5]\d)(?!\d)")
+PRE_WINDOW_QUOTE_INTERVAL = 5.0
+IN_WINDOW_QUOTE_INTERVAL = 0.35
+
 
 
 def utc_time() -> str:
@@ -253,6 +272,7 @@ class VirtualForkObserver:
             "message": "Наблюдатель остановлен", "window": "05:00–05:30",
             "initial_budget": 0, "balance": 0, "allocated_percent": 10,
             "session_profit": 0, "match": None, "quote": None,
+            "odds_error": None, "odds_status": "WAITING",
             "position": None, "scanned": 0, "signals": 0,
             "warnings": ["Третий исход «голов больше не будет» не покрыт."],
         }
@@ -301,6 +321,7 @@ class VirtualForkObserver:
             "session_id": self._session, "initial_budget": float(self._initial),
             "balance": float(self._balance), "allocated_percent": float(share),
             "session_profit": 0, "match": None, "quote": None,
+            "odds_error": None, "odds_status": "WAITING",
             "position": None, "scanned": 0, "signals": 0,
         })
         self._task = asyncio.create_task(self._run(), name="fc25-virtual-forks")
@@ -444,6 +465,116 @@ class VirtualForkObserver:
                 await self._review("Наблюдение прервано до подтверждения результата")
             self._update(running=False, phase="STOPPED")
 
+    async def _read_live_scoreboard(self, page: Any) -> ScoreboardSnapshot:
+        """Read scoreboard, then recover a missing LIVE timer from trusted DOM.
+
+        Score and team identity still come exclusively from the original
+        scoreboard reader. Never interpolate a guessed clock or use the
+        clock of another game as a substitute.
+        """
+        snapshot = await read_scoreboard(page)
+        if clock_seconds(snapshot.timer) is not None:
+            return snapshot
+
+        found_text = ""
+        found_selector = ""
+        for selector in LIVE_TIMER_SELECTORS:
+            try:
+                locator = page.locator(selector).first
+                if not await locator.count() or not await locator.is_visible():
+                    continue
+                raw = (await locator.inner_text()).strip()
+            except Exception:
+                continue
+            timer_match = LIVE_CLOCK_PATTERN.search(raw)
+            if timer_match is None:
+                continue
+            parsed_timer, parsed_period = parse_timer_and_period(raw)
+            if clock_seconds(parsed_timer) is None:
+                continue
+            found_text, found_selector = parsed_timer, selector
+            period = snapshot.period or parsed_period
+            if self._state.get("match") is not None:
+                self._state["match"]["timer_source"] = selector
+            key = (selector, period)
+            if key != getattr(self, "_last_timer_source", None):
+                self._last_timer_source = key
+                await self._log(
+                    "MATCH_TIMER_FOUND",
+                    f"Игровое время получено из отдельного элемента scoreboard: "
+                    f"{parsed_timer}; selector={selector}",
+                )
+            return ScoreboardSnapshot(
+                team1=snapshot.team1, team2=snapshot.team2,
+                score=snapshot.score, timer=parsed_timer, period=period,
+            )
+
+        now = asyncio.get_running_loop().time()
+        if now - getattr(self, "_last_missing_clock_logged_at", -100.0) > 15:
+            self._last_missing_clock_logged_at = now
+            await self._log(
+                "MATCH_TIMER_MISSING",
+                "Матч/счёт читаются, но игровой таймер отсутствует в известных "
+                "элементах scoreboard. Не подменяем время обратным отсчётом "
+                "и не создаём виртуальные ставки.",
+            )
+        return snapshot
+
+    async def _observe_odds(
+        self, page: Any, snapshot: ScoreboardSnapshot, *, entry_window: bool,
+    ) -> Any | None:
+        """Read and show current odds, without implying a virtual wager."""
+        try:
+            odds = await read_next_goal_odds(
+                page, snapshot.team1, snapshot.team2,
+                snapshot.score.team1, snapshot.score.team2,
+                read_only=True,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._update(
+                quote=None, odds_error=f"{type(error).__name__}: {error}",
+                odds_status="UNAVAILABLE",
+            )
+            now = asyncio.get_running_loop().time()
+            key = (type(error).__name__, str(error)[:100])
+            if (
+                key != getattr(self, "_last_odds_error_key", None)
+                or now - getattr(self, "_last_odds_error_at", -100.0) > 15
+            ):
+                self._last_odds_error_key = key
+                self._last_odds_error_at = now
+                await self._log(
+                    "ODDS_UNAVAILABLE",
+                    f"Коэффициенты следующего гола временно не прочитаны: "
+                    f"{type(error).__name__}: {str(error)[:180]}",
+                )
+            return None
+
+        expected = snapshot.score.team1 + snapshot.score.team2 + 1
+        if odds.next_goal_number != expected:
+            self._update(quote=None, odds_status="STALE")
+            return None
+        blocked = bool(odds.locked_sides or odds.recent_locked_sides)
+        a, b = odds.team1, odds.team2
+        inverse = 1 / a + 1 / b if a > 1 and b > 1 else None
+        self._update(
+            quote={
+                "team1": snapshot.team1, "team2": snapshot.team2,
+                "odd1": a, "odd2": b,
+                "goal_number": odds.next_goal_number,
+                "inverse_sum": inverse,
+                "conditional_signal": inverse is not None and inverse < 1,
+                "blocked": blocked, "source": odds.source,
+                "timer": snapshot.timer, "updated_at": utc_time(),
+                "entry_window": entry_window,
+                "observation_only": not entry_window,
+            },
+            odds_error=None, odds_status="AVAILABLE",
+        )
+        return odds
+
     async def _scan_one(self, page: Any) -> None:
         self._update(phase="SEARCHING_MATCH", match=None, quote=None)
         league = LeagueBrowser(page, exclude_teams_enabled=False)
@@ -537,17 +668,30 @@ class VirtualForkObserver:
         deadline = asyncio.get_running_loop().time() + max(
             480, min(10800, countdown + MATCH_DURATION + 180),
         )
+        next_pre_window_quote = 0.0
+        last_score_context = None
         while not self._stop_event.is_set() and asyncio.get_running_loop().time() < deadline:
             try:
-                before = await read_scoreboard(page)
-            except Exception:
+                before = await self._read_live_scoreboard(page)
+            except Exception as error:
+                # A closed tab must propagate to BrowserManager, not get hidden
+                # behind endless scoreboard retries.
+                if self._is_closed_page_error(error, page):
+                    raise
                 await self.pause(0.45)
                 continue
             seconds = clock_seconds(before.timer)
+            context = (before.team1, before.team2,
+                       before.score.team1, before.score.team2)
+            if context != last_score_context:
+                last_score_context = context
+                self._update(quote=None, odds_status="WAITING", odds_error=None)
+                next_pre_window_quote = 0.0
             if self._state.get("match") is not None:
                 self._state["match"].update(
                     timer=before.timer, score=before.score.text(), period=before.period,
                     state="LIVE" if gate.started else "UPCOMING",
+                    next_goal_number=before.score.team1 + before.score.team2 + 1,
                 )
             if finished(before.period):
                 self._completed_match_ids.add(match_id)
@@ -572,11 +716,7 @@ class VirtualForkObserver:
             if self._state.get("match") is not None:
                 self._state["match"]["state"] = "LIVE"
             if seconds is None:
-                self._update(phase="WAITING_TIMER", quote=None)
-                await self.pause(0.4)
-                continue
-            if seconds < OPEN_SECOND:
-                self._update(phase="WAITING_WINDOW", quote=None)
+                self._update(phase="WAITING_TIMER", odds_status="WAITING_TIMER")
                 await self.pause(0.4)
                 continue
             if seconds > CLOSE_SECOND:
@@ -584,40 +724,40 @@ class VirtualForkObserver:
                 await self._log(
                     "WINDOW_CLOSED",
                     f'Время LIVE {before.timer} — позже 05:30; '
-                    "ставок в этом матче не делаем, выбираем следующий будущий матч",
+                    "виртуальных ставок больше нет, выбираем следующий будущий матч",
                 )
                 return
 
+            if seconds < OPEN_SECOND:
+                self._update(phase="WAITING_WINDOW")
+                # Observe odds periodically before 05:00 so the frontend can
+                # show current prices and the correct next-goal number.
+                # No virtual pair is allowed here.
+                now = asyncio.get_running_loop().time()
+                if now >= next_pre_window_quote:
+                    next_pre_window_quote = now + PRE_WINDOW_QUOTE_INTERVAL
+                    self._update(phase="OBSERVING_ODDS")
+                    await self._observe_odds(page, before, entry_window=False)
+                    # Avoid an expensive Canvas read on every 400ms tick.
+                await self.pause(0.4)
+                continue
+
+            # Only the 05:00–05:30 segment may allocate virtual funds.
             self._update(phase="READING_ODDS")
-            try:
-                odds = await read_next_goal_odds(
-                    page, before.team1, before.team2,
-                    before.score.team1, before.score.team2,
-                    read_only=True,
-                )
-            except Exception as error:
-                self._update(phase="WAITING_MARKET", quote=None)
-                if seconds % 5 == 0:
-                    await self._log("ODDS_RETRY", f"Ждём коэффициенты/разблокировку: {type(error).__name__}")
-                await self.pause(0.35)
+            odds = await self._observe_odds(page, before, entry_window=True)
+            if odds is None:
+                self._update(phase="WAITING_MARKET")
+                await self.pause(IN_WINDOW_QUOTE_INTERVAL)
                 continue
             blocked = bool(odds.locked_sides or odds.recent_locked_sides)
             inv = (1 / odds.team1 + 1 / odds.team2) if odds.team1 > 1 and odds.team2 > 1 else None
-            self._update(quote={
-                "team1": before.team1, "team2": before.team2,
-                "odd1": odds.team1, "odd2": odds.team2,
-                "goal_number": odds.next_goal_number,
-                "inverse_sum": inv, "conditional_signal": inv is not None and inv < 1,
-                "blocked": blocked, "source": odds.source,
-                "timer": before.timer, "updated_at": utc_time(),
-            })
             if blocked or inv is None or inv >= 1:
                 self._update(phase="WATCHING_QUOTES")
-                await self.pause(0.35)
+                await self.pause(IN_WINDOW_QUOTE_INTERVAL)
                 continue
 
             # Recheck the actual score and elapsed time after reading the quote.
-            after = await read_scoreboard(page)
+            after = await self._read_live_scoreboard(page)
             after_second = clock_seconds(after.timer)
             if (after.team1, after.team2) != (before.team1, before.team2):
                 await self._log("STALE_TEAMS", "Состав команд изменился во время чтения")
