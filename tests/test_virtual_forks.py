@@ -277,6 +277,72 @@ class VirtualForkLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     for line in observer.store.logs()
                 ))
 
+    async def test_virtual_pair_is_only_created_after_confirmed_live_at_0500(self):
+        from urllib.parse import urlparse
+        from backend.app.demo.config import CONFIG
+
+        class Score:
+            team1 = 0
+            team2 = 0
+            def text(self):
+                return "0:0"
+
+        def snap(timer, period):
+            return SimpleNamespace(
+                timer=timer, period=period, score=Score(),
+                team1="А", team2="Б",
+            )
+
+        match = dict(
+            match_id="future-m2", href="/match/future-m2",
+            team1="А", team2="Б", time="00:15", time_seconds=15,
+            period="", score="0:0", is_upcoming=True, finished=False,
+        )
+
+        class FakePage:
+            url = "https://example.test" + urlparse(CONFIG.league_url).path
+
+        with TemporaryDirectory() as tmp:
+            observer = VirtualForkObserver(ForkStore(Path(tmp) / "forks.sqlite3"))
+            observer._session = "positive-test"
+            observer._balance = Decimal("5000")
+            observer._initial = Decimal("5000")
+            observer._allocation_pct = Decimal("10")
+            with patch("backend.app.virtual_forks.LeagueBrowser") as cls, \
+                 patch("backend.app.virtual_forks.read_scoreboard", new_callable=AsyncMock) as scores, \
+                 patch("backend.app.virtual_forks.read_next_goal_odds", new_callable=AsyncMock) as odds, \
+                 patch.object(observer, "pause", new_callable=AsyncMock), \
+                 patch.object(observer, "_settle", new_callable=AsyncMock) as settle:
+                league = cls.return_value
+                league.scan = AsyncMock(return_value=[match])
+                league.revalidate_upcoming = AsyncMock(return_value=match)
+                league.open = AsyncMock()
+                league.open_match = AsyncMock()
+                league.last_scan_stats = {
+                    "total": 1, "upcoming": 1, "started": 0, "finished": 0,
+                    "excluded": 0, "unclassified": 0, "initial_live_skipped": 0,
+                }
+                scores.side_effect = [
+                    snap("05:10", ""),  # PREMATCH countdown
+                    snap("04:59", ""),  # PREMATCH countdown
+                    snap("00:01", "1-й тайм"),  # confirmed LIVE
+                    snap("04:59", "2-й тайм"),  # elapsed LIVE before window
+                    snap("05:00", "2-й тайм"),  # first permitted signal
+                    snap("05:01", "2-й тайм"),  # revalidate score/time
+                ]
+                odds.return_value = SimpleNamespace(
+                    team1=2.2, team2=2.2, next_goal_number=1,
+                    locked_sides=(), recent_locked_sides=(), source="MOCK_CANVAS",
+                )
+                await observer._scan_one(FakePage())
+                odds.assert_awaited_once()
+                settle.assert_awaited_once()
+                self.assertEqual(observer._position["timer"], "05:01")
+                self.assertEqual(observer._position["status"], "PENDING")
+                self.assertEqual(observer._state["signals"], 1)
+                self.assertEqual(len(observer.store.history()), 1)
+                self.assertEqual(observer._state["balance"], 4500.0)
+
     async def test_revalidation_rejects_match_started_before_open(self):
         from urllib.parse import urlparse
         from backend.app.demo.config import CONFIG
