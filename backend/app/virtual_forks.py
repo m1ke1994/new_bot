@@ -201,7 +201,8 @@ class VirtualForkObserver:
         if self.running:
             raise ValueError("Виртуальный наблюдатель уже запущен")
         # Do not run two strategies in the same persistent browser at once.
-        engine_task = ENGINE.task()
+        # DemoEngine.task is an @property, not a callable.
+        engine_task = ENGINE.task
         if engine_task is not None and not engine_task.done():
             raise RuntimeError("Сначала остановите основную стратегию DEMO/LIVE")
         try:
