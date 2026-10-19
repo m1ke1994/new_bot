@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 import json
@@ -111,8 +112,20 @@ class ForkStore:
                 );
             """)
 
+    @contextmanager
     def _connect(self):
-        return sqlite3.connect(str(self.db_path), timeout=5)
+        """Commit/rollback on exit AND close the SQLite file on Windows.
+
+        sqlite3.Connection.__exit__ only finalizes a transaction; it does
+        not close the connection. An unclosed handle prevents TemporaryDirectory
+        cleanup on Windows (WinError 32) and can keep database files locked.
+        """
+        connection = sqlite3.connect(str(self.db_path), timeout=5)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def upsert(self, item: dict[str, Any]) -> None:
         with self._connect() as db:
