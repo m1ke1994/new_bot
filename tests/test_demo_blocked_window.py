@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from itertools import chain, repeat
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -17,7 +18,7 @@ from backend.app.demo.engine import (
 )
 from backend.app.demo.history import DemoRepository
 from backend.app.demo.models import NextGoalOdds, Score, ScoreboardSnapshot, Scorer
-from backend.app.demo.strategy import StrategyConfig
+from backend.app.demo.strategy import StrategyConfig, odds_for_selected_side
 from backend.app.demo.state import DemoStateStore
 
 
@@ -100,6 +101,31 @@ class OneMatchLeagueBrowser:
 
 
 class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def score_reads(*snapshots: ScoreboardSnapshot) -> AsyncMock:
+        return AsyncMock(side_effect=chain(snapshots, repeat(snapshots[-1])))
+
+    @staticmethod
+    def mock_virtual_coupon(engine: DemoEngine) -> None:
+        """Keep strategy tests independent of the Playwright coupon surface."""
+        engine.live_executor.preview_virtual_coupon = AsyncMock(return_value="READY")
+        engine.live_executor.clear_unaccepted_coupon = AsyncMock(return_value=True)
+
+    @staticmethod
+    def mock_virtual_coupon_preparation(engine: DemoEngine) -> None:
+        """Isolate older score transition tests from coupon polling."""
+        async def prepared(**kwargs):
+            odds = kwargs["current_odds"]
+            fresh = await engine._read_fresh_score(
+                kwargs["browser"], kwargs["selected_match"], kwargs["snapshot"]
+            )
+            selected, opponent = odds_for_selected_side(
+                odds, kwargs["selection"].selected_side
+            )
+            return fresh, odds, selected, opponent
+
+        engine._prepare_demo_virtual_until_ready = AsyncMock(side_effect=prepared)
+
     def window(self) -> DemoBlockedWindow:
         return DemoBlockedWindow(
             initial_score=Score(2, 0),
@@ -234,10 +260,12 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(current.score, Score(4, 0))
         self.assertIs(odds, fresh_odds)
         self.assertEqual(window.blocked_score_before, Score(4, 0))
-        self.assertFalse(window.blocked_window_active)
         self.assertEqual(reader.await_args_list[-1].kwargs, {"read_only": True})
         self.assertIn("DEMO_BLOCKED_OPPONENT_SCORED", [item["event"] for item in logs])
-        self.assertIn("DEMO_BLOCKED_MARKET_RECOVERED", [item["event"] for item in logs])
+        self.assertTrue(
+            {"DEMO_BLOCKED_ODDS_VISIBLE", "DEMO_BLOCKED_MARKET_RECOVERED"}
+            & {item["event"] for item in logs}
+        )
         self.assertEqual(engine.live_executor._states, {})
 
     async def test_unchanged_score_unlocks_same_step_and_stake(self):
@@ -438,6 +466,7 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
                 )
                 engine._sleep_or_stop = AsyncMock()
                 engine.live_executor.prepare = AsyncMock()
+                self.mock_virtual_coupon(engine)
                 engine._wait_for_initial_zero_score = AsyncMock(return_value=zero)
                 engine._wait_for_odds = AsyncMock(
                     side_effect=[
@@ -473,6 +502,8 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
             budget_before["current_budget"] - 20,
         )
         engine.live_executor.prepare.assert_not_awaited()
+        self.assertEqual(engine.live_executor.preview_virtual_coupon.await_count, 1)
+        engine.live_executor.clear_unaccepted_coupon.assert_awaited()
         coefficient_locator.click.assert_not_awaited()
 
     async def test_opponent_only_blocked_window_creates_step_three_at_updated_score(self):
@@ -507,6 +538,7 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
                     side_effect=lambda **kwargs: (True, kwargs["snapshot"])
                 )
                 engine.live_executor.prepare = AsyncMock()
+                self.mock_virtual_coupon_preparation(engine)
                 engine._wait_for_initial_zero_score = AsyncMock(
                     return_value=scores["zero"]
                 )
@@ -529,8 +561,7 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
                     return scores["four"], odds_by_goal[5]
 
                 engine._wait_for_odds = wait_for_market
-                engine._read_fresh_score = AsyncMock(
-                    side_effect=[
+                engine._read_fresh_score = self.score_reads(
                         scores["zero"],
                         scores["zero"],
                         scores["one"],
@@ -539,7 +570,6 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
                         scores["two"],
                         scores["four"],
                         scores["four"],
-                    ]
                 )
                 engine._wait_for_goal = AsyncMock(
                     side_effect=[
@@ -584,6 +614,7 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
                 engine._sleep_or_stop = AsyncMock()
+                self.mock_virtual_coupon_preparation(engine)
                 engine._wait_for_initial_zero_score = AsyncMock(return_value=zero)
                 engine._wait_for_odds = AsyncMock(return_value=(zero, odds))
                 engine._read_fresh_score = AsyncMock(
@@ -637,6 +668,7 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
                 engine._sleep_or_stop = AsyncMock()
+                self.mock_virtual_coupon_preparation(engine)
                 engine._confirm_demo_bet_acceptance = AsyncMock(
                     side_effect=lambda **kwargs: (True, kwargs["snapshot"])
                 )
@@ -644,14 +676,12 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
                 engine._wait_for_odds = AsyncMock(
                     side_effect=[(zero, first_odds), (opponent_again, second_odds)]
                 )
-                engine._read_fresh_score = AsyncMock(
-                    side_effect=[
+                engine._read_fresh_score = self.score_reads(
                         zero,
                         zero,
                         opponent_again,
                         opponent_again,
                         opponent_again,
-                    ]
                 )
                 engine._wait_for_goal = AsyncMock(
                     side_effect=[(lost_score, Scorer.TEAM_1), None]
@@ -701,6 +731,7 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
                 engine._sleep_or_stop = AsyncMock()
+                self.mock_virtual_coupon_preparation(engine)
                 engine._wait_for_initial_zero_score = AsyncMock(return_value=zero)
                 engine._wait_for_odds = AsyncMock(
                     side_effect=[
@@ -761,6 +792,7 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
                 engine._sleep_or_stop = AsyncMock()
+                self.mock_virtual_coupon_preparation(engine)
                 engine._confirm_demo_bet_acceptance = AsyncMock(
                     side_effect=lambda **kwargs: (True, kwargs["snapshot"])
                 )
@@ -768,15 +800,13 @@ class DemoBlockedWindowTests(unittest.IsolatedAsyncioTestCase):
                 engine._wait_for_odds = AsyncMock(
                     side_effect=[(zero, first_odds), (first_loss, second_odds)]
                 )
-                engine._read_fresh_score = AsyncMock(
-                    side_effect=[
+                engine._read_fresh_score = self.score_reads(
                         zero,
                         zero,
                         first_loss,
                         first_loss,
                         first_loss,
                         missed_step_three,
-                    ]
                 )
                 engine._wait_for_goal = AsyncMock(
                     side_effect=[

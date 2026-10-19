@@ -377,7 +377,7 @@ class LiveExecutorTests(unittest.IsolatedAsyncioTestCase):
                 "LIVE_AMOUNT_FILLED",
                 "LIVE_AMOUNT_VERIFIED",
                 "LIVE_BALANCE_BEFORE",
-                "TEST_AUTO_CONFIRM",
+                "LIVE_AUTO_SUBMIT",
                 "LIVE_COUPON_CLICK_ATTEMPT",
                 "LIVE_COUPON_CLICKED",
                 "AWAITING_PLACEMENT_RESULT",

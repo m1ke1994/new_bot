@@ -3,7 +3,7 @@
 Backend:
 
 ```powershell
-cd C:\Users\Alex\Desktop\new_bot
+cd C:\Users\Alex\Desktop\fifa\new_bot
 python -m pip install -r requirements.txt
 python -m backend.app.main
 ```
@@ -11,18 +11,17 @@ python -m backend.app.main
 Frontend:
 
 ```powershell
-cd C:\Users\Alex\Desktop\new_bot\front\frontend
+cd C:\Users\Alex\Desktop\fifa\new_bot\front\frontend
+npm install
 npm run dev
 ```
 
 ## Следующий гол: DOM + Canvas Vision
 
-Рабочий reader сначала использует DOM, если исходы рынка доступны как обычные
-элементы. Когда коэффициенты отрисованы в Canvas, автоматически включается
-машинное зрение: OpenCV + `RapidOCR` (ONNX Runtime), с `pytesseract` как
-fallback. Перед использованием коэффициентов проверяются стабильность двух
-чтений и номер следующего гола относительно текущего счёта. В LIVE координаты
-OCR переводятся в CSS-координаты Canvas перед открытием нужного исхода.
+Текущий путь DEMO читает Canvas 2D через перехват команд рисования, а DOM
+использует как резервный источник. Перед использованием коэффициентов
+сверяется номер следующего гола с текущим счётом. DEMO проверяет выбранный
+исход через виртуальный купон и не отправляет денежную ставку.
 
 Persistent Chromium создаётся единственным `BrowserManager` при старте
 FastAPI. `POST /api/demo/stop` останавливает только worker; закрыть browser

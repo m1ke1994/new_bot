@@ -164,10 +164,15 @@ class LivePendingTests(unittest.IsolatedAsyncioTestCase):
                     return_value=(latest_score, retry_odds)
                 )
                 engine._wait_for_live_confirmation_or_score = AsyncMock(
-                    side_effect=[
-                        (PlacementObservation(False, signal, retryable=True), latest_score),
-                        (PlacementObservation(True, "accepted"), latest_score),
-                    ]
+                    side_effect=(
+                        [(PlacementObservation(True, "accepted"), latest_score)]
+                        if prepare_side_effect
+                        and isinstance(prepare_side_effect[0], MarketNotAvailable)
+                        else [
+                            (PlacementObservation(False, signal, retryable=True), latest_score),
+                            (PlacementObservation(True, "accepted"), latest_score),
+                        ]
+                    )
                 )
 
                 result = await engine._prepare_live_until_placed(

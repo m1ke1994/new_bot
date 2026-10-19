@@ -1365,6 +1365,17 @@ class DemoEngine:
             return False
         status = result.get("status", "WAITING_MANUAL_LOGIN")
         await STATE.update(auth={"status": status})
+        if status == "AUTH_TIMEOUT":
+            await self._status(
+                DemoStatus.AUTH_TIMEOUT,
+                "Авторизация не подтверждена за 40 секунд. Ожидаем ручной вход.",
+                "AUTH_TIMEOUT",
+            )
+            await REPOSITORY.log(
+                "AUTH_TIMEOUT",
+                "Баланс RUB не обнаружен; остаёмся в ожидании ручного входа",
+            )
+            return False
         if not result.get("ok"):
             return False
         navigation_succeeded = getattr(
@@ -1376,16 +1387,6 @@ class DemoEngine:
             await navigation_succeeded()
         self._authorized_generation = generation
         self._auth_status = status
-        if status == "AUTH_TIMEOUT":
-            await self._status(
-                DemoStatus.AUTH_TIMEOUT,
-                "Авторизация не подтверждена за 40 секунд. Продолжаем работу.",
-                "AUTH_TIMEOUT",
-            )
-            await REPOSITORY.log(
-                "AUTH_TIMEOUT",
-                "RUB was not detected; continuing the existing flow",
-            )
         return True
 
     async def _process_next_match(self, page: Page) -> None:
@@ -6256,6 +6257,14 @@ class DemoEngine:
                         "same match/step/side will be retried"
                     ),
                 )
+                attempt_record.update(
+                    result="NOT_PLACED",
+                    status="MARKET_STALE_BEFORE_CLICK",
+                    placement_signal="MARKET_STALE_BEFORE_CLICK",
+                    settled=False,
+                    resolved_at=local_now(),
+                )
+                await REPOSITORY.save_bet(attempt_record)
                 await REPOSITORY.discard_unaccepted_bet(attempt_id)
                 await self._set_coupon_recovery_state(
                     phase="WAITING_NEW_MARKET",

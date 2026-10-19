@@ -97,7 +97,7 @@ const state = ref({
 
   bet: { step: 0, max_steps: 7 },
 
-  budget: { initial_budget: 4142, current_budget: 4142, session_profit: 0 },
+  budget: { initial_budget: 4099, current_budget: 4099, session_profit: 0 },
 
   last_change: null,
 
@@ -167,9 +167,9 @@ const strategyConfig = ref({
 
   max_steps: 7,
 
-  stakes: [20, 44, 97, 213, 469, 1031, 2268],
+  stakes: [20, 44, 96, 211, 464, 1020, 2244],
 
-  required_budget: 4142,
+  required_budget: 4099,
 
   exclude_teams_enabled: true,
 

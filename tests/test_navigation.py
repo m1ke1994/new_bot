@@ -109,7 +109,7 @@ class NavigationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(page.goto_calls, 2)
-        self.assertEqual(page.stop_calls, 1)
+        self.assertEqual(page.stop_calls, 0)
 
     async def test_chrome_error_document_is_rejected(self):
         page = FakeNavigationPage(

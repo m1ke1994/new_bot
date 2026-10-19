@@ -149,7 +149,10 @@ class ManualAuthorizationTests(unittest.IsolatedAsyncioTestCase):
             statuses.append("AUTHORIZED")
 
         wait_mock = AsyncMock(return_value=True)
-        with patch("auth._wait_poll_interval", wait_mock):
+        with (
+            patch("auth._wait_poll_interval", wait_mock),
+            patch("auth.AUTH_SELECTOR_CANDIDATES", (BALANCE_SELECTOR,)),
+        ):
             result = await authorize(
                 page,
                 asyncio.Event(),
@@ -164,13 +167,13 @@ class ManualAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"ok": True, "status": "AUTHORIZED"})
         wait_mock.assert_not_awaited()
 
-    async def test_timeout_continues_the_flow(self):
+    async def test_timeout_does_not_claim_authorization(self):
         page = FakePage([[]])
 
         with patch("auth.MANUAL_LOGIN_TIMEOUT", 0.0):
             result = await authorize(page, asyncio.Event())
 
-        self.assertEqual(result, {"ok": True, "status": "AUTH_TIMEOUT"})
+        self.assertEqual(result, {"ok": False, "status": "AUTH_TIMEOUT"})
 
     async def test_stop_event_interrupts_manual_login_wait(self):
         page = FakePage([[]])

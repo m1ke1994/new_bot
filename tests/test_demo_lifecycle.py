@@ -181,7 +181,10 @@ class DemoLifecycleTests(unittest.IsolatedAsyncioTestCase):
         manager.page = blank
         manager._context_closed = False
 
-        page = await manager.prepare_session_page()
+        with patch.object(
+            manager, "_preopen_site_locked", AsyncMock(side_effect=lambda page: page)
+        ):
+            page = await manager.prepare_session_page()
 
         self.assertIs(page, site)
         self.assertIs(manager.page, site)
@@ -537,7 +540,7 @@ class DemoLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["status"], "AUTHORIZED")
         self.assertEqual(state["auth"]["status"], "AUTHORIZED")
 
-    async def test_auth_timeout_still_allows_the_worker_to_continue(self):
+    async def test_auth_timeout_waits_for_a_later_confirmed_login(self):
         manager = FakeBrowserManager()
         engine = DemoEngine(manager)
 
@@ -548,25 +551,26 @@ class DemoLifecycleTests(unittest.IsolatedAsyncioTestCase):
             _on_authorized,
         ):
             await on_waiting()
-            return {"ok": True, "status": "AUTH_TIMEOUT"}
+            return {"ok": False, "status": "AUTH_TIMEOUT"}
 
         with patch("backend.app.demo.engine.authorize", new=timeout_authorize):
             should_continue = await engine._ensure_authorized(FakePage())
 
         state = await STATE.snapshot()
-        self.assertTrue(should_continue)
+        self.assertFalse(should_continue)
         self.assertEqual(state["status"], "AUTH_TIMEOUT")
         self.assertEqual(state["auth"]["status"], "AUTH_TIMEOUT")
 
         with patch(
             "backend.app.demo.engine.authorize",
-            new=AsyncMock(side_effect=AssertionError("Повторное ожидание недопустимо")),
-        ):
+            new=AsyncMock(return_value={"ok": True, "status": "AUTHORIZED"}),
+        ) as retry:
             should_still_continue = await engine._ensure_authorized(FakePage())
 
         state = await STATE.snapshot()
         self.assertTrue(should_still_continue)
-        self.assertEqual(state["auth"]["status"], "AUTH_TIMEOUT")
+        retry.assert_awaited_once()
+        self.assertEqual(state["auth"]["status"], "AUTHORIZED")
 
 
 if __name__ == "__main__":

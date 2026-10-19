@@ -227,8 +227,8 @@ async def wait_for_manual_login(
 
     log("Таймаут ожидания ручной авторизации: 40 секунд")
     log("RUB не обнаружен")
-    log("Продолжаем выполнение программы")
-    return {"ok": True, "status": "AUTH_TIMEOUT"}
+    log("Ожидаем вход пользователя; авторизация пока не подтверждена")
+    return {"ok": False, "status": "AUTH_TIMEOUT"}
 
 
 async def authorize(

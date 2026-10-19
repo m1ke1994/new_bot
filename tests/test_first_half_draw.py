@@ -334,7 +334,9 @@ class FirstHalfDrawLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history[0]["result"], "LOSE")
         self.assertEqual(history[0]["period"], "FIRST_HALF")
         self.assertEqual(history[0]["score_after"], "0:1")
-        self.assertEqual(budget["current_budget"], 4132.0)
+        self.assertEqual(
+            budget["current_budget"], budget["initial_budget"] - 10.0
+        )
         self.assertEqual(sequence["current_step"], 2)
         self.assertEqual(sequence["status"], "WAITING_NEXT_MATCH")
         self.assertEqual(processed, {"match-1"})
@@ -343,7 +345,9 @@ class FirstHalfDrawLifecycleTests(unittest.IsolatedAsyncioTestCase):
         _, history, budget, sequence = await self._run_result((1, 1))
 
         self.assertEqual(history[0]["result"], "WIN")
-        self.assertEqual(budget["current_budget"], 4185.3)
+        self.assertEqual(
+            budget["current_budget"], budget["initial_budget"] + 43.3
+        )
         self.assertEqual(sequence["current_step"], 1)
         self.assertEqual(sequence["status"], "WAITING_FOR_MATCH")
 
@@ -410,7 +414,7 @@ class FirstHalfDrawLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history[0]["result"], "LOSE")
         self.assertTrue(history[0]["settled"])
         self.assertIsNone(history[0]["budget_change"])
-        self.assertEqual(budget["current_budget"], 4142.0)
+        self.assertEqual(budget["current_budget"], budget["initial_budget"])
         self.assertEqual(sequence["current_step"], 2)
 
 

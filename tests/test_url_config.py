@@ -1,3 +1,4 @@
+import os
 import unittest
 from pathlib import Path
 
@@ -5,7 +6,7 @@ from auth import SITE_URL
 from backend.app.demo.config import CONFIG as DEMO_CONFIG
 from backend.app.routes.browser import browser_config_check
 from matches import MATCHES_URL
-from xbet_config import URL_CONFIG, UrlConfig, join_url
+from xbet_config import URL_CONFIG, SelectorConfig, UrlConfig, join_url
 
 
 def environment(**changes: str) -> dict[str, str]:
@@ -87,6 +88,16 @@ class UrlConfigTests(unittest.IsolatedAsyncioTestCase):
                     rf"Missing required site configuration:\s*{key}",
                 ):
                     UrlConfig.from_env(values)
+
+    def test_required_canvas_selector_has_its_actual_env_name_in_diagnostics(self):
+        values = dict(os.environ)
+        values.pop("SELECTOR_MARKET_CANVAS", None)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"Missing required site configuration:\s*SELECTOR_MARKET_CANVAS",
+        ):
+            SelectorConfig.from_env(values)
 
     def test_public_urls_reject_embedded_secrets(self):
         with self.assertRaisesRegex(RuntimeError, "must not contain credentials"):

@@ -285,6 +285,18 @@ class DemoSeriesLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         ),
                     ]
                 )
+                async def prepared_virtual_coupon(**kwargs):
+                    current_odds = kwargs["current_odds"]
+                    return (
+                        kwargs["snapshot"],
+                        current_odds,
+                        current_odds.team1,
+                        current_odds.team2,
+                    )
+
+                engine._prepare_demo_virtual_until_ready = AsyncMock(
+                    side_effect=prepared_virtual_coupon
+                )
                 engine._read_fresh_score = AsyncMock(
                     side_effect=[initial, score_after_loss, score_after_loss]
                 )

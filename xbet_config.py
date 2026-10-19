@@ -262,7 +262,18 @@ class SelectorConfig:
         cls,
         environ: Mapping[str, str] | None = None,
         *,
-        required: tuple[str, ...] = ("game_card",),
+        required: tuple[str, ...] = (
+            "auth_marker",
+            "page_body",
+            "game_card",
+            "match_link",
+            "team_name",
+            "match_time",
+            "scoreboard_root",
+            "canvas",
+            "bet_amount_input",
+            "bet_submit_button",
+        ),
     ) -> "SelectorConfig":
         source = os.environ if environ is None else environ
 
@@ -360,7 +371,14 @@ class SelectorConfig:
     def require(self, *names: str) -> None:
         missing = [name for name in names if not getattr(self, name)]
         if missing:
-            env_names = [f"SELECTOR_{name.upper()}" for name in missing]
+            special_names = {
+                "scoreboard_root": "SELECTOR_SCOREBOARD",
+                "canvas": "SELECTOR_MARKET_CANVAS",
+            }
+            env_names = [
+                special_names.get(name, f"SELECTOR_{name.upper()}")
+                for name in missing
+            ]
             raise RuntimeError(
                 "Missing required site configuration:\n" + "\n".join(env_names)
             )

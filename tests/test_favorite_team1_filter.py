@@ -89,7 +89,7 @@ class FavoriteTeam1FilterTests(unittest.TestCase):
         configured = StrategyConfig.from_payload(
             {"favorite_team1_enabled": True, "favorite_team1_min_odds": 2.05}
         )
-        self.assertEqual(configured.favorite_team1_min_odds, 2.05)
+        self.assertEqual(str(configured.favorite_team1_min_odds), "2.05")
         self.assertEqual(configured.to_dict()["favorite_team1_min_odds"], 2.05)
 
     def test_conflicting_team1_filters_are_rejected(self):
