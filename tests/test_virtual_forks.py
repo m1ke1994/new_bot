@@ -266,7 +266,10 @@ class VirtualForkLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 await observer._scan_one(FakePage())
                 league.open.assert_not_awaited()
                 league.open_match.assert_awaited_once()
-                odds.assert_not_awaited()
+                # The observer may read prices after LIVE starts (for display),
+                # but must not create a virtual pair outside 05:00-05:30.
+                self.assertGreaterEqual(odds.await_count, 1)
+                self.assertEqual(observer.store.history(), [])
                 self.assertIn("upcoming-1", observer._completed_match_ids)
                 self.assertTrue(any(
                     line["event"] == "MATCH_LIVE_STARTED"
@@ -335,13 +338,87 @@ class VirtualForkLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     locked_sides=(), recent_locked_sides=(), source="MOCK_CANVAS",
                 )
                 await observer._scan_one(FakePage())
-                odds.assert_awaited_once()
+                # One or more pre-window observations are allowed; entry
+                # must still happen at the first 05:00+ opportunity.
+                self.assertGreaterEqual(odds.await_count, 2)
                 settle.assert_awaited_once()
                 self.assertEqual(observer._position["timer"], "05:01")
                 self.assertEqual(observer._position["status"], "PENDING")
                 self.assertEqual(observer._state["signals"], 1)
                 self.assertEqual(len(observer.store.history()), 1)
                 self.assertEqual(observer._state["balance"], 4500.0)
+
+    async def test_missing_timer_recovered_from_scoreboard_header(self):
+        from backend.app.demo.models import ScoreboardSnapshot, Score
+
+        with TemporaryDirectory() as tmp:
+            observer = VirtualForkObserver(ForkStore(Path(tmp) / "forks.sqlite3"))
+            observer._session = "time-test"
+            snapshot = ScoreboardSnapshot(
+                team1="Ред Булл", team2="Вильярреал",
+                score=Score(0, 1), timer="", period="1-й тайм",
+            )
+            page = AsyncMock()
+            locator = page.locator.return_value.first
+            locator.count = AsyncMock(return_value=1)
+            locator.is_visible = AsyncMock(return_value=True)
+            locator.inner_text = AsyncMock(return_value="1-й тайм 01:00")
+            with patch("backend.app.virtual_forks.read_scoreboard", new_callable=AsyncMock) as reader:
+                reader.return_value = snapshot
+                result = await observer._read_live_scoreboard(page)
+            self.assertEqual(result.timer, "01:00")
+            self.assertEqual(result.period, "1-й тайм")
+            self.assertEqual(result.score.text(), "0:1")
+            self.assertTrue(any(
+                item["event"] == "MATCH_TIMER_FOUND" for item in observer.store.logs()
+            ))
+
+    async def test_missing_timer_does_not_guess_match_clock(self):
+        from backend.app.demo.models import ScoreboardSnapshot, Score
+
+        with TemporaryDirectory() as tmp:
+            observer = VirtualForkObserver(ForkStore(Path(tmp) / "forks.sqlite3"))
+            observer._session = "time-unknown"
+            snapshot = ScoreboardSnapshot(
+                team1="А", team2="Б", score=Score(0, 0),
+                timer="", period="1-й тайм",
+            )
+            page = AsyncMock()
+            locator = page.locator.return_value.first
+            locator.count = AsyncMock(return_value=0)
+            with patch("backend.app.virtual_forks.read_scoreboard", new_callable=AsyncMock) as reader:
+                reader.return_value = snapshot
+                result = await observer._read_live_scoreboard(page)
+            self.assertEqual(result.timer, "")
+            self.assertTrue(any(
+                item["event"] == "MATCH_TIMER_MISSING" for item in observer.store.logs()
+            ))
+
+    async def test_odds_visible_before_window_without_virtual_stake(self):
+        from backend.app.demo.models import ScoreboardSnapshot, Score
+
+        with TemporaryDirectory() as tmp:
+            observer = VirtualForkObserver(ForkStore(Path(tmp) / "forks.sqlite3"))
+            observer._session = "odds-before"
+            snap = ScoreboardSnapshot(
+                team1="Ред Булл", team2="Вильярреал",
+                score=Score(0, 1), timer="01:00", period="1-й тайм",
+            )
+            fake = SimpleNamespace(
+                team1=1.73, team2=2.01, next_goal_number=2,
+                locked_sides=(), recent_locked_sides=(), source="MOCK_CANVAS",
+            )
+            with patch("backend.app.virtual_forks.read_next_goal_odds", new_callable=AsyncMock) as reader:
+                reader.return_value = fake
+                result = await observer._observe_odds(object(), snap, entry_window=False)
+                self.assertIs(result, fake)
+            state = observer.snapshot()
+            self.assertEqual(state["quote"]["odd1"], 1.73)
+            self.assertEqual(state["quote"]["odd2"], 2.01)
+            self.assertEqual(state["quote"]["goal_number"], 2)
+            self.assertTrue(state["quote"]["observation_only"])
+            self.assertFalse(state["quote"]["entry_window"])
+            self.assertEqual(observer.store.history(), [])
 
     async def test_revalidation_rejects_match_started_before_open(self):
         from urllib.parse import urlparse
