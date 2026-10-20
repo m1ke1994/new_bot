@@ -180,35 +180,48 @@ class MatchStartGate:
 
 
 def split_virtual_stakes(total: Decimal, odd1: Any, odd2: Any) -> dict[str, Any] | None:
-    """Same-event, two-side conditional hedge, NOT a 3-outcome surebet."""
+    """Allocate whole rubles and re-check both CONDITIONAL payoffs after rounding.
+
+    The bookmaker's third 'no more goals' outcome is not covered, so this
+    is never advertised as a risk-free arbitrage.
+    """
+    from decimal import ROUND_HALF_UP
     try:
         a, b = Decimal(str(odd1)), Decimal(str(odd2))
-        amount = cash(total)
-    except (InvalidOperation, TypeError, ValueError):
+        amount = Decimal(str(total)).quantize(Decimal("1"), rounding=ROUND_DOWN)
+    except (InvalidOperation, ValueError, TypeError):
         return None
-    if a <= 1 or b <= 1 or amount < Decimal("0.02"):
+    if a <= 1 or b <= 1 or amount < 20:
         return None
-    inv = Decimal(1) / a + Decimal(1) / b
-    if inv >= 1:
+    inverse = Decimal(1) / a + Decimal(1) / b
+    if inverse >= 1:
         return None
-    # Split the same total virtual amount by inverse odds; round only once.
-    stake1 = cash(amount * (Decimal(1) / a) / inv)
-    stake2 = amount - stake1
-    if stake1 <= 0 or stake2 <= 0:
+    ideal = (amount * (Decimal(1) / a) / inverse).quantize(
+        Decimal("1"), rounding=ROUND_HALF_UP
+    )
+    best = None
+    for offset in (-2, -1, 0, 1, 2):
+        stake1 = ideal + offset
+        stake2 = amount - stake1
+        if min(stake1, stake2) < 10:
+            continue
+        payout1 = (stake1 * a).quantize(CENT, rounding=ROUND_DOWN)
+        payout2 = (stake2 * b).quantize(CENT, rounding=ROUND_DOWN)
+        if min(payout1, payout2) <= amount:
+            continue
+        candidate = (min(payout1, payout2), stake1, stake2, payout1, payout2)
+        if best is None or candidate[0] > best[0]:
+            best = candidate
+    if best is None:
         return None
-    payout1 = cash(stake1 * a)
-    payout2 = cash(stake2 * b)
-    profit1 = payout1 - amount
-    profit2 = payout2 - amount
-    if min(profit1, profit2) <= 0:
-        return None
+    _, stake1, stake2, payout1, payout2 = best
     return {
-        "odd1": float(a), "odd2": float(b), "inverse_sum": float(inv),
+        "odd1": float(a), "odd2": float(b), "inverse_sum": float(inverse),
         "stake1": float(stake1), "stake2": float(stake2),
         "total_stake": float(amount), "payout1": float(payout1),
-        "payout2": float(payout2), "profit1": float(profit1),
-        "profit2": float(profit2),
-        "minimum_conditional_profit": float(min(profit1, profit2)),
+        "payout2": float(payout2), "profit1": float(payout1 - amount),
+        "profit2": float(payout2 - amount),
+        "minimum_conditional_profit": float(min(payout1, payout2) - amount),
         "no_goal_loss": float(-amount),
     }
 
