@@ -137,14 +137,14 @@ onBeforeUnmount(() => { clearInterval(poller) })
         </label>
         <div v-if="placementMode === 'BOOKMAKER_DEMO'" class="fork-demo-mode">
           <p><strong>БК DEMO</strong> — сначала меньший коэффициент, после подтверждения первая сторона закрывает окно «Продолжить» / ×; затем пересчитывается и отправляется вторая.</p>
-          <p v-if="state.demo_account_selector_configured === false" class="red">Нужен <code>FORK_DEMO_ACCOUNT_SELECTOR</code> в файле .env, иначе ставки заблокированы.</p>
+          <p>Используем проверку RUB из основной стратегии. RUB сам по себе не отличает учебный счёт от денежного — проверь выбранный счёт перед запуском.</p>
           <label class="fork-ack"><input v-model="confirmDemo" type="checkbox" :disabled="state.running">
-            Подтверждаю, что в браузере выбран именно учебный счёт букмекера и могу проверить его метку
+            Подтверждаю, что в браузере выбран учебный счёт БК с балансом RUB
           </label>
         </div>
         <label>Лимит {{ placementMode === 'BOOKMAKER_DEMO' ? 'учебного' : 'виртуального' }} бюджета<input v-model.number="budget" type="number" min="20" step="100" :disabled="state.running"></label>
         <label>Доля доступного бюджета на пару, %<input v-model.number="fraction" type="number" min="1" max="100" :disabled="state.running"></label>
-        <button :class="['fork-btn', state.running ? 'stop' : 'start']" :disabled="busy || (!state.running && placementMode === 'BOOKMAKER_DEMO' && (!confirmDemo || state.demo_account_selector_configured === false)) || (!state.running && placementMode === 'VIRTUAL' && completedCount >= targetCount)" @click="control(state.running ? 'stop' : 'start')">{{ state.running ? '■ Остановить' : placementMode === 'VIRTUAL' && completedCount >= targetCount ? '✓ Цель достигнута' : placementMode === 'BOOKMAKER_DEMO' ? '▶ Запустить БК DEMO' : '▶ Продолжить сбор вилок' }}</button>
+        <button :class="['fork-btn', state.running ? 'stop' : 'start']" :disabled="busy || (!state.running && placementMode === 'BOOKMAKER_DEMO' && !confirmDemo) || (!state.running && placementMode === 'VIRTUAL' && completedCount >= targetCount)" @click="control(state.running ? 'stop' : 'start')">{{ state.running ? '■ Остановить' : placementMode === 'VIRTUAL' && completedCount >= targetCount ? '✓ Цель достигнута' : placementMode === 'BOOKMAKER_DEMO' ? '▶ Запустить БК DEMO' : '▶ Продолжить сбор вилок' }}</button>
         <div v-if="placementMode === 'VIRTUAL'" class="fork-target">
           <div class="fork-target-head"><span>Цель по завершённым виртуальным парам</span><strong>{{ completedCount }} / {{ targetCount }}</strong></div>
           <div class="fork-target-track"><div class="fork-target-fill" :style="{ width: targetProgress + '%' }"></div></div>
