@@ -25,7 +25,7 @@ async function refresh() {
     state.value = await api('/api/forks/state')
     if (ticks++ % 3 === 0) {
       const [h, l, o] = await Promise.all([
-        api('/api/forks/history?limit=300'),
+        api('/api/forks/history?limit=200'),
         api('/api/forks/logs?limit=200'),
         api('/api/forks/observations?limit=300'),
       ])
@@ -54,6 +54,11 @@ const quote = computed(() => state.value.quote || {})
 const position = computed(() => state.value.position)
 const match = computed(() => state.value.match || {})
 const signal = computed(() => quote.value.conditional_signal && !quote.value.blocked)
+const targetCount = computed(() => Number(state.value.target_pairs || 200))
+const completedCount = computed(() => Number(state.value.completed_pairs || 0))
+const targetProgress = computed(() =>
+  Math.min(100, Math.round(completedCount.value / Math.max(1, targetCount.value) * 100))
+)
 const preview = computed(() => {
   const a = Number(quote.value.odd1), b = Number(quote.value.odd2)
   if (!(a > 1 && b > 1)) return null
@@ -79,6 +84,7 @@ const stage = computed(() => ({
   WAITING_CARDS:'Ожидание карточек матчей', NO_MATCH_CARDS:'Карточки отсутствуют',
   NO_UPCOMING_MATCHES:'Ожидание ближайшего матча', ERROR:'Ошибка сканирования',
   LIVE_HANDOFF:'Переход к уже идущему матчу',
+  TARGET_REACHED:'Цель 200 виртуальных пар достигнута',
 })[state.value.phase] || state.value.phase)
 function rub(v) {
   if (v === null || v === undefined || !Number.isFinite(Number(v))) return '—'
@@ -105,7 +111,12 @@ onBeforeUnmount(() => { clearInterval(poller) })
         <div class="fork-label">01 / БЮДЖЕТ <span>RUB</span></div>
         <label>Стартовый виртуальный бюджет<input v-model.number="budget" type="number" min="20" step="100" :disabled="state.running"></label>
         <label>Доля доступного бюджета на пару, %<input v-model.number="fraction" type="number" min="1" max="100" :disabled="state.running"></label>
-        <button :class="['fork-btn', state.running ? 'stop' : 'start']" :disabled="busy" @click="control(state.running ? 'stop' : 'start')">{{ state.running ? '■ Остановить' : '▶ Запустить мониторинг' }}</button>
+        <button :class="['fork-btn', state.running ? 'stop' : 'start']" :disabled="busy || (!state.running && completedCount >= targetCount)" @click="control(state.running ? 'stop' : 'start')">{{ state.running ? '■ Остановить' : completedCount >= targetCount ? '✓ Цель достигнута' : '▶ Продолжить сбор вилок' }}</button>
+        <div class="fork-target">
+          <div class="fork-target-head"><span>Цель по завершённым виртуальным парам</span><strong>{{ completedCount }} / {{ targetCount }}</strong></div>
+          <div class="fork-target-track"><div class="fork-target-fill" :style="{ width: targetProgress + '%' }"></div></div>
+          <small>Осталось {{ Math.max(0, targetCount - completedCount) }}. Учтены предыдущие сессии, без дублирования или искусственных ставок.</small>
+        </div>
         <div class="fork-metrics">
           <div><small>Доступно</small><strong>{{ rub(state.balance) }}</strong></div>
           <div><small>Прибыль сессии</small><strong :class="Number(state.session_profit)<0?'red':'green'">{{ rub(state.session_profit) }}</strong></div>
@@ -179,7 +190,7 @@ onBeforeUnmount(() => { clearInterval(poller) })
     </section>
     <section class="fork-bottom">
       <article class="fork-card">
-        <div class="fork-label">05 / ИСТОРИЯ ВИРТУАЛЬНЫХ ПАР <span>{{ history.length }} записей</span></div>
+        <div class="fork-label">05 / ИСТОРИЯ ВИРТУАЛЬНЫХ ПАР <span>Последние {{ history.length }} из {{ state.records_total ?? history.length }} · цель {{ targetCount }}</span></div>
         <div class="fork-table-scroll"><table><thead><tr><th>Время</th><th>Матч</th><th>Следующий гол</th><th>Ставка 1</th><th>Ставка 2</th><th>Результат</th><th>P/L</th></tr></thead><tbody>
           <tr v-for="item in history" :key="item.id">
             <td>{{ date(item.created_at) }}</td>
@@ -227,6 +238,12 @@ onBeforeUnmount(() => { clearInterval(poller) })
 .fork-card input{display:block;background:#0b111b;border:1px solid #384960;color:#fff;border-radius:9px;width:100%;padding:13px;margin-top:8px;font-size:18px}
 .fork-countdown{margin:10px 0;border:1px solid #34556a;background:#13283c;color:#cbecff;padding:11px;border-radius:9px;font-size:12px;display:flex;justify-content:space-between}
 .fork-disclaimer{color:#e8bf84;background:#2f251a;border:1px solid #694d25;padding:10px;border-radius:9px;font-size:11px;line-height:1.6;margin:14px 0}
+.fork-target{margin-top:18px;border:1px solid #30445d;background:#0f2030;padding:15px;border-radius:10px}
+.fork-target-head{display:flex;gap:12px;align-items:center;justify-content:space-between;font-size:11px;color:#bed2e8}
+.fork-target-head strong{font-size:17px;color:#50dda9;white-space:nowrap}
+.fork-target-track{height:8px;background:#26384b;border-radius:12px;overflow:hidden;margin:12px 0}
+.fork-target-fill{height:100%;background:#4cd9a7;transition:width .25s ease}
+.fork-target small{color:#8fa9c0;line-height:1.55;font-size:10px;display:block}
 .fork-btn{width:100%;border:0;border-radius:9px;padding:14px;margin-top:10px;font-size:12px;font-weight:800;cursor:pointer}
 .fork-btn:disabled{opacity:.45;cursor:default}
 .fork-btn.start{background:#49d6a2;color:#071910}.fork-btn.stop{background:#873b49;color:#fff}
