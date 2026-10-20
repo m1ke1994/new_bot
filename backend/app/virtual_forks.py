@@ -378,6 +378,10 @@ class VirtualForkObserver:
     def snapshot(self) -> dict[str, Any]:
         state = deepcopy(self._state)
         state["running"] = self.running
+        import os
+        state["demo_account_selector_configured"] = bool(
+            os.environ.get("FORK_DEMO_ACCOUNT_SELECTOR", "").strip()
+        )
         completed = self.store.count_resolved_pairs()
         state["completed_pairs"] = completed
         state["records_total"] = self.store.count_pairs()
@@ -1183,10 +1187,30 @@ class VirtualForkObserver:
                         and not finished(scoreboard.period)
                     )
 
-                completed = await self._bookmaker_placer.place(
-                    page, position, odds, self._stop_event,
-                    persist_demo, self._read_live_scoreboard, in_window,
-                )
+                try:
+                    completed = await self._bookmaker_placer.place(
+                        page, position, odds, self._stop_event,
+                        persist_demo, self._read_live_scoreboard, in_window,
+                    )
+                except BaseException as error:
+                    position["status"] = "BOOKMAKER_DEMO_SUBMISSION_UNKNOWN"
+                    position["placement_error"] = (
+                        f"{type(error).__name__}: {error}; "
+                        "необходимо проверить учебные купоны БК"
+                    )
+                    self.store.upsert(position)
+                    self._update(
+                        phase="BOOKMAKER_DEMO_HALT",
+                        position=deepcopy(position),
+                    )
+                    self._stop_event.set()
+                    self._position = None
+                    if isinstance(error, asyncio.CancelledError):
+                        raise
+                    await self._log(
+                        "BOOKMAKER_DEMO_HALT", position["placement_error"],
+                    )
+                    return
                 if not completed:
                     self._update(
                         phase="BOOKMAKER_DEMO_HALT",
