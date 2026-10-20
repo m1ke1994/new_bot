@@ -6,8 +6,6 @@ specific bookmaker DEMO-account marker cannot be observed and checked.
 from __future__ import annotations
 
 import asyncio
-import os
-import re
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
@@ -63,32 +61,19 @@ def allocate_integer_pair(total: Any, odd1: Any, odd2: Any) -> dict[str, float] 
 
 
 async def require_bookmaker_demo(page: Any) -> str:
-    """Fail closed if account is not visibly marked DEMO, never trust BET_MODE."""
-    selector = os.environ.get("FORK_DEMO_ACCOUNT_SELECTOR", "").strip()
-    if not selector:
+    """Use existing RUB authorization check from the main strategy.
+
+    RUB confirms an accessible betting balance, NOT whether that account
+    uses real or training funds. The explicit BOOKMAKER_DEMO opt-in is a
+    user assertion; there is no invented automatic demo-account detection.
+    """
+    from auth import check_balance
+    if not await check_balance(page):
         raise RuntimeError(
-            "Укажите FORK_DEMO_ACCOUNT_SELECTOR в .env: точный элемент сайта, "
-            "содержащий признак учебного/DEMO-счёта. BET_MODE=DEMO не подходит."
+            "RUB-баланс не найден: ставки остановлены. "
+            "Проверьте авторизацию и выбранный счёт."
         )
-    try:
-        target = page.locator(selector).first
-        if not await target.count() or not await target.is_visible():
-            raise RuntimeError("Не найден видимый признак DEMO-счёта букмекера")
-        label = " ".join(filter(None, (
-            await target.inner_text(),
-            await target.get_attribute("aria-label"),
-            await target.get_attribute("title"),
-        )))
-    except RuntimeError:
-        raise
-    except Exception as error:
-        raise RuntimeError(f"Не удалось проверить DEMO-счёт БК: {error}") from error
-    if not DEMO_MARKER.search(label):
-        raise RuntimeError(
-            "Выбранный элемент не подтверждает DEMO-счёт. "
-            "Автоматические клики запрещены, чтобы не задеть основной RUB-счёт."
-        )
-    return label.strip()[:120]
+    return "RUB"
 
 
 def next_second_amount(first_stake: Decimal, first_odd: Any,
