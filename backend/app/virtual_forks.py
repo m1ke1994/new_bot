@@ -449,7 +449,23 @@ class VirtualForkObserver:
             while not self._stop_event.is_set():
                 page = None
                 try:
-                    page = await BROWSER_MANAGER.ensure_page()
+                    # A newly launched persistent Chromium starts on about:blank.
+                    # prepare_session_page() stabilizes the actual site tab and
+                    # opens the bookmaker BEFORE the auth/league observer begins.
+                    # A healthy authorized tab is reused without navigating.
+                    if authorized_page is None:
+                        self._update(
+                            phase="OPENING_SITE",
+                            target_url=SITE_URL,
+                            browser_url="about:blank",
+                        )
+                        await self._log(
+                            "BROWSER_PREPARING",
+                            f"Подготавливаем вкладку Chromium и открываем {SITE_URL}",
+                        )
+                        page = await BROWSER_MANAGER.prepare_session_page()
+                    else:
+                        page = await BROWSER_MANAGER.ensure_page()
                     if page.is_closed():
                         raise RuntimeError("Вкладка Chromium закрыта до начала наблюдения")
                     generation = BROWSER_MANAGER.generation
