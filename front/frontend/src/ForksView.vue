@@ -73,7 +73,7 @@ const stage = computed(() => ({
   WAITING_TIMER:'Чтение игрового времени', WAITING_WINDOW:'Ожидание LIVE 05:00',
   OBSERVING_ODDS:'Чтение коэффициентов до 05:00 (без ставок)',
   READING_ODDS:'Canvas: чтение коэффициентов', WAITING_MARKET:'Рынок недоступен',
-  WATCHING_QUOTES:'Ожидание вилки', WAITING_RESULT:'Ждём следующий гол',
+  WATCHING_QUOTES:'Ожидание вилки', WAITING_RESULT:'Ожидание гола · максимум 60 секунд',
   SETTLED:'Рассчитано', NEEDS_REVIEW:'Требуется проверка',
   RECOVERING_BROWSER:'Восстановление Chromium', WAITING_AUTH:'Ожидание входа',
   WAITING_CARDS:'Ожидание карточек матчей', NO_MATCH_CARDS:'Карточки отсутствуют',
@@ -93,11 +93,11 @@ onBeforeUnmount(() => { clearInterval(poller) })
 <template>
 <div class="fork-page">
   <header class="fork-top">
-    <div class="fork-brand"><b>F//</b><span>FORK WATCH <em>VIRTUAL</em><small>FC25 · Conference League · 05:00–05:30</small></span></div>
+    <div class="fork-brand"><b>F//</b><span>FORK WATCH <em>VIRTUAL</em><small>FC25 · Conference League · 05:00–05:35</small></span></div>
     <router-link to="/" class="fork-back">← Основная стратегия и фильтры</router-link>
   </header>
   <main class="fork-wrap">
-    <div class="fork-heading"><div><small>АНАЛИТИКА / СЛЕДУЮЩИЙ ГОЛ</small><h1>Мониторинг поздних вилок</h1><p>Выбор ближайшего матча, ожидание 05:00, наблюдение коэффициентов до 05:30 и исключительно виртуальная фиксация.</p></div><strong>{{ state.running ? '● НАБЛЮДЕНИЕ ИДЁТ' : '○ ОСТАНОВЛЕН' }}</strong></div>
+    <div class="fork-heading"><div><small>АНАЛИТИКА / СЛЕДУЮЩИЙ ГОЛ</small><h1>Мониторинг поздних вилок</h1><p>Выбор ближайшего матча, ожидание 05:00, наблюдение коэффициентов до 05:35 и исключительно виртуальная фиксация.</p></div><strong>{{ state.running ? '● НАБЛЮДЕНИЕ ИДЁТ' : '○ ОСТАНОВЛЕН' }}</strong></div>
     <div class="fork-warning"><b>Это условная вилка, не безрисковый арбитраж.</b> Исход «больше не будет голов» не покрыт. При нём обе ставки проигрывают, даже если сумма обратных коэффициентов меньше 1. Реальных ставок нет.</div>
     <div v-if="error" class="fork-error">{{ error }}</div>
     <section class="fork-main-grid">
@@ -116,7 +116,7 @@ onBeforeUnmount(() => { clearInterval(poller) })
       <article class="fork-card">
         <div class="fork-label">02 / ТЕКУЩИЙ МАТЧ <span>{{ stage }}</span></div>
         <h2>{{ match.name || 'Ожидаем ближайший матч' }}</h2>
-        <div class="fork-timer">{{ match.timer || '—:—' }} <small>{{ match.state === 'UPCOMING' ? 'Обратный отсчёт ДО начала — ожидаем LIVE' : match.state === 'LIVE' ? 'Игровое время LIVE · окно 05:00 — 05:30' : 'Ожидаем ближайший ещё не начавшийся матч' }}</small></div>
+        <div class="fork-timer">{{ match.timer || '—:—' }} <small>{{ match.state === 'UPCOMING' ? 'Обратный отсчёт ДО начала — ожидаем LIVE' : match.state === 'LIVE' ? 'Игровое время LIVE · окно 05:00 — 05:35' : 'Ожидаем ближайший ещё не начавшийся матч' }}</small></div>
         <p class="fork-muted">Статус: {{ match.state === 'LIVE' ? 'LIVE' : match.state === 'UPCOMING' ? 'До начала' : '—' }} · {{ match.period || 'Тайм не определён' }} · Счёт: {{ match.score || '—' }} · Следующий гол №{{ quote.goal_number ?? match.next_goal_number ?? '—' }}</p>
         <div class="fork-odds"><div><small>{{ quote.team1 || match.team1 || 'Команда 1' }}</small><strong>{{ odd(quote.odd1) }}</strong></div><div><small>{{ quote.team2 || match.team2 || 'Команда 2' }}</small><strong>{{ odd(quote.odd2) }}</strong></div></div>
         <div :class="['fork-indicator',{positive:signal && quote.entry_window}]">
@@ -133,11 +133,16 @@ onBeforeUnmount(() => { clearInterval(poller) })
         <div class="fork-label">03 / РАСПРЕДЕЛЕНИЕ <span>DEMO</span></div>
         <div v-if="position">
           <h2>{{ position.match }}</h2><small>Зафиксированная пара · {{ position.status }}</small>
-          <div class="fork-line"><span>{{ position.team1 }} @ {{ odd(position.odd1) }}</span><b>{{ rub(position.stake1) }}</b></div>
-          <div class="fork-line"><span>{{ position.team2 }} @ {{ odd(position.odd2) }}</span><b>{{ rub(position.stake2) }}</b></div>
+          <div v-if="position.status === 'PENDING' && state.result_timeout_remaining !== null" class="fork-countdown">
+            До результата или тайм-аута: <b>{{ state.result_timeout_remaining }} сек</b>
+          </div>
+          <div class="fork-line"><span>Ставка 1 · {{ position.team1 }} @ {{ odd(position.odd1) }}</span><b>{{ rub(position.stake1) }} · {{ position.team1_result || 'PENDING' }}</b></div>
+          <div class="fork-line"><span>Ставка 2 · {{ position.team2 }} @ {{ odd(position.odd2) }}</span><b>{{ rub(position.stake2) }} · {{ position.team2_result || 'PENDING' }}</b></div>
           <div class="fork-line"><span>Всего виртуально выделено</span><b>{{ rub(position.total_stake) }}</b></div>
           <div class="fork-line"><span>Мин. прибыль при следующем голе</span><b class="green">{{ rub(position.minimum_conditional_profit) }}</b></div>
           <div class="fork-line"><span>Убыток без гола</span><b class="red">{{ rub(position.no_goal_loss) }}</b></div>
+          <div v-if="position.result === 'TIMEOUT_60S'" class="fork-disclaimer">Симуляция: за 60 секунд новый гол не зафиксирован, обе виртуальные стороны получили LOSE. Это не официальный расчёт букмекерского рынка.</div>
+          <div v-if="position.profit !== null && position.profit !== undefined" class="fork-line"><span>Зафиксированный виртуальный P/L</span><b :class="Number(position.profit)>=0 ? 'green' : 'red'">{{ rub(position.profit) }}</b></div>
         </div>
         <div v-else-if="preview">
           <p class="fork-muted">Предварительный расчёт — не виртуальная ставка. До 05:00 расчёт только информационный.</p>
@@ -175,8 +180,16 @@ onBeforeUnmount(() => { clearInterval(poller) })
     <section class="fork-bottom">
       <article class="fork-card">
         <div class="fork-label">05 / ИСТОРИЯ ВИРТУАЛЬНЫХ ПАР <span>{{ history.length }} записей</span></div>
-        <div class="fork-table-scroll"><table><thead><tr><th>Время</th><th>Матч</th><th>Следующий гол</th><th>Сторона 1</th><th>Сторона 2</th><th>Результат</th><th>P/L</th></tr></thead><tbody>
-          <tr v-for="item in history" :key="item.id"><td>{{ date(item.created_at) }}</td><td><b>{{ item.match }}</b><small>{{ item.score_before }} → {{ item.score_after || '—' }}</small></td><td>№{{ item.goal_number }} / {{ item.timer }}</td><td>{{ rub(item.stake1) }}<small>@ {{ odd(item.odd1) }}</small></td><td>{{ rub(item.stake2) }}<small>@ {{ odd(item.odd2) }}</small></td><td>{{ item.result || item.status }}</td><td :class="item.profit===null?'':Number(item.profit)>=0?'green':'red'">{{ rub(item.profit) }}</td></tr>
+        <div class="fork-table-scroll"><table><thead><tr><th>Время</th><th>Матч</th><th>Следующий гол</th><th>Ставка 1</th><th>Ставка 2</th><th>Результат</th><th>P/L</th></tr></thead><tbody>
+          <tr v-for="item in history" :key="item.id">
+            <td>{{ date(item.created_at) }}</td>
+            <td><b>{{ item.match }}</b><small>{{ item.score_before }} → {{ item.score_after || '—' }}</small></td>
+            <td>№{{ item.goal_number }} / {{ item.timer }}</td>
+            <td>{{ item.team1 }} · {{ rub(item.stake1) }}<small>@ {{ odd(item.odd1) }} · {{ item.team1_result || '—' }}</small></td>
+            <td>{{ item.team2 }} · {{ rub(item.stake2) }}<small>@ {{ odd(item.odd2) }} · {{ item.team2_result || '—' }}</small></td>
+            <td>{{ item.result || item.status }}<small v-if="item.settlement_basis === 'SIMULATED_60S_TIMEOUT'">Условный LOSE за 60 сек, не расчёт БК</small></td>
+            <td :class="item.profit===null?'':Number(item.profit)>=0?'green':'red'">{{ rub(item.profit) }}</td>
+          </tr>
           <tr v-if="!history.length"><td colspan="7">Сигналов пока нет</td></tr>
         </tbody></table></div>
       </article>
@@ -212,6 +225,8 @@ onBeforeUnmount(() => { clearInterval(poller) })
 .fork-label{color:#82a7cb;letter-spacing:1.5px;font-size:10px;font-weight:800;display:flex;justify-content:space-between;gap:10px;margin-bottom:25px}
 .fork-card label{color:#acbfd5;font-size:11px;display:block;margin:18px 0}
 .fork-card input{display:block;background:#0b111b;border:1px solid #384960;color:#fff;border-radius:9px;width:100%;padding:13px;margin-top:8px;font-size:18px}
+.fork-countdown{margin:10px 0;border:1px solid #34556a;background:#13283c;color:#cbecff;padding:11px;border-radius:9px;font-size:12px;display:flex;justify-content:space-between}
+.fork-disclaimer{color:#e8bf84;background:#2f251a;border:1px solid #694d25;padding:10px;border-radius:9px;font-size:11px;line-height:1.6;margin:14px 0}
 .fork-btn{width:100%;border:0;border-radius:9px;padding:14px;margin-top:10px;font-size:12px;font-weight:800;cursor:pointer}
 .fork-btn:disabled{opacity:.45;cursor:default}
 .fork-btn.start{background:#49d6a2;color:#071910}.fork-btn.stop{background:#873b49;color:#fff}
