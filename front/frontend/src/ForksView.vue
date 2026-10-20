@@ -3,6 +3,8 @@ import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
 import { apiUrl } from './config'
 const budget = ref(5000)
 const fraction = ref(10)
+const placementMode = ref('VIRTUAL')
+const confirmDemo = ref(false)
 const state = ref({ running:false, phase:'STOPPED', message:'Остановлен', balance:0, initial_budget:0, session_profit:0, allocated_percent:10, match:null, quote:null, position:null, scanned:0, signals:0 })
 const history = ref([])
 const observations = ref([])
@@ -42,7 +44,10 @@ async function control(mode) {
   busy.value = true
   try {
     const options = mode === 'start'
-      ? { method:'POST', body:JSON.stringify({ budget:Number(budget.value), allocation_percent:Number(fraction.value) }) }
+      ? { method:'POST', body:JSON.stringify({
+          budget:Number(budget.value), allocation_percent:Number(fraction.value),
+          placement_mode:placementMode.value, confirm_demo:confirmDemo.value,
+        }) }
       : { method:'POST' }
     await api('/api/forks/' + mode, options)
     ticks = 0
@@ -96,6 +101,10 @@ const stage = computed(() => ({
   NO_UPCOMING_MATCHES:'Ожидание ближайшего матча', ERROR:'Ошибка сканирования',
   LIVE_HANDOFF:'Переход к уже идущему матчу',
   TARGET_REACHED:'Цель 200 виртуальных пар достигнута',
+  BOOKMAKER_DEMO_PLACING:'БК DEMO: отправка двух купонов',
+  BOOKMAKER_DEMO_HALT:'БК DEMO: проверка неполной пары',
+  BOOKMAKER_DEMO_UNRESOLVED:'БК DEMO: купоны требуют проверки',
+  DEMO_BALANCE_EXHAUSTED:'Учебный лимит исчерпан',
 })[state.value.phase] || state.value.phase)
 function rub(v) {
   if (v === null || v === undefined || !Number.isFinite(Number(v))) return '—'
@@ -114,16 +123,29 @@ onBeforeUnmount(() => { clearInterval(poller) })
     <router-link to="/" class="fork-back">← Основная стратегия и фильтры</router-link>
   </header>
   <main class="fork-wrap">
-    <div class="fork-heading"><div><small>АНАЛИТИКА / СЛЕДУЮЩИЙ ГОЛ</small><h1>Мониторинг поздних вилок</h1><p>Выбор ближайшего матча, ожидание 05:00, наблюдение коэффициентов до 05:35 и исключительно виртуальная фиксация.</p></div><strong>{{ state.running ? '● НАБЛЮДЕНИЕ ИДЁТ' : '○ ОСТАНОВЛЕН' }}</strong></div>
-    <div class="fork-warning"><b>Это условная вилка, не безрисковый арбитраж.</b> Исход «больше не будет голов» не покрыт. При нём обе ставки проигрывают, даже если сумма обратных коэффициентов меньше 1. Реальных ставок нет.</div>
+    <div class="fork-heading"><div><small>АНАЛИТИКА / СЛЕДУЮЩИЙ ГОЛ</small><h1>Мониторинг поздних вилок</h1><p>Выбор ближайшего матча, ожидание 05:00, наблюдение коэффициентов до 05:35, виртуальная симуляция или реальные клики только на подтверждённом учебном счёте букмекера.</p></div><strong>{{ state.running ? '● НАБЛЮДЕНИЕ ИДЁТ' : '○ ОСТАНОВЛЕН' }}</strong></div>
+    <div class="fork-warning"><b>Это условная вилка, не безрисковый арбитраж.</b> Исход «больше не будет голов» не покрыт. При нём обе ставки проигрывают, даже если сумма обратных коэффициентов меньше 1. В режиме БК DEMO отправляются настоящие купоны на учебном счёте: не запускайте его без проверки типа счёта.</div>
     <div v-if="error" class="fork-error">{{ error }}</div>
     <section class="fork-main-grid">
       <article class="fork-card">
         <div class="fork-label">01 / БЮДЖЕТ <span>RUB</span></div>
-        <label>Стартовый виртуальный бюджет<input v-model.number="budget" type="number" min="20" step="100" :disabled="state.running"></label>
+        <label>Режим размещения
+          <select v-model="placementMode" :disabled="state.running" class="fork-mode-select" @change="confirmDemo = false">
+            <option value="VIRTUAL">Виртуально (без купонов)</option>
+            <option value="BOOKMAKER_DEMO">БК DEMO (две ставки на учебном счёте)</option>
+          </select>
+        </label>
+        <div v-if="placementMode === 'BOOKMAKER_DEMO'" class="fork-demo-mode">
+          <p><strong>БК DEMO</strong> — сначала меньший коэффициент, после подтверждения первая сторона закрывает окно «Продолжить» / ×; затем пересчитывается и отправляется вторая.</p>
+          <p v-if="state.demo_account_selector_configured === false" class="red">Нужен <code>FORK_DEMO_ACCOUNT_SELECTOR</code> в файле .env, иначе ставки заблокированы.</p>
+          <label class="fork-ack"><input v-model="confirmDemo" type="checkbox" :disabled="state.running">
+            Подтверждаю, что в браузере выбран именно учебный счёт букмекера и могу проверить его метку
+          </label>
+        </div>
+        <label>Лимит {{ placementMode === 'BOOKMAKER_DEMO' ? 'учебного' : 'виртуального' }} бюджета<input v-model.number="budget" type="number" min="20" step="100" :disabled="state.running"></label>
         <label>Доля доступного бюджета на пару, %<input v-model.number="fraction" type="number" min="1" max="100" :disabled="state.running"></label>
-        <button :class="['fork-btn', state.running ? 'stop' : 'start']" :disabled="busy || (!state.running && completedCount >= targetCount)" @click="control(state.running ? 'stop' : 'start')">{{ state.running ? '■ Остановить' : completedCount >= targetCount ? '✓ Цель достигнута' : '▶ Продолжить сбор вилок' }}</button>
-        <div class="fork-target">
+        <button :class="['fork-btn', state.running ? 'stop' : 'start']" :disabled="busy || (!state.running && placementMode === 'BOOKMAKER_DEMO' && (!confirmDemo || state.demo_account_selector_configured === false)) || (!state.running && placementMode === 'VIRTUAL' && completedCount >= targetCount)" @click="control(state.running ? 'stop' : 'start')">{{ state.running ? '■ Остановить' : placementMode === 'VIRTUAL' && completedCount >= targetCount ? '✓ Цель достигнута' : placementMode === 'BOOKMAKER_DEMO' ? '▶ Запустить БК DEMO' : '▶ Продолжить сбор вилок' }}</button>
+        <div v-if="placementMode === 'VIRTUAL'" class="fork-target">
           <div class="fork-target-head"><span>Цель по завершённым виртуальным парам</span><strong>{{ completedCount }} / {{ targetCount }}</strong></div>
           <div class="fork-target-track"><div class="fork-target-fill" :style="{ width: targetProgress + '%' }"></div></div>
           <small>Осталось {{ Math.max(0, targetCount - completedCount) }}. Учтены предыдущие сессии, без дублирования или искусственных ставок.</small>
@@ -152,7 +174,7 @@ onBeforeUnmount(() => { clearInterval(poller) })
         <p v-if="state.browser_url && (stage === 'Открытие сайта в Chromium' || stage === 'Ошибка открытия сайта' || stage === 'Проверка авторизации')" class="fork-muted">Вкладка: {{ state.browser_url }} · Цель: {{ state.target_url || 'не указана' }}</p>
       </article>
       <article class="fork-card">
-        <div class="fork-label">03 / РАСПРЕДЕЛЕНИЕ <span>DEMO</span></div>
+        <div class="fork-label">03 / РАСПРЕДЕЛЕНИЕ <span>{{ state.placement_mode === 'BOOKMAKER_DEMO' ? 'БК DEMO' : 'VIRTUAL' }}</span></div>
         <div v-if="position">
           <h2>{{ position.match }}</h2><small>Зафиксированная пара · {{ position.status }}</small>
           <div v-if="position.status === 'PENDING' && state.result_timeout_remaining !== null" class="fork-countdown">
@@ -160,7 +182,13 @@ onBeforeUnmount(() => { clearInterval(poller) })
           </div>
           <div class="fork-line"><span>Ставка 1 · {{ position.team1 }} @ {{ odd(position.odd1) }}</span><b>{{ rub(position.stake1) }} · {{ position.team1_result || 'PENDING' }}</b></div>
           <div class="fork-line"><span>Ставка 2 · {{ position.team2 }} @ {{ odd(position.odd2) }}</span><b>{{ rub(position.stake2) }} · {{ position.team2_result || 'PENDING' }}</b></div>
-          <div class="fork-line"><span>Всего виртуально выделено</span><b>{{ rub(position.total_stake) }}</b></div>
+          <div class="fork-line"><span>Всего {{ position.placement_mode === 'BOOKMAKER_DEMO' ? 'запланировано в БК DEMO' : 'виртуально выделено' }}</span><b>{{ rub(position.total_stake) }}</b></div>
+          <div v-if="position.placement_mode === 'BOOKMAKER_DEMO'" class="fork-disclaimer">
+            Подтверждено учебных купонов: {{ position.accepted_legs || 0 }}/2.
+            <div>Команда 1: {{ position.team1_placement || '—' }}; команда 2: {{ position.team2_placement || '—' }}.</div>
+            <div v-if="position.placement_error">{{ position.placement_error }}</div>
+            Выигрыш на табло не равен подтверждённой выплате БК.
+          </div>
           <div class="fork-line"><span>Мин. прибыль при следующем голе</span><b class="green">{{ rub(position.minimum_conditional_profit) }}</b></div>
           <div class="fork-line"><span>Убыток без гола</span><b class="red">{{ rub(position.no_goal_loss) }}</b></div>
           <div v-if="position.result === 'TIMEOUT_60S'" class="fork-disclaimer">Симуляция: за 60 секунд новый гол не зафиксирован, обе виртуальные стороны получили LOSE. Это не официальный расчёт букмекерского рынка.</div>
@@ -175,7 +203,7 @@ onBeforeUnmount(() => { clearInterval(poller) })
           <div class="fork-line"><span>Если голов больше нет</span><b class="red">{{ rub(-preview.total) }}</b></div>
         </div>
         <p v-else class="fork-muted">Ожидаем коэффициенты для расчёта сумм.</p>
-        <p class="fork-muted">Пара записывается только при одновременных незаблокированных исходах, неизменном счёте, точном времени и положительной расчётной прибыли после округления.</p>
+        <p class="fork-muted">Обе суммы округляются до целого рубля. Режим БК DEMO требует подтверждения учебного счёта, принятия каждого купона и повторной проверки цены второй стороны.</p>
       </article>
     </section>
     <section class="fork-card fork-observations">
@@ -249,6 +277,11 @@ onBeforeUnmount(() => { clearInterval(poller) })
 .fork-card input{display:block;background:#0b111b;border:1px solid #384960;color:#fff;border-radius:9px;width:100%;padding:13px;margin-top:8px;font-size:18px}
 .fork-countdown{margin:10px 0;border:1px solid #34556a;background:#13283c;color:#cbecff;padding:11px;border-radius:9px;font-size:12px;display:flex;justify-content:space-between}
 .fork-disclaimer{color:#e8bf84;background:#2f251a;border:1px solid #694d25;padding:10px;border-radius:9px;font-size:11px;line-height:1.6;margin:14px 0}
+.fork-mode-select{width:100%;margin-top:8px;padding:12px;border:1px solid #334761;border-radius:9px;color:#e7f3ff;background:#101b2c}
+.fork-demo-mode{border:1px solid #795b36;background:#2d241b;color:#ffdbad;border-radius:10px;padding:12px;margin:12px 0;font-size:11px;line-height:1.6}
+.fork-demo-mode p{margin:0 0 8px}
+.fork-ack{display:flex!important;align-items:start;gap:9px}
+.fork-ack input{width:auto!important;min-width:16px;flex:none;margin-top:3px}
 .fork-target{margin-top:18px;border:1px solid #30445d;background:#0f2030;padding:15px;border-radius:10px}
 .fork-target-head{display:flex;gap:12px;align-items:center;justify-content:space-between;font-size:11px;color:#bed2e8}
 .fork-target-head strong{font-size:17px;color:#50dda9;white-space:nowrap}
