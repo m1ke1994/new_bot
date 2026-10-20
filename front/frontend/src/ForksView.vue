@@ -66,7 +66,9 @@ const preview = computed(() => {
   return { total, stake1, stake2, best:Math.min(profit1,profit2) }
 })
 const stage = computed(() => ({
-  STOPPED:'Остановлен', AUTH_CHECK:'Ожидание авторизации', SEARCHING_MATCH:'Поиск ближайшего матча',
+  STOPPED:'Остановлен', AUTH_CHECK:'Проверка авторизации',
+  OPENING_SITE:'Открытие сайта в Chromium', SITE_ERROR:'Ошибка открытия сайта',
+  SEARCHING_MATCH:'Поиск ближайшего матча',
   OPENING_MATCH:'Открытие будущего матча', WAITING_MATCH_START:'Ожидание начала LIVE',
   WAITING_TIMER:'Чтение игрового времени', WAITING_WINDOW:'Ожидание LIVE 05:00',
   OBSERVING_ODDS:'Чтение коэффициентов до 05:00 (без ставок)',
@@ -125,6 +127,7 @@ onBeforeUnmount(() => { clearInterval(poller) })
           <span v-if="match.state === 'LIVE' && !match.timer">Таймер LIVE не найден в DOM; вход автоматически заблокирован</span>
         </div>
         <p class="fork-muted">{{ state.message }}</p>
+        <p v-if="state.browser_url && (stage === 'Открытие сайта в Chromium' || stage === 'Ошибка открытия сайта' || stage === 'Проверка авторизации')" class="fork-muted">Вкладка: {{ state.browser_url }} · Цель: {{ state.target_url || 'не указана' }}</p>
       </article>
       <article class="fork-card">
         <div class="fork-label">03 / РАСПРЕДЕЛЕНИЕ <span>DEMO</span></div>
