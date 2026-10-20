@@ -1290,9 +1290,14 @@ class VirtualForkObserver:
                 await self._resolve("NO_GOAL", snap.score.text())
                 return
             if asyncio.get_running_loop().time() >= deadline:
-                # Both sides lose in the one-minute synthetic strategy.
-                # Explicitly preserve that this is NOT market settlement.
-                await self._resolve("TIMEOUT_60S", snap.score.text())
+                if self._placement_mode == "BOOKMAKER_DEMO":
+                    await self._review(
+                        "За 60 секунд гол не зафиксирован, но оба учебных "
+                        "купона могут оставаться открытыми в БК. "
+                        "Расчёт и возврат средств требуют проверки."
+                    )
+                else:
+                    await self._resolve("TIMEOUT_60S", snap.score.text())
                 return
             await self.pause(0.35)
         if self._position is not None and self._position["status"] == "PENDING":
@@ -1304,22 +1309,39 @@ class VirtualForkObserver:
         p = self._position
         if outcome not in ("TEAM_1", "TEAM_2", "NO_GOAL", "TIMEOUT_60S"):
             raise ValueError(f"Неизвестный исход виртуальной пары: {outcome}")
+        if self._placement_mode == "BOOKMAKER_DEMO" and outcome in ("NO_GOAL", "TIMEOUT_60S"):
+            await self._review(
+                "Итог без нового гола обнаружен, но расчёт купонов учебным "
+                "счётом букмекера не проверен."
+            )
+            return
+        bookmaker_demo = p.get("placement_mode") == "BOOKMAKER_DEMO"
         winner1 = outcome == "TEAM_1"
         winner2 = outcome == "TEAM_2"
         payout1 = cash(p["payout1"] if winner1 else 0)
         payout2 = cash(p["payout2"] if winner2 else 0)
         payout = payout1 + payout2
         pnl = payout - cash(p["total_stake"])
-        self._balance += payout
+        if not bookmaker_demo:
+            self._balance += payout
         simulated_timeout = outcome == "TIMEOUT_60S"
         p.update(
-            status="TIMEOUT_60S" if simulated_timeout else "SETTLED",
+            status=(
+                "BOOKMAKER_DEMO_GOAL_OBSERVED" if bookmaker_demo
+                else "TIMEOUT_60S" if simulated_timeout else "SETTLED"
+            ),
             result=outcome, score_after=score,
             team1_result="WIN" if winner1 else "LOSE",
             team2_result="WIN" if winner2 else "LOSE",
             team1_payout=float(payout1), team2_payout=float(payout2),
-            payout=float(payout), profit=float(pnl),
-            settlement_basis="SIMULATED_60S_TIMEOUT" if simulated_timeout else "OBSERVED_MATCH",
+            payout=None if bookmaker_demo else float(payout),
+            profit=None if bookmaker_demo else float(pnl),
+            projected_payout=float(payout) if bookmaker_demo else None,
+            projected_profit=float(pnl) if bookmaker_demo else None,
+            settlement_basis=(
+                "OBSERVED_GOAL_AWAITING_BOOKMAKER_RESULT" if bookmaker_demo
+                else "SIMULATED_60S_TIMEOUT" if simulated_timeout else "OBSERVED_MATCH"
+            ),
             bookmaker_settled=False,
             settled_at=utc_time(),
         )
@@ -1327,15 +1349,18 @@ class VirtualForkObserver:
         self._update(
             phase="SETTLED", position=deepcopy(p),
             balance=float(self._balance),
-            session_profit=float(self._balance - self._initial),
+            session_profit=0.0 if bookmaker_demo else float(self._balance - self._initial),
         )
         await self._log(
+            "BOOKMAKER_DEMO_GOAL_OBSERVED" if bookmaker_demo else
             "VIRTUAL_TIMEOUT_60S" if simulated_timeout else "SETTLED",
             f'{p["match"]}: {outcome} / {score}; '
             f'{p["team1"]}: {p["team1_result"]}, '
             f'{p["team2"]}: {p["team2_result"]}; '
-            f'виртуальный результат {pnl:+.2f} ₽'
-            + (" (тайм-аут стратегии; не расчёт букмекерского купона)" if simulated_timeout else ""),
+            f'расчётный результат {pnl:+.2f} ₽'
+            + (" (учебные купоны БК: выигрыш и выплата пока не подтверждены)"
+               if bookmaker_demo else
+               " (условный тайм-аут; не официальный расчёт БК)" if simulated_timeout else ""),
         )
         self._position = None
         self._position_deadline = None
@@ -1345,11 +1370,25 @@ class VirtualForkObserver:
         if not self._position or self._position.get("status") != "PENDING":
             return
         p = self._position
-        p.update(status="NEEDS_REVIEW", result="UNKNOWN", settled_at=utc_time(),
-                 review_reason=reason)
+        bookmaker_demo = p.get("placement_mode") == "BOOKMAKER_DEMO"
+        p.update(
+            status="BOOKMAKER_DEMO_UNRESOLVED" if bookmaker_demo else "NEEDS_REVIEW",
+            result="UNKNOWN", settled_at=utc_time(),
+            review_reason=reason, bookmaker_settled=False,
+        )
         self.store.upsert(p)
-        self._update(phase="NEEDS_REVIEW", position=deepcopy(p))
-        await self._log("NEEDS_REVIEW", f'{p["match"]}: {reason}. Списанные виртуальные средства зарезервированы.')
+        self._update(
+            phase="BOOKMAKER_DEMO_UNRESOLVED" if bookmaker_demo else "NEEDS_REVIEW",
+            position=deepcopy(p),
+        )
+        await self._log(
+            "BOOKMAKER_DEMO_UNRESOLVED" if bookmaker_demo else "NEEDS_REVIEW",
+            f'{p["match"]}: {reason}. '
+            + ("Новые купоны заблокированы до проверки учебных ставок."
+               if bookmaker_demo else "Виртуальные средства зарезервированы."),
+        )
+        if bookmaker_demo:
+            self._stop_event.set()
         self._position = None
         self._position_deadline = None
         self._allow_live_handoff = True
