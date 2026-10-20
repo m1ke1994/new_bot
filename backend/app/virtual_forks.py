@@ -335,7 +335,6 @@ class VirtualForkObserver:
             "odds_error": None, "odds_status": "WAITING",
             "market_search": "WAITING", "observations": [],
             "position": None, "scanned": 0, "signals": 0,
-            "market_search": "WAITING", "observations": [],
             "warnings": ["Третий исход «голов больше не будет» не покрыт."],
         }
 
@@ -992,6 +991,19 @@ class VirtualForkObserver:
             inv = (1 / odds.team1 + 1 / odds.team2) if odds.team1 > 1 and odds.team2 > 1 else None
             if blocked or inv is None or inv >= 1:
                 self._update(phase="WATCHING_QUOTES")
+                now = asyncio.get_running_loop().time()
+                if now - getattr(self, "_last_no_fork_log_at", -100.0) > 5:
+                    self._last_no_fork_log_at = now
+                    reason = (
+                        "рынок заблокирован" if blocked else
+                        "нет двух корректных коэффициентов" if inv is None else
+                        f"сумма обратных коэффициентов {inv:.4f} >= 1"
+                    )
+                    await self._log(
+                        "FORK_NOT_FOUND",
+                        f"Время LIVE {before.timer}: {reason}. "
+                        "Виртуальная пара не создаётся; продолжаем до 05:35.",
+                    )
                 await self.pause(IN_WINDOW_QUOTE_INTERVAL)
                 continue
 
@@ -1063,7 +1075,6 @@ class VirtualForkObserver:
         deadline = self._position_deadline or (
             asyncio.get_running_loop().time() + FORK_RESULT_TIMEOUT_SECONDS
         )
-        last_verified = None
         while not self._stop_event.is_set():
             try:
                 snap = await self._read_live_scoreboard(page)
@@ -1083,7 +1094,6 @@ class VirtualForkObserver:
             if (snap.team1, snap.team2) != (initial.team1, initial.team2):
                 await self._review("Команды поменялись во время наблюдения")
                 return
-            last_verified = snap
             await self._record_score(str(self._state["match"]["id"]), snap)
             if self._state.get("match") is not None:
                 self._state["match"].update(
