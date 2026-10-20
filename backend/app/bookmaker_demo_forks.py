@@ -15,7 +15,6 @@ from backend.app.demo.models import Scorer
 from backend.app.live.executor import LiveExecutor
 
 RUBLE = Decimal("1")
-DEMO_MARKER = re.compile(r"(?i)\b(demo|демо|учебн\w*|тестов\w*|виртуальн\w*)\b")
 Logger = Callable[[str, str], Awaitable[None]]
 Save = Callable[[dict[str, Any]], Awaitable[None]]
 
