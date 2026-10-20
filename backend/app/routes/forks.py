@@ -1,6 +1,7 @@
-"""Standalone read-only virtual fork endpoints; never sends a bookmaker bet."""
+"""Isolated virtual and verified bookmaker-training-account fork endpoints."""
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
+from typing import Literal
 
 from backend.app.virtual_forks import FORKS
 
@@ -10,6 +11,8 @@ router = APIRouter(prefix="/api/forks", tags=["virtual-forks"])
 class StartPayload(BaseModel):
     budget: float = Field(ge=20, le=1_000_000_000)
     allocation_percent: float = Field(default=10, ge=1, le=100)
+    placement_mode: Literal["VIRTUAL", "BOOKMAKER_DEMO"] = "VIRTUAL"
+    confirm_demo: bool = False
 
 
 @router.get("/state")
@@ -20,7 +23,11 @@ async def state():
 @router.post("/start")
 async def start(payload: StartPayload):
     try:
-        return await FORKS.start(payload.budget, payload.allocation_percent)
+        return await FORKS.start(
+            payload.budget, payload.allocation_percent,
+            placement_mode=payload.placement_mode,
+            confirm_demo=payload.confirm_demo,
+        )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except RuntimeError as error:
