@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from backend.app.virtual_forks import (
     ForkStore, VirtualForkObserver, cash, clock_seconds, finished,
     split_virtual_stakes, select_nearest_unstarted, MatchStartGate,
+    CLOSE_SECOND, FORK_RESULT_TIMEOUT_SECONDS,
 )
 
 
@@ -35,6 +36,8 @@ class VirtualForkCalculationTests(unittest.TestCase):
     def test_window_boundaries(self):
         self.assertEqual(clock_seconds("05:00"), 300)
         self.assertEqual(clock_seconds("05:30"), 330)
+        self.assertEqual(clock_seconds("05:35"), CLOSE_SECOND)
+        self.assertEqual(FORK_RESULT_TIMEOUT_SECONDS, 60)
         self.assertEqual(clock_seconds("05:31"), 331)
         self.assertIsNone(clock_seconds("Второй тайм"))
         self.assertIsNone(clock_seconds("23:89"))
@@ -315,7 +318,7 @@ class VirtualForkLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 scores.side_effect = [
                     snap("05:15", ""), snap("05:00", ""),
                     snap("00:01", "1-й тайм"),
-                    snap("05:31", "2-й тайм"),
+                    snap("05:36", "2-й тайм"),
                 ]
                 await observer._scan_one(FakePage())
                 league.open.assert_not_awaited()
@@ -522,6 +525,92 @@ class VirtualForkLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(items[0]["goal_number"], 2)
             self.assertEqual(items[1]["scorer_team"], "А")
             self.assertEqual(items[2]["event"], "MATCH_JOINED")
+
+    async def test_goal_resolves_two_independent_virtual_legs(self):
+        with TemporaryDirectory() as folder:
+            observer = VirtualForkObserver(ForkStore(Path(folder) / "forks.sqlite3"))
+            observer._session = "wins-and-losses"
+            observer._initial = Decimal("5000")
+            observer._balance = Decimal("4500")
+            observer._position = {
+                **split_virtual_stakes(Decimal("500"), 2.20, 2.20),
+                "id": "p1", "session_id": observer._session,
+                "match_id": "m1", "match": "А — Б",
+                "team1": "А", "team2": "Б",
+                "status": "PENDING",
+                "created_at": "2026-10-20T10:00:00Z",
+                "team1_result": "PENDING", "team2_result": "PENDING",
+            }
+            observer.store.upsert(observer._position)
+            await observer._resolve("TEAM_2", "0:1")
+            item = observer.store.history()[0]
+            self.assertEqual(item["status"], "SETTLED")
+            self.assertEqual(item["team1_result"], "LOSE")
+            self.assertEqual(item["team2_result"], "WIN")
+            self.assertGreater(item["profit"], 0)
+            self.assertTrue(observer._allow_live_handoff)
+            self.assertIsNone(observer._position)
+
+    async def test_one_minute_no_goal_is_simulated_timeout_loss(self):
+        from backend.app.demo.models import Score, ScoreboardSnapshot
+        with TemporaryDirectory() as folder:
+            observer = VirtualForkObserver(ForkStore(Path(folder) / "forks.sqlite3"))
+            observer._session = "timeout"
+            observer._initial = Decimal("5000")
+            observer._balance = Decimal("4500")
+            observer._position = {
+                **split_virtual_stakes(Decimal("500"), 2.20, 2.20),
+                "id": "p2", "session_id": observer._session, "match_id": "m2",
+                "match": "А — Б", "team1": "А", "team2": "Б",
+                "status": "PENDING",
+                "created_at": "2026-10-20T10:00:00Z",
+            }
+            observer._state["match"] = {"id": "m2"}
+            observer._position_deadline = asyncio.get_running_loop().time() - 0.1
+            initial = ScoreboardSnapshot(
+                team1="А", team2="Б", score=Score(0, 0),
+                timer="05:30", period="2-й тайм",
+            )
+            with patch.object(observer, "_read_live_scoreboard", new_callable=AsyncMock) as read, \
+                 patch.object(observer, "_record_score", new_callable=AsyncMock):
+                read.return_value = initial
+                await observer._settle(object(), initial)
+                read.assert_awaited_once()
+            item = observer.store.history()[0]
+            self.assertEqual(item["status"], "TIMEOUT_60S")
+            self.assertEqual(item["result"], "TIMEOUT_60S")
+            self.assertEqual(item["team1_result"], "LOSE")
+            self.assertEqual(item["team2_result"], "LOSE")
+            self.assertEqual(item["settlement_basis"], "SIMULATED_60S_TIMEOUT")
+            self.assertEqual(item["profit"], -500)
+            self.assertEqual(observer._balance, Decimal("4500"))
+            self.assertTrue(observer._allow_live_handoff)
+
+    async def test_timeout_when_score_unavailable_needs_review_not_loss(self):
+        from backend.app.demo.models import Score, ScoreboardSnapshot
+        with TemporaryDirectory() as folder:
+            observer = VirtualForkObserver(ForkStore(Path(folder) / "forks.sqlite3"))
+            observer._session = "unreadable"
+            observer._balance = Decimal("4500")
+            observer._initial = Decimal("5000")
+            observer._position = {
+                **split_virtual_stakes(Decimal("500"), 2.20, 2.20),
+                "id": "p3", "session_id": "unreadable", "match_id": "m3",
+                "match": "А — Б", "status": "PENDING",
+                "created_at": "2026-10-20T10:00:00Z",
+            }
+            observer._position_deadline = asyncio.get_running_loop().time() - 0.1
+            initial = ScoreboardSnapshot(
+                team1="А", team2="Б", score=Score(0, 0),
+                timer="05:30", period="2-й тайм",
+            )
+            with patch.object(observer, "_read_live_scoreboard", new_callable=AsyncMock) as read:
+                read.side_effect = RuntimeError("scoreboard unavailable")
+                await observer._settle(object(), initial)
+            item = observer.store.history()[0]
+            self.assertEqual(item["status"], "NEEDS_REVIEW")
+            self.assertIsNone(item.get("profit"))
+            self.assertEqual(observer._balance, Decimal("4500"))
 
     async def test_unresolved_pair_is_not_falsely_settled(self):
         with TemporaryDirectory() as tmp:
