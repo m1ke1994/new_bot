@@ -39,21 +39,18 @@ class BookmakerDemoSafetyTests(IsolatedAsyncioTestCase):
         badge.get_attribute = AsyncMock(return_value=None)
         return page
 
-    async def test_demo_account_requires_visible_marker(self):
-        page = self.page("Демо-счёт")
-        with patch.dict("os.environ", {"FORK_DEMO_ACCOUNT_SELECTOR": ".account-demo"}):
-            self.assertIn("Демо", await require_bookmaker_demo(page))
+    async def test_rub_balance_uses_existing_authorization(self):
+        page = self.page("RUB")
+        with patch("auth.check_balance", new_callable=AsyncMock) as check:
+            check.return_value = True
+            self.assertEqual(await require_bookmaker_demo(page), "RUB")
+            check.assert_awaited_once_with(page)
 
-    async def test_main_rub_account_cannot_be_used_as_demo(self):
-        page = self.page("Основной (RUB)")
-        with patch.dict("os.environ", {"FORK_DEMO_ACCOUNT_SELECTOR": ".account-demo"}):
-            with self.assertRaisesRegex(RuntimeError, "не подтверждает DEMO"):
-                await require_bookmaker_demo(page)
-
-    async def test_missing_selector_blocks_all_clicks(self):
-        page = self.page("Демо-счёт")
-        with patch.dict("os.environ", {"FORK_DEMO_ACCOUNT_SELECTOR": ""}):
-            with self.assertRaisesRegex(RuntimeError, "FORK_DEMO_ACCOUNT_SELECTOR"):
+    async def test_rub_missing_blocks_all_coupons(self):
+        page = self.page("")
+        with patch("auth.check_balance", new_callable=AsyncMock) as check:
+            check.return_value = False
+            with self.assertRaisesRegex(RuntimeError, "RUB-баланс не найден"):
                 await require_bookmaker_demo(page)
 
     async def test_accepted_pair_is_sequential_lower_odds_first(self):
@@ -85,7 +82,7 @@ class BookmakerDemoSafetyTests(IsolatedAsyncioTestCase):
         )
         worker.executor._read_balance = AsyncMock(return_value=Decimal("1000"))
         worker.executor._success_modal_is_visible = AsyncMock(return_value=False)
-        with patch.dict("os.environ", {"FORK_DEMO_ACCOUNT_SELECTOR": ".account-demo"}), \
+        with patch("auth.check_balance", new_callable=AsyncMock, return_value=True), \
              patch("backend.app.bookmaker_demo_forks.read_next_goal_odds",
                    new_callable=AsyncMock) as scan:
             scan.return_value = odds
@@ -128,7 +125,7 @@ class BookmakerDemoSafetyTests(IsolatedAsyncioTestCase):
         worker.executor.manual_click_seen = AsyncMock(return_value=False)
         worker.executor.clear_unaccepted_coupon = AsyncMock()
         worker.executor._read_balance = AsyncMock(return_value=Decimal("1000"))
-        with patch.dict("os.environ", {"FORK_DEMO_ACCOUNT_SELECTOR": ".account-demo"}):
+        with patch("auth.check_balance", new_callable=AsyncMock, return_value=True):
             result = await worker.place(
                 page, position, odds, asyncio.Event(), AsyncMock(),
                 AsyncMock(return_value=snap), lambda snapshot: True,
