@@ -802,6 +802,7 @@ class VirtualForkObserver:
                 await self.pause(0.45)
                 continue
             seconds = clock_seconds(before.timer)
+            await self._record_score(match_id, before)
             context = (before.team1, before.team2,
                        before.score.team1, before.score.team2)
             if context != last_score_context:
@@ -838,7 +839,14 @@ class VirtualForkObserver:
             if self._state.get("match") is not None:
                 self._state["match"]["state"] = "LIVE"
             if seconds is None:
+                # The current Next Goal search can still be prepared and
+                # displayed without a readable elapsed match clock.
+                # Allocation remains forbidden without a verified 05:00–05:30.
                 self._update(phase="WAITING_TIMER", odds_status="WAITING_TIMER")
+                now = asyncio.get_running_loop().time()
+                if now >= next_pre_window_quote:
+                    next_pre_window_quote = now + PRE_WINDOW_QUOTE_INTERVAL
+                    await self._observe_odds(page, before, entry_window=False)
                 await self.pause(0.4)
                 continue
             if seconds > CLOSE_SECOND:
@@ -880,6 +888,7 @@ class VirtualForkObserver:
 
             # Recheck the actual score and elapsed time after reading the quote.
             after = await self._read_live_scoreboard(page)
+            await self._record_score(match_id, after)
             after_second = clock_seconds(after.timer)
             if (after.team1, after.team2) != (before.team1, before.team2):
                 await self._log("STALE_TEAMS", "Состав команд изменился во время чтения")
@@ -933,13 +942,19 @@ class VirtualForkObserver:
         start = asyncio.get_running_loop().time()
         while not self._stop_event.is_set() and asyncio.get_running_loop().time() - start < 120:
             try:
-                snap = await read_scoreboard(page)
+                snap = await self._read_live_scoreboard(page)
             except Exception:
                 await self.pause(0.4)
                 continue
             if (snap.team1, snap.team2) != (initial.team1, initial.team2):
                 await self._review("Команды поменялись во время наблюдения")
                 return
+            await self._record_score(str(self._state["match"]["id"]), snap)
+            if self._state.get("match") is not None:
+                self._state["match"].update(
+                    timer=snap.timer, period=snap.period,
+                    score=snap.score.text(),
+                )
             delta1 = snap.score.team1 - initial.score.team1
             delta2 = snap.score.team2 - initial.score.team2
             if delta1 < 0 or delta2 < 0 or delta1 + delta2 > 1:
