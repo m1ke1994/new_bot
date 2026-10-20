@@ -378,10 +378,6 @@ class VirtualForkObserver:
     def snapshot(self) -> dict[str, Any]:
         state = deepcopy(self._state)
         state["running"] = self.running
-        import os
-        state["demo_account_selector_configured"] = bool(
-            os.environ.get("FORK_DEMO_ACCOUNT_SELECTOR", "").strip()
-        )
         completed = self.store.count_resolved_pairs()
         state["completed_pairs"] = completed
         state["records_total"] = self.store.count_pairs()
@@ -412,12 +408,6 @@ class VirtualForkObserver:
         if placement_mode == "BOOKMAKER_DEMO":
             if not confirm_demo:
                 raise ValueError("Подтвердите, что используете учебный счёт букмекера")
-            import os
-            if not os.environ.get("FORK_DEMO_ACCOUNT_SELECTOR", "").strip():
-                raise ValueError(
-                    "Для БК DEMO требуется FORK_DEMO_ACCOUNT_SELECTOR: "
-                    "селектор видимой метки учебного счёта на сайте"
-                )
         completed_before_start = self.store.count_resolved_pairs()
         if placement_mode == "VIRTUAL" and completed_before_start >= TARGET_VIRTUAL_PAIRS:
             raise ValueError(
