@@ -31,7 +31,8 @@ from backend.app.demo.models import ScoreboardSnapshot
 
 CENT = Decimal("0.01")
 OPEN_SECOND = 300
-CLOSE_SECOND = 330
+CLOSE_SECOND = 335
+FORK_RESULT_TIMEOUT_SECONDS = 60
 MATCH_DURATION = 360
 END_GRACE_SECONDS = 35
 FINISHED_WORDS = ("заверш", "окончен", "finished", "full time", "game over")
@@ -320,6 +321,7 @@ class VirtualForkObserver:
         self._initial = Decimal(0)
         self._allocation_pct = Decimal("10")
         self._position: dict[str, Any] | None = None
+        self._position_deadline: float | None = None
         self._completed_match_ids: set[str] = set()
         self._allow_live_handoff = False
         self._last_market_event: dict[str, float] = {}
@@ -327,7 +329,7 @@ class VirtualForkObserver:
         self._observed_match_id: str | None = None
         self._state: dict[str, Any] = {
             "running": False, "phase": "STOPPED",
-            "message": "Наблюдатель остановлен", "window": "05:00–05:30",
+            "message": "Наблюдатель остановлен", "window": "05:00–05:35",
             "initial_budget": 0, "balance": 0, "allocated_percent": 10,
             "session_profit": 0, "match": None, "quote": None,
             "odds_error": None, "odds_status": "WAITING",
@@ -344,6 +346,11 @@ class VirtualForkObserver:
     def snapshot(self) -> dict[str, Any]:
         state = deepcopy(self._state)
         state["running"] = self.running
+        if self._position is not None and self._position_deadline is not None:
+            remaining = max(0, int(self._position_deadline - asyncio.get_running_loop().time() + 0.999))
+            state["result_timeout_remaining"] = remaining
+        else:
+            state["result_timeout_remaining"] = None
         return state
 
     def _update(self, **changes: Any) -> None:
@@ -374,6 +381,7 @@ class VirtualForkObserver:
         self._balance = self._initial
         self._allocation_pct = share
         self._position = None
+        self._position_deadline = None
         self._completed_match_ids = set()
         self._allow_live_handoff = False
         self._last_market_event = {}
@@ -390,7 +398,7 @@ class VirtualForkObserver:
         })
         self._task = asyncio.create_task(self._run(), name="fc25-virtual-forks")
         self._update(running=True)
-        await self._log("START", "Запущен виртуальный мониторинг 05:00–05:30, без реальных ставок")
+        await self._log("START", "Запущен виртуальный мониторинг 05:00–05:35, без реальных ставок")
         return self.snapshot()
 
     async def stop(self) -> dict[str, Any]:
@@ -835,7 +843,7 @@ class VirtualForkObserver:
             self._update(phase="NO_UPCOMING_MATCHES")
             await self._log(
                 "NO_ELIGIBLE_MATCH",
-                "Нет другого подходящего будущего матча или LIVE до 05:30; "
+                "Нет другого подходящего будущего матча или LIVE до 05:35; "
                 "повторим поиск",
             )
             return
@@ -954,7 +962,7 @@ class VirtualForkObserver:
                 self._completed_match_ids.add(match_id)
                 await self._log(
                     "WINDOW_CLOSED",
-                    f'Время LIVE {before.timer} — позже 05:30; '
+                    f'Время LIVE {before.timer} — позже 05:35; '
                     "виртуальных ставок больше нет, выбираем следующий будущий матч",
                 )
                 return
@@ -973,7 +981,7 @@ class VirtualForkObserver:
                 await self.pause(0.4)
                 continue
 
-            # Only the 05:00–05:30 segment may allocate virtual funds.
+            # Only the 05:00–05:35 segment may allocate virtual funds.
             self._update(phase="READING_ODDS")
             odds = await self._observe_odds(page, before, entry_window=True)
             if odds is None:
@@ -1018,12 +1026,18 @@ class VirtualForkObserver:
                 "result": None, "profit": None, "payout": None,
                 "conditional_only": True,
                 "third_outcome_covered": False,
+                "timeout_seconds": FORK_RESULT_TIMEOUT_SECONDS,
+                "settlement_basis": None,
+                "team1_result": "PENDING", "team2_result": "PENDING",
+                "team1_payout": None, "team2_payout": None,
             }
             self._balance -= cash(proposal["total_stake"])
             self._position = position
+            self._position_deadline = asyncio.get_running_loop().time() + FORK_RESULT_TIMEOUT_SECONDS
             self.store.upsert(position)
             self._update(
                 phase="WAITING_RESULT", position=position, balance=float(self._balance),
+                result_timeout_seconds=FORK_RESULT_TIMEOUT_SECONDS,
                 signals=int(self._state["signals"]) + 1,
             )
             await self._log(
@@ -1039,17 +1053,37 @@ class VirtualForkObserver:
         await self._log("MATCH_TIMEOUT", "Истёк лимит ожидания начала/окна. Переходим к следующему матчу")
 
     async def _settle(self, page: Any, initial: Any) -> None:
-        """Score delta is definitive only when exactly ONE goal was observed."""
-        start = asyncio.get_running_loop().time()
-        while not self._stop_event.is_set() and asyncio.get_running_loop().time() - start < 120:
+        """Observe the next goal for at most 60 real seconds after placement.
+
+        A 60-second timeout is a *simulated strategy* loss, not a bookmaker
+        settlement; a bookmaker's next-goal wager can stay open until a later
+        goal or the match finishes. If the score cannot be verified at the
+        deadline, mark NEEDS_REVIEW instead of inventing a loss.
+        """
+        deadline = self._position_deadline or (
+            asyncio.get_running_loop().time() + FORK_RESULT_TIMEOUT_SECONDS
+        )
+        last_verified = None
+        while not self._stop_event.is_set():
             try:
                 snap = await self._read_live_scoreboard(page)
-            except Exception:
-                await self.pause(0.4)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if self._is_closed_page_error(error, page):
+                    raise
+                if asyncio.get_running_loop().time() >= deadline:
+                    await self._review(
+                        f"По истечении 60 секунд счёт нельзя проверить: "
+                        f"{type(error).__name__}: {error}"
+                    )
+                    return
+                await self.pause(0.35)
                 continue
             if (snap.team1, snap.team2) != (initial.team1, initial.team2):
                 await self._review("Команды поменялись во время наблюдения")
                 return
+            last_verified = snap
             await self._record_score(str(self._state["match"]["id"]), snap)
             if self._state.get("match") is not None:
                 self._state["match"].update(
@@ -1059,7 +1093,7 @@ class VirtualForkObserver:
             delta1 = snap.score.team1 - initial.score.team1
             delta2 = snap.score.team2 - initial.score.team2
             if delta1 < 0 or delta2 < 0 or delta1 + delta2 > 1:
-                await self._review("Невозможно достоверно определить первый гол по изменению счёта")
+                await self._review("Нельзя достоверно определить первый гол по изменению счёта")
                 return
             if delta1 + delta2 == 1:
                 await self._resolve("TEAM_1" if delta1 == 1 else "TEAM_2", snap.score.text())
@@ -1067,24 +1101,40 @@ class VirtualForkObserver:
             if finished(snap.period):
                 await self._resolve("NO_GOAL", snap.score.text())
                 return
-            # A bare timer 06:00 does NOT prove the match is over.
-            elapsed = clock_seconds(snap.timer)
-            if elapsed is not None and elapsed >= MATCH_DURATION + END_GRACE_SECONDS:
-                await self._review("Конец матча не подтверждён статусом; исход «нет гола» неизвестен")
+            if asyncio.get_running_loop().time() >= deadline:
+                # Both sides lose in the one-minute synthetic strategy.
+                # Explicitly preserve that this is NOT market settlement.
+                await self._resolve("TIMEOUT_60S", snap.score.text())
                 return
-            await self.pause(0.4)
-        if self._position and self._position["status"] == "PENDING":
-            await self._review("Не получен достоверный финальный исход за время ожидания")
+            await self.pause(0.35)
+        if self._position is not None and self._position["status"] == "PENDING":
+            await self._review("Наблюдение остановлено до получения результата")
 
     async def _resolve(self, outcome: str, score: str) -> None:
         if not self._position or self._position.get("status") != "PENDING":
             return
         p = self._position
-        payout = cash(p["payout1"] if outcome == "TEAM_1" else p["payout2"] if outcome == "TEAM_2" else 0)
+        if outcome not in ("TEAM_1", "TEAM_2", "NO_GOAL", "TIMEOUT_60S"):
+            raise ValueError(f"Неизвестный исход виртуальной пары: {outcome}")
+        winner1 = outcome == "TEAM_1"
+        winner2 = outcome == "TEAM_2"
+        payout1 = cash(p["payout1"] if winner1 else 0)
+        payout2 = cash(p["payout2"] if winner2 else 0)
+        payout = payout1 + payout2
         pnl = payout - cash(p["total_stake"])
         self._balance += payout
-        p.update(status="SETTLED", result=outcome, score_after=score,
-                 payout=float(payout), profit=float(pnl), settled_at=utc_time())
+        simulated_timeout = outcome == "TIMEOUT_60S"
+        p.update(
+            status="TIMEOUT_60S" if simulated_timeout else "SETTLED",
+            result=outcome, score_after=score,
+            team1_result="WIN" if winner1 else "LOSE",
+            team2_result="WIN" if winner2 else "LOSE",
+            team1_payout=float(payout1), team2_payout=float(payout2),
+            payout=float(payout), profit=float(pnl),
+            settlement_basis="SIMULATED_60S_TIMEOUT" if simulated_timeout else "OBSERVED_MATCH",
+            bookmaker_settled=False,
+            settled_at=utc_time(),
+        )
         self.store.upsert(p)
         self._update(
             phase="SETTLED", position=deepcopy(p),
@@ -1092,10 +1142,15 @@ class VirtualForkObserver:
             session_profit=float(self._balance - self._initial),
         )
         await self._log(
-            "SETTLED",
-            f'{p["match"]}: {outcome} / {score}; результат {pnl:+.2f} ₽',
+            "VIRTUAL_TIMEOUT_60S" if simulated_timeout else "SETTLED",
+            f'{p["match"]}: {outcome} / {score}; '
+            f'{p["team1"]}: {p["team1_result"]}, '
+            f'{p["team2"]}: {p["team2_result"]}; '
+            f'виртуальный результат {pnl:+.2f} ₽'
+            + (" (тайм-аут стратегии; не расчёт букмекерского купона)" if simulated_timeout else ""),
         )
         self._position = None
+        self._position_deadline = None
         self._allow_live_handoff = True
 
     async def _review(self, reason: str) -> None:
@@ -1108,6 +1163,7 @@ class VirtualForkObserver:
         self._update(phase="NEEDS_REVIEW", position=deepcopy(p))
         await self._log("NEEDS_REVIEW", f'{p["match"]}: {reason}. Списанные виртуальные средства зарезервированы.')
         self._position = None
+        self._position_deadline = None
 
 
 FORKS = VirtualForkObserver()
