@@ -40,3 +40,8 @@ async def history(limit: int = Query(200, ge=1, le=5000)):
 @router.get("/logs")
 async def logs(limit: int = Query(200, ge=1, le=1000)):
     return {"items": FORKS.store.logs(limit)}
+
+
+@router.get("/observations")
+async def observations(limit: int = Query(300, ge=1, le=2000)):
+    return {"items": FORKS.store.observations(limit)}
