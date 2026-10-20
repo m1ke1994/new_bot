@@ -735,7 +735,7 @@ class VirtualForkObserver:
         matches = await league.scan()
         stats = dict(league.last_scan_stats)
         self._update(scanner=stats)
-        if not matches:
+        if not matches and not (self._allow_live_handoff and league.skipped_started):
             sample = (league.skipped_unclassified or [])[:2]
             reasons = ", ".join(
                 f"{item.get('team1', '?')} — {item.get('team2', '?')}: "
