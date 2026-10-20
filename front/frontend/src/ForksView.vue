@@ -5,6 +5,7 @@ const budget = ref(5000)
 const fraction = ref(10)
 const state = ref({ running:false, phase:'STOPPED', message:'Остановлен', balance:0, initial_budget:0, session_profit:0, allocated_percent:10, match:null, quote:null, position:null, scanned:0, signals:0 })
 const history = ref([])
+const observations = ref([])
 const logs = ref([])
 const error = ref('')
 const busy = ref(false)
@@ -23,9 +24,14 @@ async function refresh() {
   try {
     state.value = await api('/api/forks/state')
     if (ticks++ % 3 === 0) {
-      const [h, l] = await Promise.all([api('/api/forks/history?limit=300'), api('/api/forks/logs?limit=200')])
+      const [h, l, o] = await Promise.all([
+        api('/api/forks/history?limit=300'),
+        api('/api/forks/logs?limit=200'),
+        api('/api/forks/observations?limit=300'),
+      ])
       history.value = h.items || []
       logs.value = l.items || []
+      observations.value = o.items || []
     }
     error.value = ''
   } catch (err) { error.value = String(err.message || err) }
@@ -70,6 +76,7 @@ const stage = computed(() => ({
   RECOVERING_BROWSER:'Восстановление Chromium', WAITING_AUTH:'Ожидание входа',
   WAITING_CARDS:'Ожидание карточек матчей', NO_MATCH_CARDS:'Карточки отсутствуют',
   NO_UPCOMING_MATCHES:'Ожидание ближайшего матча', ERROR:'Ошибка сканирования',
+  LIVE_HANDOFF:'Переход к уже идущему матчу',
 })[state.value.phase] || state.value.phase)
 function rub(v) {
   if (v === null || v === undefined || !Number.isFinite(Number(v))) return '—'
@@ -141,16 +148,37 @@ onBeforeUnmount(() => { clearInterval(poller) })
         <p class="fork-muted">Пара записывается только при одновременных незаблокированных исходах, неизменном счёте, точном времени и положительной расчётной прибыли после округления.</p>
       </article>
     </section>
+    <section class="fork-card fork-observations">
+      <div class="fork-label">04 / НАБЛЮДЕНИЕ: ГОЛЫ И ХРОНОЛОГИЯ <span>{{ observations.length }} событий</span></div>
+      <p class="fork-muted">События фиксируются по изменениям scoreboard. Голы до входа в уже начавшийся матч не приписываются командам.</p>
+      <div class="fork-table-scroll">
+        <table>
+          <thead><tr><th>Фиксация</th><th>Матч</th><th>Игровое время</th><th>Событие</th><th>Гол №</th><th>Кто забил</th><th>Счёт</th></tr></thead>
+          <tbody>
+            <tr v-for="(item, i) in observations" :key="i">
+              <td>{{ date(item.timestamp) }}</td>
+              <td>{{ item.match }}</td>
+              <td>{{ item.period || '—' }} / {{ item.timer || '—' }}</td>
+              <td>{{ item.event === 'GOAL' ? 'ГОЛ' : item.event === 'MATCH_JOINED' ? 'Вход в матч' : 'Изменение счёта' }}</td>
+              <td>{{ item.goal_number || '—' }}</td>
+              <td :class="{green:item.event === 'GOAL'}">{{ item.scorer_team || 'Не определена' }}</td>
+              <td>{{ item.score_before || '—' }} → {{ item.score_after || '—' }}</td>
+            </tr>
+            <tr v-if="!observations.length"><td colspan="7">Ожидаем первый матч.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
     <section class="fork-bottom">
       <article class="fork-card">
-        <div class="fork-label">04 / ИСТОРИЯ <span>{{ history.length }} записей</span></div>
+        <div class="fork-label">05 / ИСТОРИЯ ВИРТУАЛЬНЫХ ПАР <span>{{ history.length }} записей</span></div>
         <div class="fork-table-scroll"><table><thead><tr><th>Время</th><th>Матч</th><th>Следующий гол</th><th>Сторона 1</th><th>Сторона 2</th><th>Результат</th><th>P/L</th></tr></thead><tbody>
           <tr v-for="item in history" :key="item.id"><td>{{ date(item.created_at) }}</td><td><b>{{ item.match }}</b><small>{{ item.score_before }} → {{ item.score_after || '—' }}</small></td><td>№{{ item.goal_number }} / {{ item.timer }}</td><td>{{ rub(item.stake1) }}<small>@ {{ odd(item.odd1) }}</small></td><td>{{ rub(item.stake2) }}<small>@ {{ odd(item.odd2) }}</small></td><td>{{ item.result || item.status }}</td><td :class="item.profit===null?'':Number(item.profit)>=0?'green':'red'">{{ rub(item.profit) }}</td></tr>
           <tr v-if="!history.length"><td colspan="7">Сигналов пока нет</td></tr>
         </tbody></table></div>
       </article>
       <article class="fork-card">
-        <div class="fork-label">05 / ЖИВЫЕ ЛОГИ <span>200</span></div>
+        <div class="fork-label">06 / ЖИВЫЕ ЛОГИ <span>200</span></div>
         <div class="fork-log-scroll"><div v-for="(line,index) in [...logs].reverse()" :key="index" class="fork-log"><time>{{ date(line.timestamp) }}</time><b>{{ line.event }}</b><span>{{ line.message }}</span></div><p v-if="!logs.length" class="fork-muted">Запустите наблюдение, чтобы видеть события.</p></div>
       </article>
     </section>
@@ -201,7 +229,7 @@ onBeforeUnmount(() => { clearInterval(poller) })
 .fork-line{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid #29394c;padding:14px 0;font-size:11px}
 .fork-line span{color:#adbed3}.fork-line b{white-space:nowrap}
 .green{color:#55dda9!important}.red{color:#ff8493!important}
-.fork-bottom{display:grid;grid-template-columns:1.7fr 1fr;gap:16px}
+.fork-observations{margin-bottom:16px}.fork-bottom{display:grid;grid-template-columns:1.7fr 1fr;gap:16px}
 .fork-table-scroll{max-height:460px;overflow:auto}
 table{border-collapse:collapse;width:100%;min-width:810px;text-align:left;font-size:11px}
 td,th{padding:12px 9px;border-bottom:1px solid #29394c;white-space:nowrap}

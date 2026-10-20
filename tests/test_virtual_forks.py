@@ -92,6 +92,17 @@ class ForkPrematchSelectionTests(unittest.TestCase):
                  score="0:0", period="1-й тайм"),
         ]))
 
+    def test_live_handoff_prefers_active_match_before_window_end(self):
+        from backend.app.virtual_forks import select_live_handoff_match
+        cards = [
+            dict(match_id="done", time_seconds=360, period="2-й тайм", finished=False, is_upcoming=False),
+            dict(match_id="eligible", time_seconds=285, period="2-й тайм", finished=False, is_upcoming=False),
+            dict(match_id="near_window", time_seconds=310, period="2-й тайм", finished=False, is_upcoming=False),
+            dict(match_id="future", time_seconds=100, period="", finished=False, is_upcoming=True),
+        ]
+        self.assertEqual(select_live_handoff_match(cards)["match_id"], "near_window")
+        self.assertIsNone(select_live_handoff_match(cards, {"eligible", "near_window"}))
+
     @staticmethod
     def snap(timer, period="", goals1=0, goals2=0):
         score = SimpleNamespace(team1=goals1, team2=goals2)
@@ -451,6 +462,27 @@ class VirtualForkLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     line["event"] == "MATCH_STARTED_BEFORE_ENTRY"
                     for line in observer.store.logs()
                 ))
+
+    async def test_goal_observation_is_deduplicated_and_persisted(self):
+        from backend.app.demo.models import ScoreboardSnapshot, Score
+        with TemporaryDirectory() as temp:
+            observer = VirtualForkObserver(ForkStore(Path(temp) / "observed.sqlite3"))
+            observer._session = "test-goals"
+            def snap(a,b,time):
+                return ScoreboardSnapshot(
+                    team1="А", team2="Б", score=Score(a,b),
+                    timer=time, period="1-й тайм",
+                )
+            await observer._record_score("m2", snap(0,0,"00:03"))
+            await observer._record_score("m2", snap(1,0,"00:31"))
+            await observer._record_score("m2", snap(1,0,"00:32"))
+            await observer._record_score("m2", snap(1,1,"01:05"))
+            items = observer.store.observations()
+            self.assertEqual(len(items), 3)
+            self.assertEqual(items[0]["scorer_team"], "Б")
+            self.assertEqual(items[0]["goal_number"], 2)
+            self.assertEqual(items[1]["scorer_team"], "А")
+            self.assertEqual(items[2]["event"], "MATCH_JOINED")
 
     async def test_unresolved_pair_is_not_falsely_settled(self):
         with TemporaryDirectory() as tmp:
