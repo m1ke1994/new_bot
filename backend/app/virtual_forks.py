@@ -33,6 +33,7 @@ CENT = Decimal("0.01")
 OPEN_SECOND = 300
 CLOSE_SECOND = 335
 FORK_RESULT_TIMEOUT_SECONDS = 60
+TARGET_VIRTUAL_PAIRS = 200
 MATCH_DURATION = 360
 END_GRACE_SECONDS = 35
 FINISHED_WORDS = ("заверш", "окончен", "finished", "full time", "game over")
@@ -301,6 +302,19 @@ class ForkStore:
             ).fetchall()
         return [json.loads(item[0]) for item in rows]
 
+    def count_pairs(self) -> int:
+        """All stored virtual pairs, irrespective of their result or session."""
+        with self._connect() as db:
+            return int(db.execute("SELECT COUNT(*) FROM virtual_forks").fetchone()[0])
+
+    def count_resolved_pairs(self) -> int:
+        """A pending or review-only pair does not count as completed."""
+        with self._connect() as db:
+            return int(db.execute(
+                "SELECT COUNT(*) FROM virtual_forks "
+                "WHERE status IN ('SETTLED', 'TIMEOUT_60S')"
+            ).fetchone()[0])
+
     def logs(self, limit: int = 300) -> list[dict[str, Any]]:
         with self._connect() as db:
             rows = db.execute(
@@ -335,6 +349,9 @@ class VirtualForkObserver:
             "odds_error": None, "odds_status": "WAITING",
             "market_search": "WAITING", "observations": [],
             "position": None, "scanned": 0, "signals": 0,
+            "target_pairs": TARGET_VIRTUAL_PAIRS,
+            "completed_pairs": 0, "remaining_pairs": TARGET_VIRTUAL_PAIRS,
+            "records_total": 0,
             "warnings": ["Третий исход «голов больше не будет» не покрыт."],
         }
 
@@ -345,6 +362,11 @@ class VirtualForkObserver:
     def snapshot(self) -> dict[str, Any]:
         state = deepcopy(self._state)
         state["running"] = self.running
+        completed = self.store.count_resolved_pairs()
+        state["completed_pairs"] = completed
+        state["records_total"] = self.store.count_pairs()
+        state["remaining_pairs"] = max(0, TARGET_VIRTUAL_PAIRS - completed)
+        state["target_pairs"] = TARGET_VIRTUAL_PAIRS
         if self._position is not None and self._position_deadline is not None:
             remaining = max(0, int(self._position_deadline - asyncio.get_running_loop().time() + 0.999))
             state["result_timeout_remaining"] = remaining
@@ -362,6 +384,12 @@ class VirtualForkObserver:
     async def start(self, budget: Any, percent: Any = 10) -> dict[str, Any]:
         if self.running:
             raise ValueError("Виртуальный наблюдатель уже запущен")
+        completed_before_start = self.store.count_resolved_pairs()
+        if completed_before_start >= TARGET_VIRTUAL_PAIRS:
+            raise ValueError(
+                f"Цель {TARGET_VIRTUAL_PAIRS} завершённых виртуальных пар "
+                "уже достигнута; история сохранена"
+            )
         # Do not run two strategies in the same persistent browser at once.
         # DemoEngine.task is an @property, not a callable.
         engine_task = ENGINE.task
@@ -394,10 +422,19 @@ class VirtualForkObserver:
             "session_profit": 0, "match": None, "quote": None,
             "odds_error": None, "odds_status": "WAITING",
             "position": None, "scanned": 0, "signals": 0,
+            "completed_pairs": completed_before_start,
+            "remaining_pairs": TARGET_VIRTUAL_PAIRS - completed_before_start,
+            "target_pairs": TARGET_VIRTUAL_PAIRS,
+            "records_total": self.store.count_pairs(),
         })
         self._task = asyncio.create_task(self._run(), name="fc25-virtual-forks")
         self._update(running=True)
-        await self._log("START", "Запущен виртуальный мониторинг 05:00–05:35, без реальных ставок")
+        await self._log(
+            "START",
+            f"Запущен виртуальный мониторинг 05:00–05:35; "
+            f"выполнено {completed_before_start}/{TARGET_VIRTUAL_PAIRS} "
+            "завершённых виртуальных пар. История предыдущих запусков сохранена.",
+        )
         return self.snapshot()
 
     async def stop(self) -> dict[str, Any]:
@@ -456,6 +493,15 @@ class VirtualForkObserver:
         authorized_generation = None
         try:
             while not self._stop_event.is_set():
+                if self.store.count_resolved_pairs() >= TARGET_VIRTUAL_PAIRS:
+                    self._update(phase="TARGET_REACHED", match=None, quote=None)
+                    await self._log(
+                        "TARGET_REACHED",
+                        f"Набрано {TARGET_VIRTUAL_PAIRS} завершённых виртуальных пар. "
+                        "Мониторинг останавливается, история остаётся в SQLite.",
+                    )
+                    self._stop_event.set()
+                    break
                 page = None
                 try:
                     # A newly launched persistent Chromium starts on about:blank.
@@ -584,7 +630,12 @@ class VirtualForkObserver:
         finally:
             if self._position and self._position.get("status") == "PENDING":
                 await self._review("Наблюдение прервано до подтверждения результата")
-            self._update(running=False, phase="STOPPED")
+            self._update(
+                running=False,
+                phase="TARGET_REACHED"
+                if self._state.get("phase") == "TARGET_REACHED"
+                else "STOPPED",
+            )
 
     async def _read_live_scoreboard(self, page: Any) -> ScoreboardSnapshot:
         """Read scoreboard, then recover a missing LIVE timer from trusted DOM.
@@ -842,11 +893,16 @@ class VirtualForkObserver:
         )
         if match is None:
             self._update(phase="NO_UPCOMING_MATCHES")
-            await self._log(
-                "NO_ELIGIBLE_MATCH",
-                "Нет другого подходящего будущего матча или LIVE до 05:35; "
-                "повторим поиск",
-            )
+            now = asyncio.get_running_loop().time()
+            if now - getattr(self, "_last_no_eligible_at", -100.0) >= 20:
+                self._last_no_eligible_at = now
+                count = self.store.count_resolved_pairs()
+                await self._log(
+                    "NO_ELIGIBLE_MATCH",
+                    f"Выполнено {count}/{TARGET_VIRTUAL_PAIRS} пар. "
+                    "Нет другого подходящего будущего матча или LIVE до 05:35; "
+                    "продолжаем искать, мониторинг не завершён.",
+                )
             return
         match_id = str(match.get("match_id") or match.get("href"))
         # Revalidate the exact card before clicking it.
@@ -1176,6 +1232,7 @@ class VirtualForkObserver:
         await self._log("NEEDS_REVIEW", f'{p["match"]}: {reason}. Списанные виртуальные средства зарезервированы.')
         self._position = None
         self._position_deadline = None
+        self._allow_live_handoff = True
 
 
 FORKS = VirtualForkObserver()
