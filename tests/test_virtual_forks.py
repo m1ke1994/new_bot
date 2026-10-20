@@ -127,7 +127,79 @@ class ForkPrematchSelectionTests(unittest.TestCase):
         self.assertTrue(MatchStartGate().observe(self.snap("00:15", "", goals1=1)))
 
 
+class VirtualForkGoalTests(unittest.TestCase):
+    def test_200_pair_target_keeps_prior_sessions_and_counts_only_resolved(self):
+        with TemporaryDirectory() as folder:
+            store = ForkStore(Path(folder) / "pairs.sqlite3")
+            # Simulate previous days' successful virtual signals.
+            for i in range(5):
+                store.upsert({
+                    "id": f"old-{i}", "session_id": "yesterday",
+                    "match_id": f"m-{i}", "created_at": f"2026-10-19T12:00:0{i}Z",
+                    "status": "SETTLED",
+                })
+            store.upsert({
+                "id": "pending", "session_id": "today",
+                "match_id": "m-p", "created_at": "2026-10-20T12:00:00Z",
+                "status": "PENDING",
+            })
+            store.upsert({
+                "id": "review", "session_id": "today",
+                "match_id": "m-r", "created_at": "2026-10-20T12:00:01Z",
+                "status": "NEEDS_REVIEW",
+            })
+            observer = VirtualForkObserver(store)
+            first = observer.snapshot()
+            self.assertEqual(first["target_pairs"], 200)
+            self.assertEqual(first["completed_pairs"], 5)
+            self.assertEqual(first["records_total"], 7)
+            self.assertEqual(first["remaining_pairs"], 195)
+            # Re-opening the same database keeps everything.
+            self.assertEqual(ForkStore(store.db_path).count_resolved_pairs(), 5)
+            store.upsert({
+                "id": "pending", "session_id": "today",
+                "match_id": "m-p", "created_at": "2026-10-20T12:00:00Z",
+                "status": "TIMEOUT_60S",
+            })
+            self.assertEqual(store.count_resolved_pairs(), 6)
+            self.assertEqual(store.count_pairs(), 7)
+
+    def test_history_can_return_200_real_rows_without_duplicates(self):
+        with TemporaryDirectory() as folder:
+            store = ForkStore(Path(folder) / "history.sqlite3")
+            for i in range(203):
+                store.upsert({
+                    "id": str(i), "session_id": "test", "match_id": f"match-{i}",
+                    "created_at": f"2026-10-20T12:{i // 60:02}:{i % 60:02}Z",
+                    "status": "SETTLED",
+                })
+            rows = store.history(200)
+            self.assertEqual(len(rows), 200)
+            self.assertEqual(len({row["id"] for row in rows}), 200)
+            self.assertEqual(store.count_resolved_pairs(), 203)
+
+
 class VirtualForkLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_worker_stops_only_after_target_has_been_reached(self):
+        with TemporaryDirectory() as folder:
+            store = ForkStore(Path(folder) / "target.sqlite3")
+            store.upsert({
+                "id": "done", "session_id": "prior", "match_id": "m1",
+                "created_at": "2026-10-20T12:00:00Z", "status": "SETTLED",
+            })
+            observer = VirtualForkObserver(store)
+            observer._session = "check-target"
+            with patch("backend.app.virtual_forks.TARGET_VIRTUAL_PAIRS", 1), \
+                 patch("backend.app.virtual_forks.BROWSER_MANAGER") as manager:
+                await observer._run()
+                manager.prepare_session_page.assert_not_called()
+                self.assertEqual(observer.snapshot()["phase"], "TARGET_REACHED")
+                self.assertTrue(observer._stop_event.is_set())
+                self.assertEqual(observer.snapshot()["remaining_pairs"], 0)
+            self.assertTrue(any(
+                item["event"] == "TARGET_REACHED" for item in store.logs()
+            ))
+
     async def test_start_stop_is_virtual_only(self):
         with TemporaryDirectory() as tmp:
             observer = VirtualForkObserver(ForkStore(Path(tmp) / "forks.sqlite3"))
