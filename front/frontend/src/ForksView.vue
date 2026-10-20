@@ -62,13 +62,24 @@ const targetProgress = computed(() =>
 const preview = computed(() => {
   const a = Number(quote.value.odd1), b = Number(quote.value.odd2)
   if (!(a > 1 && b > 1)) return null
-  const total = Math.floor(Number(state.value.balance) * Number(state.value.allocated_percent) ) / 100
+  const total = Math.floor(Number(state.value.balance) * Number(state.value.allocated_percent) / 100)
   const k = 1/a + 1/b
-  const stake1 = Math.floor(total * (1/a) / k * 100) / 100
-  const stake2 = Math.round((total-stake1)*100)/100
-  const profit1 = Math.floor(stake1*a*100)/100-total
-  const profit2 = Math.floor(stake2*b*100)/100-total
-  return { total, stake1, stake2, best:Math.min(profit1,profit2) }
+  if (total < 20 || k >= 1) return null
+  const ideal = Math.floor(total * (1/a) / k + 0.5)
+  let best = null
+  for (const offset of [-2, -1, 0, 1, 2]) {
+    const stake1 = ideal + offset
+    const stake2 = total - stake1
+    if (stake1 < 10 || stake2 < 10) continue
+    const payout1 = Math.floor(stake1 * a * 100) / 100
+    const payout2 = Math.floor(stake2 * b * 100) / 100
+    const profitMin = Math.min(payout1, payout2) - total
+    if (profitMin <= 0) continue
+    if (!best || profitMin > best.best) {
+      best = { total, stake1, stake2, best: profitMin }
+    }
+  }
+  return best
 })
 const stage = computed(() => ({
   STOPPED:'Остановлен', AUTH_CHECK:'Проверка авторизации',
@@ -156,7 +167,7 @@ onBeforeUnmount(() => { clearInterval(poller) })
           <div v-if="position.profit !== null && position.profit !== undefined" class="fork-line"><span>Зафиксированный виртуальный P/L</span><b :class="Number(position.profit)>=0 ? 'green' : 'red'">{{ rub(position.profit) }}</b></div>
         </div>
         <div v-else-if="preview">
-          <p class="fork-muted">Предварительный расчёт — не виртуальная ставка. До 05:00 расчёт только информационный.</p>
+          <p class="fork-muted">Предварительный расчёт в целых рублях — не виртуальная ставка. До 05:00 он только информационный. Третий исход не покрыт.</p>
           <div class="fork-line"><span>{{ quote.team1 }} @ {{ odd(quote.odd1) }}</span><b>{{ rub(preview.stake1) }}</b></div>
           <div class="fork-line"><span>{{ quote.team2 }} @ {{ odd(quote.odd2) }}</span><b>{{ rub(preview.stake2) }}</b></div>
           <div class="fork-line"><span>На пару</span><b>{{ rub(preview.total) }}</b></div>
