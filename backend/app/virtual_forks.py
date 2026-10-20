@@ -428,11 +428,13 @@ class VirtualForkObserver:
     def _is_closed_page_error(error: Exception, page: Any | None) -> bool:
         """Detect a disposed tab/context without mistaking a network reset for one."""
         if page is not None:
-            try:
-                if page.is_closed():
+            is_closed = getattr(page, "is_closed", None)
+            if callable(is_closed):
+                try:
+                    if is_closed():
+                        return True
+                except Exception:
                     return True
-            except Exception:
-                return True
         message = str(error).casefold()
         return any(part in message for part in (
             "targetclosederror",
