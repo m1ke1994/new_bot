@@ -107,6 +107,34 @@ def select_nearest_unstarted(
     return min(candidates, key=lambda item: item["time_seconds"], default=None)
 
 
+def select_live_handoff_match(
+    matches: list[dict[str, Any]],
+    excluded_ids: set[str] | None = None,
+) -> dict[str, Any] | None:
+    """Resume on a different LIVE match if its 05:00 window is still ahead/open."""
+    excluded = excluded_ids or set()
+    candidates = []
+    for match in matches:
+        identity = str(match.get("match_id") or match.get("href") or "")
+        elapsed = match.get("time_seconds")
+        if (
+            not identity or identity in excluded or match.get("finished")
+            or match.get("is_upcoming")
+            or not live_period(match.get("period", ""))
+            or not isinstance(elapsed, int)
+            or not 0 <= elapsed <= CLOSE_SECOND
+        ):
+            continue
+        candidates.append(match)
+    # Prefer a match approaching 05:00. Do not pick an already concluded game.
+    return min(
+        candidates,
+        key=lambda item: (abs(OPEN_SECOND - item["time_seconds"]),
+                          -item["time_seconds"]),
+        default=None,
+    )
+
+
 def live_period(period: str) -> bool:
     value = str(period or "").strip().casefold()
     if not value or finished(value):
@@ -742,25 +770,41 @@ class VirtualForkObserver:
                     f"URL={page.url}; примеры: {reasons or 'нет'}",
                 )
             return
-        match = select_nearest_unstarted(matches, self._completed_match_ids)
+        # Initial cycle is strictly PREMATCH; after a settled virtual pair,
+        # a different game may already be LIVE. The regular strategy's scan()
+        # keeps LIVE cards in skipped_started, so reuse them without changing
+        # its behavior for the old DEMO/LIVE worker.
+        handoff = (
+            select_live_handoff_match(
+                league.skipped_started, self._completed_match_ids,
+            )
+            if self._allow_live_handoff else None
+        )
+        match = handoff or select_nearest_unstarted(
+            matches, self._completed_match_ids,
+        )
         if match is None:
             self._update(phase="NO_UPCOMING_MATCHES")
             await self._log(
-                "NO_ELIGIBLE_UPCOMING",
-                "Среди карточек нет матчей с подтверждённым обратным отсчётом "
-                "(прошедшие и уже LIVE исключены)",
+                "NO_ELIGIBLE_MATCH",
+                "Нет другого подходящего будущего матча или LIVE до 05:30; "
+                "повторим поиск",
             )
             return
         match_id = str(match.get("match_id") or match.get("href"))
-        # Double-check the exact selected card immediately before opening.
-        # The shared LeagueBrowser deliberately tolerates LIVE transitions,
-        # so the forks observer must apply a stricter prematch entry rule.
+        # Revalidate the exact card before clicking it.
         fresh = await league.revalidate_upcoming(match)
-        if not select_nearest_unstarted([fresh], self._completed_match_ids):
+        is_live_handoff = bool(
+            handoff is not None
+            and select_live_handoff_match([fresh], self._completed_match_ids)
+        )
+        if not is_live_handoff and not select_nearest_unstarted(
+            [fresh], self._completed_match_ids,
+        ):
             await self._log(
-                "MATCH_STARTED_BEFORE_ENTRY",
-                f'{match.get("team1")} — {match.get("team2")} уже начал матч '
-                "или обратный отсчёт исчез до входа; пропускаем",
+                "MATCH_NO_LONGER_ELIGIBLE",
+                f'{match.get("team1")} — {match.get("team2")} '
+                "уже вышел за разрешённое окно; пропускаем",
             )
             self._completed_match_ids.add(match_id)
             return
@@ -768,24 +812,33 @@ class VirtualForkObserver:
             "id": match_id, "name": f'{match.get("team1")} — {match.get("team2")}',
             "team1": match.get("team1"), "team2": match.get("team2"),
             "timer": fresh.get("time"), "score": fresh.get("score"),
-            "state": "UPCOMING", "countdown": fresh.get("time"),
+            "state": "LIVE" if is_live_handoff else "UPCOMING",
+            "countdown": None if is_live_handoff else fresh.get("time"),
         }, scanned=int(self._state["scanned"]) + 1)
         await self._log(
-            "UPCOMING_MATCH_SELECTED",
-            f'Ближайший НЕ начавшийся матч: {self._state["match"]["name"]}; '
-            f'до начала {fresh.get("time")}; id={match_id}',
+            "LIVE_HANDOFF_SELECTED" if is_live_handoff else "UPCOMING_MATCH_SELECTED",
+            f'Выбран {"уже LIVE" if is_live_handoff else "ещё не начавшийся"} '
+            f'матч: {self._state["match"]["name"]}; '
+            f'таймер={fresh.get("time")}; id={match_id}',
         )
         await league.open_match(fresh)
-        # Only wait for the scoreboard now. The market/canvas may not exist
-        # prematch, and waiting for it can lose the entire 30-second window.
         gate = MatchStartGate()
-        self._update(phase="WAITING_MATCH_START")
-        await self._log(
-            "WAITING_MATCH_START",
-            "Матч открыт до начала. Ждём LIVE и затем игровую отметку "
-            "05:00; время до начала не считается игровым.",
-        )
-        countdown = int(fresh["time_seconds"])
+        if is_live_handoff:
+            gate.started = True
+            self._update(phase="WAITING_WINDOW")
+            await self._log(
+                "LIVE_HANDOFF",
+                "После расчёта виртуальной пары перешли в уже идущий LIVE матч. "
+                "Снимем начальный счёт без догадок о прошлых голах.",
+            )
+        else:
+            self._update(phase="WAITING_MATCH_START")
+            await self._log(
+                "WAITING_MATCH_START",
+                "Матч открыт до начала. Ждём LIVE и затем игровую отметку "
+                "05:00; время до начала не считается игровым.",
+            )
+        countdown = 0 if is_live_handoff else int(fresh["time_seconds"])
         deadline = asyncio.get_running_loop().time() + max(
             480, min(10800, countdown + MATCH_DURATION + 180),
         )
