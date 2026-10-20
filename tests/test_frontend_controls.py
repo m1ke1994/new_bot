@@ -65,7 +65,7 @@ class FrontendControlTests(unittest.TestCase):
 
     def test_removed_tactics_are_not_exposed(self):
         router = ROUTER.read_text(encoding="utf-8")
-        self.assertNotIn("/forks", router)
+        self.assertIn("/forks", router)  # Isolated virtual observer has its own route
         self.assertNotIn("TOTAL_EVEN", self.source)
         self.assertNotIn("Тотал чёт", self.source)
         self.assertNotIn("Настольный теннис", self.source)

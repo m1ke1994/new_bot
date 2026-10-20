@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from backend.app.virtual_forks import (
     ForkStore, VirtualForkObserver, cash, clock_seconds, finished,
@@ -295,15 +295,11 @@ class VirtualForkLifecycleTests(unittest.IsolatedAsyncioTestCase):
         from urllib.parse import urlparse
         from backend.app.demo.config import CONFIG
 
-        class Score:
-            team1 = 0
-            team2 = 0
-            def text(self):
-                return "0:0"
+        from backend.app.demo.models import Score
 
         def snap(timer, period):
             return SimpleNamespace(
-                timer=timer, period=period, score=Score(),
+                timer=timer, period=period, score=Score(0, 0),
                 team1="А", team2="Б",
             )
 
@@ -369,7 +365,7 @@ class VirtualForkLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 team1="Ред Булл", team2="Вильярреал",
                 score=Score(0, 1), timer="", period="1-й тайм",
             )
-            page = AsyncMock()
+            page = MagicMock()
             locator = page.locator.return_value.first
             locator.count = AsyncMock(return_value=1)
             locator.is_visible = AsyncMock(return_value=True)
@@ -394,7 +390,7 @@ class VirtualForkLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 team1="А", team2="Б", score=Score(0, 0),
                 timer="", period="1-й тайм",
             )
-            page = AsyncMock()
+            page = MagicMock()
             locator = page.locator.return_value.first
             locator.count = AsyncMock(return_value=0)
             with patch("backend.app.virtual_forks.read_scoreboard", new_callable=AsyncMock) as reader:
@@ -459,7 +455,7 @@ class VirtualForkLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 await observer._scan_one(FakePage())
                 league.open_match.assert_not_awaited()
                 self.assertTrue(any(
-                    line["event"] == "MATCH_STARTED_BEFORE_ENTRY"
+                    line["event"] == "MATCH_NO_LONGER_ELIGIBLE"
                     for line in observer.store.logs()
                 ))
 
