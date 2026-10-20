@@ -19,7 +19,7 @@ import sqlite3
 from typing import Any
 from uuid import uuid4
 
-from auth import authorize
+from auth import SITE_URL, authorize
 from backend.app.browser.canvas_2d_adapter import read_next_goal_odds
 from backend.app.browser.league import LeagueBrowser
 from backend.app.browser.scoreboard import read_scoreboard, parse_timer_and_period
@@ -454,8 +454,20 @@ class VirtualForkObserver:
                         raise RuntimeError("Вкладка Chromium закрыта до начала наблюдения")
                     generation = BROWSER_MANAGER.generation
                     if page is not authorized_page or generation != authorized_generation:
-                        self._update(phase="AUTH_CHECK", match=None, quote=None)
+                        self._update(
+                            phase="OPENING_SITE", match=None, quote=None,
+                            browser_url=str(getattr(page, "url", "about:blank")),
+                            target_url=SITE_URL,
+                        )
+                        await self._log(
+                            "SITE_NAVIGATION_START",
+                            f"Открываем сайт {SITE_URL}; текущая вкладка: "
+                            f'{getattr(page, "url", "about:blank")}',
+                        )
+                        # authorize() itself calls auth.open_site(). Keep ONE
+                        # navigation owner; do not issue a competing page.goto().
                         auth = await authorize(page, self._stop_event)
+                        self._update(browser_url=str(getattr(page, "url", "about:blank")))
                         if self._stop_event.is_set():
                             break
                         if not auth.get("ok"):
@@ -467,11 +479,20 @@ class VirtualForkObserver:
                             self._update(phase="WAITING_AUTH")
                             await self.pause(3)
                             continue
+                        current_url = str(getattr(page, "url", "about:blank"))
+                        if current_url.startswith(("about:", "chrome-error:")):
+                            await self._log(
+                                "SITE_URL_INVALID",
+                                f"Маркер авторизации получен, но вкладка не на сайте: "
+                                f"{current_url}. Повторяем проверку.",
+                            )
+                            await self.pause(3)
+                            continue
                         authorized_page = page
                         authorized_generation = generation
                         await self._log(
                             "BROWSER_READY",
-                            "Авторизация проверена; используем управляемую вкладку без дублирования",
+                            f"Сайт открыт и авторизация подтверждена: {current_url}",
                         )
 
                     await self._scan_one(page)
@@ -499,8 +520,10 @@ class VirtualForkObserver:
                         authorized_generation = None
                         self._update(phase="RECOVERING_BROWSER", quote=None)
                         await self._log(
-                            "NAVIGATION_RECOVERY",
-                            f"Навигация не завершилась: {type(error).__name__}: {error}",
+                            "SITE_NAVIGATION_FAILED",
+                            f"Переход на {SITE_URL} не завершился; "
+                            f'вкладка={getattr(page, "url", "<нет>") if page else "<нет>"}; '
+                            f"ошибка={type(error).__name__}: {error}",
                         )
                         if is_network_transport_error(error):
                             await self.pause(15.0)
@@ -514,10 +537,19 @@ class VirtualForkObserver:
                                 )
                             await self.pause(3.0)
                         continue
-                    self._update(phase="ERROR")
+                    previous_phase = str(self._state.get("phase") or "")
+                    error_on_auth = previous_phase in ("OPENING_SITE", "AUTH_CHECK")
+                    self._update(
+                        phase="SITE_ERROR" if error_on_auth else "ERROR",
+                        browser_url=str(getattr(page, "url", "<нет>")) if page else "<нет>",
+                    )
                     await self._log(
-                        "SCAN_ERROR",
-                        f"Ошибка чтения матчей: {type(error).__name__}: {error}",
+                        "SITE_OPEN_ERROR" if error_on_auth else "SCAN_ERROR",
+                        (
+                            f"Не удалось открыть сайт {SITE_URL}; "
+                            f'вкладка={getattr(page, "url", "<нет>") if page else "<нет>"}; '
+                            if error_on_auth else "Ошибка чтения матчей: "
+                        ) + f"{type(error).__name__}: {error}",
                     )
                     await self.pause(5.0)
         except asyncio.CancelledError:
