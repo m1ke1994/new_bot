@@ -28,6 +28,7 @@ from backend.app.browser.navigation import NavigationLoadError, is_network_trans
 from backend.app.demo.config import CONFIG
 from backend.app.demo.engine import ENGINE
 from backend.app.demo.models import ScoreboardSnapshot
+from backend.app.bookmaker_demo_forks import BookmakerDemoPlacer, require_bookmaker_demo
 
 CENT = Decimal("0.01")
 OPEN_SECOND = 300
@@ -347,6 +348,8 @@ class VirtualForkObserver:
         self._balance = Decimal(0)
         self._initial = Decimal(0)
         self._allocation_pct = Decimal("10")
+        self._placement_mode = "VIRTUAL"
+        self._bookmaker_placer: BookmakerDemoPlacer | None = None
         self._position: dict[str, Any] | None = None
         self._position_deadline: float | None = None
         self._completed_match_ids: set[str] = set()
@@ -355,7 +358,7 @@ class VirtualForkObserver:
         self._observed_score: Any | None = None
         self._observed_match_id: str | None = None
         self._state: dict[str, Any] = {
-            "running": False, "phase": "STOPPED",
+            "running": False, "phase": "STOPPED", "placement_mode": "VIRTUAL",
             "message": "Наблюдатель остановлен", "window": "05:00–05:35",
             "initial_budget": 0, "balance": 0, "allocated_percent": 10,
             "session_profit": 0, "match": None, "quote": None,
@@ -394,11 +397,25 @@ class VirtualForkObserver:
         self.store.add_log(self._session, event, message)
         self._update(message=message)
 
-    async def start(self, budget: Any, percent: Any = 10) -> dict[str, Any]:
+    async def start(self, budget: Any, percent: Any = 10, *,
+                    placement_mode: str = "VIRTUAL",
+                    confirm_demo: bool = False) -> dict[str, Any]:
         if self.running:
-            raise ValueError("Виртуальный наблюдатель уже запущен")
+            raise ValueError("Наблюдатель вилок уже запущен")
+        placement_mode = str(placement_mode).upper()
+        if placement_mode not in ("VIRTUAL", "BOOKMAKER_DEMO"):
+            raise ValueError("Допустимы режимы VIRTUAL и BOOKMAKER_DEMO")
+        if placement_mode == "BOOKMAKER_DEMO":
+            if not confirm_demo:
+                raise ValueError("Подтвердите, что используете учебный счёт букмекера")
+            import os
+            if not os.environ.get("FORK_DEMO_ACCOUNT_SELECTOR", "").strip():
+                raise ValueError(
+                    "Для БК DEMO требуется FORK_DEMO_ACCOUNT_SELECTOR: "
+                    "селектор видимой метки учебного счёта на сайте"
+                )
         completed_before_start = self.store.count_resolved_pairs()
-        if completed_before_start >= TARGET_VIRTUAL_PAIRS:
+        if placement_mode == "VIRTUAL" and completed_before_start >= TARGET_VIRTUAL_PAIRS:
             raise ValueError(
                 f"Цель {TARGET_VIRTUAL_PAIRS} завершённых виртуальных пар "
                 "уже достигнута; история сохранена"
@@ -417,6 +434,8 @@ class VirtualForkObserver:
         if not (Decimal("1") <= share <= Decimal("100")):
             raise ValueError("Доля бюджета должна быть от 1% до 100%")
         self._session = uuid4().hex
+        self._placement_mode = placement_mode
+        self._bookmaker_placer = BookmakerDemoPlacer(self._log) if placement_mode == "BOOKMAKER_DEMO" else None
         self._initial = cash(amount)
         self._balance = self._initial
         self._allocation_pct = share
@@ -430,6 +449,7 @@ class VirtualForkObserver:
         self._stop_event = asyncio.Event()
         self._state.update({
             "phase": "STARTING", "message": "Запуск наблюдателя вилок",
+            "placement_mode": placement_mode,
             "session_id": self._session, "initial_budget": float(self._initial),
             "balance": float(self._balance), "allocated_percent": float(share),
             "session_profit": 0, "match": None, "quote": None,
@@ -446,7 +466,11 @@ class VirtualForkObserver:
             "START",
             f"Запущен виртуальный мониторинг 05:00–05:35; "
             f"выполнено {completed_before_start}/{TARGET_VIRTUAL_PAIRS} "
-            "завершённых виртуальных пар. История предыдущих запусков сохранена.",
+            "завершённых виртуальных пар. "
+            + ("БК DEMO: клики разрешены только после подтверждения "
+               "учебного счёта сайта."
+               if placement_mode == "BOOKMAKER_DEMO"
+               else "VIRTUAL: купоны БК не открываются."),
         )
         return self.snapshot()
 
@@ -506,12 +530,20 @@ class VirtualForkObserver:
         authorized_generation = None
         try:
             while not self._stop_event.is_set():
-                if self.store.count_resolved_pairs() >= TARGET_VIRTUAL_PAIRS:
+                if self._placement_mode == "VIRTUAL" and self.store.count_resolved_pairs() >= TARGET_VIRTUAL_PAIRS:
                     self._update(phase="TARGET_REACHED", match=None, quote=None)
                     await self._log(
                         "TARGET_REACHED",
                         f"Набрано {TARGET_VIRTUAL_PAIRS} завершённых виртуальных пар. "
                         "Мониторинг останавливается, история остаётся в SQLite.",
+                    )
+                    self._stop_event.set()
+                    break
+                if self._placement_mode == "BOOKMAKER_DEMO" and self._balance < 20:
+                    self._update(phase="DEMO_BALANCE_EXHAUSTED")
+                    await self._log(
+                        "DEMO_BALANCE_EXHAUSTED",
+                        "Демо-лимит менее 20 ₽ — новых купонов не отправляем",
                     )
                     self._stop_event.set()
                     break
@@ -645,9 +677,11 @@ class VirtualForkObserver:
                 await self._review("Наблюдение прервано до подтверждения результата")
             self._update(
                 running=False,
-                phase="TARGET_REACHED"
-                if self._state.get("phase") == "TARGET_REACHED"
-                else "STOPPED",
+                phase=self._state.get("phase")
+                if self._state.get("phase") in (
+                    "TARGET_REACHED", "BOOKMAKER_DEMO_HALT",
+                    "BOOKMAKER_DEMO_UNRESOLVED", "DEMO_BALANCE_EXHAUSTED"
+                ) else "STOPPED",
             )
 
     async def _read_live_scoreboard(self, page: Any) -> ScoreboardSnapshot:
@@ -1108,12 +1142,85 @@ class VirtualForkObserver:
                 "timer": after.timer, "quote_source": odds.source,
                 "result": None, "profit": None, "payout": None,
                 "conditional_only": True,
+                "placement_mode": self._placement_mode,
                 "third_outcome_covered": False,
                 "timeout_seconds": FORK_RESULT_TIMEOUT_SECONDS,
                 "settlement_basis": None,
                 "team1_result": "PENDING", "team2_result": "PENDING",
                 "team1_payout": None, "team2_payout": None,
             }
+            if self._placement_mode == "BOOKMAKER_DEMO":
+                if self._bookmaker_placer is None:
+                    raise RuntimeError("Bookmaker demo executor не инициализирован")
+                position.update(
+                    status="BOOKMAKER_DEMO_PREPARING",
+                    bookmaker_settled=False, debited_sides=[],
+                )
+                self._position = position
+                self.store.upsert(position)
+                self._update(phase="BOOKMAKER_DEMO_PLACING",
+                             position=deepcopy(position))
+
+                async def persist_demo(item: dict[str, Any]) -> None:
+                    for side in (1, 2):
+                        if (
+                            item.get(f"team{side}_placement") == "ACCEPTED"
+                            and side not in item["debited_sides"]
+                        ):
+                            self._balance -= Decimal(str(
+                                item[f"team{side}_accepted_stake"]
+                            ))
+                            item["debited_sides"].append(side)
+                    self.store.upsert(item)
+                    self._update(position=deepcopy(item),
+                                 balance=float(self._balance))
+
+                def in_window(scoreboard: ScoreboardSnapshot) -> bool:
+                    t = clock_seconds(scoreboard.timer)
+                    return (
+                        t is not None
+                        and OPEN_SECOND <= t <= CLOSE_SECOND
+                        and not finished(scoreboard.period)
+                    )
+
+                completed = await self._bookmaker_placer.place(
+                    page, position, odds, self._stop_event,
+                    persist_demo, self._read_live_scoreboard, in_window,
+                )
+                if not completed:
+                    self._update(
+                        phase="BOOKMAKER_DEMO_HALT",
+                        position=deepcopy(position),
+                        message=position.get("placement_error",
+                                             "Только часть купонов подтверждена"),
+                    )
+                    await self._log(
+                        "BOOKMAKER_DEMO_HALT",
+                        "Новых купонов не будет до проверки частичной пары.",
+                    )
+                    self._stop_event.set()
+                    self._position = None
+                    return
+                position["status"] = "PENDING"
+                position["accepted_legs"] = 2
+                self.store.upsert(position)
+                self._position_deadline = (
+                    asyncio.get_running_loop().time() + FORK_RESULT_TIMEOUT_SECONDS
+                )
+                self._update(
+                    phase="WAITING_RESULT",
+                    position=deepcopy(position), balance=float(self._balance),
+                    signals=int(self._state["signals"]) + 1,
+                )
+                await self._log(
+                    "BOOKMAKER_DEMO_TWO_ACCEPTED",
+                    "Оба учебных купона приняты; ждём гол. "
+                    "Выигрыш пока не подтверждён расчётом БК.",
+                )
+                await self._settle(page, after)
+                self._completed_match_ids.add(match_id)
+                return
+
             self._balance -= cash(proposal["total_stake"])
             self._position = position
             self._position_deadline = asyncio.get_running_loop().time() + FORK_RESULT_TIMEOUT_SECONDS
