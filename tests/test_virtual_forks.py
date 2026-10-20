@@ -162,6 +162,7 @@ class VirtualForkLifecycleTests(unittest.IsolatedAsyncioTestCase):
             class FakePage:
                 def __init__(self):
                     self.closed = False
+                    self.url = "https://1xlite-9605.pro/ru"
                 def is_closed(self):
                     return self.closed
 
@@ -178,18 +179,60 @@ class VirtualForkLifecycleTests(unittest.IsolatedAsyncioTestCase):
                  patch("backend.app.virtual_forks.authorize", new_callable=AsyncMock) as auth:
                 engine.task = None
                 manager.generation = 1
-                manager.ensure_page = AsyncMock(side_effect=[first, second])
+                manager.prepare_session_page = AsyncMock(side_effect=[first, second])
+                manager.ensure_page = AsyncMock()
                 auth.return_value = {"ok": True, "status": "AUTHORIZED"}
                 with patch.object(observer, "_scan_one", new_callable=AsyncMock) as scan_mock, \
                      patch.object(observer, "pause", new_callable=AsyncMock):
                     scan_mock.side_effect = scan
                     await observer.start(5000, 10)
                     await asyncio.wait_for(observer._task, timeout=3)
-                    self.assertEqual(manager.ensure_page.await_count, 2)
+                    self.assertEqual(manager.prepare_session_page.await_count, 2)
+                    manager.ensure_page.assert_not_awaited()
                     self.assertEqual(auth.await_count, 2)
                     self.assertEqual(scan_mock.await_count, 2)
             messages = observer.store.logs()
             self.assertTrue(any(item["event"] == "BROWSER_PAGE_LOST" for item in messages))
+
+    async def test_blank_tab_is_preopened_before_authorization(self):
+        with TemporaryDirectory() as tmp:
+            observer = VirtualForkObserver(ForkStore(Path(tmp) / "forks.sqlite3"))
+
+            class Page:
+                url = "about:blank"
+                def is_closed(self):
+                    return False
+
+            page = Page()
+            async def prepare():
+                self.assertEqual(page.url, "about:blank")
+                page.url = "https://1xlite-9605.pro/ru"
+                return page
+
+            async def mock_authorize(open_page, _stop):
+                self.assertIs(open_page, page)
+                self.assertEqual(open_page.url, "https://1xlite-9605.pro/ru")
+                return {"ok": True, "status": "AUTHORIZED"}
+
+            async def scan(_page):
+                observer._stop_event.set()
+
+            with patch("backend.app.virtual_forks.ENGINE") as engine, \
+                 patch("backend.app.virtual_forks.BROWSER_MANAGER") as manager, \
+                 patch("backend.app.virtual_forks.authorize", new_callable=AsyncMock) as auth:
+                engine.task = None
+                manager.generation = 1
+                manager.prepare_session_page = AsyncMock(side_effect=prepare)
+                auth.side_effect = mock_authorize
+                with patch.object(observer, "_scan_one", side_effect=scan):
+                    await observer.start(5000, 10)
+                    await asyncio.wait_for(observer._task, timeout=3)
+                manager.prepare_session_page.assert_awaited_once()
+                auth.assert_awaited_once()
+                self.assertTrue(any(
+                    log["event"] == "BROWSER_READY"
+                    for log in observer.store.logs()
+                ))
 
     async def test_empty_scan_diagnostic_does_not_reload_ready_league(self):
         from urllib.parse import urlparse
