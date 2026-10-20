@@ -28,6 +28,7 @@ from backend.app.browser.navigation import NavigationLoadError, is_network_trans
 from backend.app.demo.config import CONFIG
 from backend.app.demo.engine import ENGINE
 from backend.app.demo.models import ScoreboardSnapshot
+from backend.app.fork_execution import ForkLivePlacer, integer_pair
 
 CENT = Decimal("0.01")
 OPEN_SECOND = 300
@@ -180,37 +181,8 @@ class MatchStartGate:
 
 
 def split_virtual_stakes(total: Decimal, odd1: Any, odd2: Any) -> dict[str, Any] | None:
-    """Same-event, two-side conditional hedge, NOT a 3-outcome surebet."""
-    try:
-        a, b = Decimal(str(odd1)), Decimal(str(odd2))
-        amount = cash(total)
-    except (InvalidOperation, TypeError, ValueError):
-        return None
-    if a <= 1 or b <= 1 or amount < Decimal("0.02"):
-        return None
-    inv = Decimal(1) / a + Decimal(1) / b
-    if inv >= 1:
-        return None
-    # Split the same total virtual amount by inverse odds; round only once.
-    stake1 = cash(amount * (Decimal(1) / a) / inv)
-    stake2 = amount - stake1
-    if stake1 <= 0 or stake2 <= 0:
-        return None
-    payout1 = cash(stake1 * a)
-    payout2 = cash(stake2 * b)
-    profit1 = payout1 - amount
-    profit2 = payout2 - amount
-    if min(profit1, profit2) <= 0:
-        return None
-    return {
-        "odd1": float(a), "odd2": float(b), "inverse_sum": float(inv),
-        "stake1": float(stake1), "stake2": float(stake2),
-        "total_stake": float(amount), "payout1": float(payout1),
-        "payout2": float(payout2), "profit1": float(profit1),
-        "profit2": float(profit2),
-        "minimum_conditional_profit": float(min(profit1, profit2)),
-        "no_goal_loss": float(-amount),
-    }
+    """Whole-RUB stake allocation shared by DEMO and LIVE."""
+    return integer_pair(total, odd1, odd2)
 
 
 class ForkStore:
@@ -334,6 +306,8 @@ class VirtualForkObserver:
         self._balance = Decimal(0)
         self._initial = Decimal(0)
         self._allocation_pct = Decimal("10")
+        self._mode = "DEMO"
+        self._live_placer: ForkLivePlacer | None = None
         self._position: dict[str, Any] | None = None
         self._position_deadline: float | None = None
         self._completed_match_ids: set[str] = set()
@@ -342,7 +316,7 @@ class VirtualForkObserver:
         self._observed_score: Any | None = None
         self._observed_match_id: str | None = None
         self._state: dict[str, Any] = {
-            "running": False, "phase": "STOPPED",
+            "running": False, "phase": "STOPPED", "mode": "DEMO",
             "message": "Наблюдатель остановлен", "window": "05:00–05:35",
             "initial_budget": 0, "balance": 0, "allocated_percent": 10,
             "session_profit": 0, "match": None, "quote": None,
@@ -381,11 +355,17 @@ class VirtualForkObserver:
         self.store.add_log(self._session, event, message)
         self._update(message=message)
 
-    async def start(self, budget: Any, percent: Any = 10) -> dict[str, Any]:
+    async def start(self, budget: Any, percent: Any = 10, *,
+                    mode: str = "DEMO", live_confirmed: bool = False) -> dict[str, Any]:
         if self.running:
-            raise ValueError("Виртуальный наблюдатель уже запущен")
+            raise ValueError("Наблюдатель вилок уже запущен")
+        mode = str(mode).upper()
+        if mode not in {"DEMO", "LIVE"}:
+            raise ValueError("Режим должен быть DEMO или LIVE")
+        if mode == "LIVE" and not live_confirmed:
+            raise ValueError("LIVE требует явного подтверждения реальных денежных ставок")
         completed_before_start = self.store.count_resolved_pairs()
-        if completed_before_start >= TARGET_VIRTUAL_PAIRS:
+        if mode == "DEMO" and completed_before_start >= TARGET_VIRTUAL_PAIRS:
             raise ValueError(
                 f"Цель {TARGET_VIRTUAL_PAIRS} завершённых виртуальных пар "
                 "уже достигнута; история сохранена"
@@ -404,6 +384,8 @@ class VirtualForkObserver:
         if not (Decimal("1") <= share <= Decimal("100")):
             raise ValueError("Доля бюджета должна быть от 1% до 100%")
         self._session = uuid4().hex
+        self._mode = mode
+        self._live_placer = ForkLivePlacer(self._log) if mode == "LIVE" else None
         self._initial = cash(amount)
         self._balance = self._initial
         self._allocation_pct = share
@@ -417,6 +399,7 @@ class VirtualForkObserver:
         self._stop_event = asyncio.Event()
         self._state.update({
             "phase": "STARTING", "message": "Запуск наблюдателя вилок",
+            "mode": self._mode,
             "session_id": self._session, "initial_budget": float(self._initial),
             "balance": float(self._balance), "allocated_percent": float(share),
             "session_profit": 0, "match": None, "quote": None,
@@ -433,7 +416,10 @@ class VirtualForkObserver:
             "START",
             f"Запущен виртуальный мониторинг 05:00–05:35; "
             f"выполнено {completed_before_start}/{TARGET_VIRTUAL_PAIRS} "
-            "завершённых виртуальных пар. История предыдущих запусков сохранена.",
+            "завершённых виртуальных пар. "
+            + ("LIVE: подтверждён ввод реальных ставок; два исхода "
+               "не покрывают вариант отсутствия голов."
+               if mode == "LIVE" else "DEMO: реальных ставок нет."),
         )
         return self.snapshot()
 
@@ -493,12 +479,20 @@ class VirtualForkObserver:
         authorized_generation = None
         try:
             while not self._stop_event.is_set():
-                if self.store.count_resolved_pairs() >= TARGET_VIRTUAL_PAIRS:
+                if self._mode == "DEMO" and self.store.count_resolved_pairs() >= TARGET_VIRTUAL_PAIRS:
                     self._update(phase="TARGET_REACHED", match=None, quote=None)
                     await self._log(
                         "TARGET_REACHED",
                         f"Набрано {TARGET_VIRTUAL_PAIRS} завершённых виртуальных пар. "
                         "Мониторинг останавливается, история остаётся в SQLite.",
+                    )
+                    self._stop_event.set()
+                    break
+                if self._mode == "LIVE" and self._balance < Decimal("20"):
+                    self._update(phase="LIVE_BUDGET_EXHAUSTED")
+                    await self._log(
+                        "LIVE_BUDGET_EXHAUSTED",
+                        "Лимит LIVE меньше 20 ₽; новые реальные ставки запрещены",
                     )
                     self._stop_event.set()
                     break
@@ -632,9 +626,11 @@ class VirtualForkObserver:
                 await self._review("Наблюдение прервано до подтверждения результата")
             self._update(
                 running=False,
-                phase="TARGET_REACHED"
-                if self._state.get("phase") == "TARGET_REACHED"
-                else "STOPPED",
+                phase=self._state.get("phase")
+                if self._state.get("phase") in (
+                    "TARGET_REACHED", "LIVE_HALT",
+                    "LIVE_BUDGET_EXHAUSTED", "LIVE_UNRESOLVED",
+                ) else "STOPPED",
             )
 
     async def _read_live_scoreboard(self, page: Any) -> ScoreboardSnapshot:
@@ -1095,12 +1091,74 @@ class VirtualForkObserver:
                 "timer": after.timer, "quote_source": odds.source,
                 "result": None, "profit": None, "payout": None,
                 "conditional_only": True,
+                "mode": self._mode,
                 "third_outcome_covered": False,
                 "timeout_seconds": FORK_RESULT_TIMEOUT_SECONDS,
                 "settlement_basis": None,
                 "team1_result": "PENDING", "team2_result": "PENDING",
                 "team1_payout": None, "team2_payout": None,
             }
+            if self._mode == "LIVE":
+                if self._live_placer is None:
+                    raise RuntimeError("LIVE executor не инициализирован")
+                position.update(
+                    status="LIVE_PREPARING", bookmaker_settled=False,
+                    live_debited_legs=[],
+                )
+                self._position = position
+                self.store.upsert(position)
+                self._update(phase="LIVE_PLACING", position=deepcopy(position))
+
+                async def save_leg(item: dict[str, Any]) -> None:
+                    # Account for REAL acceptance only; never assume a clicked
+                    # button or a pending coupon means funds have been debited.
+                    for side in (1, 2):
+                        key = f"team{side}"
+                        if (item.get(f"{key}_placement") == "ACCEPTED"
+                                and side not in item["live_debited_legs"]):
+                            stake = Decimal(str(item[f"{key}_amount"]))
+                            self._balance -= stake
+                            item["live_debited_legs"].append(side)
+                    self.store.upsert(item)
+                    self._update(position=deepcopy(item), balance=float(self._balance))
+
+                placed = await self._live_placer.execute(
+                    page, position, odds, self._stop_event, save_leg,
+                    self._read_live_scoreboard, self._market_logger,
+                    close_seconds=CLOSE_SECOND, clock_to_seconds=clock_seconds,
+                )
+                if not placed:
+                    self._update(
+                        phase="LIVE_HALT", position=deepcopy(position),
+                        message=position.get("live_error", "LIVE-пара не завершена"),
+                    )
+                    self._stop_event.set()
+                    self._position = None
+                    await self._log(
+                        "LIVE_HALT",
+                        "Блокировка дальнейших денежных ставок: купоны "
+                        "не полностью подтверждены, проверьте историю БК.",
+                    )
+                    return
+                position.update(status="PENDING", accepted_legs=2)
+                self.store.upsert(position)
+                self._position_deadline = (
+                    asyncio.get_running_loop().time() + FORK_RESULT_TIMEOUT_SECONDS
+                )
+                self._update(
+                    phase="WAITING_RESULT", position=deepcopy(position),
+                    balance=float(self._balance),
+                    signals=int(self._state["signals"]) + 1,
+                )
+                await self._log(
+                    "LIVE_FORK_TWO_ACCEPTED",
+                    "Обе ставки букмекером приняты. Ждём гол; расчёт выигрыша "
+                    "не подтверждён БК.",
+                )
+                await self._settle(page, after)
+                self._completed_match_ids.add(match_id)
+                return
+
             self._balance -= cash(proposal["total_stake"])
             self._position = position
             self._position_deadline = asyncio.get_running_loop().time() + FORK_RESULT_TIMEOUT_SECONDS
@@ -1112,11 +1170,11 @@ class VirtualForkObserver:
             )
             await self._log(
                 "VIRTUAL_PAIR",
-                f'Виртуальная пара: {before.team1} {proposal["stake1"]:.2f} ₽ @ {odds.team1}; '
-                f'{before.team2} {proposal["stake2"]:.2f} ₽ @ {odds.team2}. '
+                f'Виртуальная пара: {before.team1} {proposal["stake1"]:.0f} ₽ @ {odds.team1}; '
+                f'{before.team2} {proposal["stake2"]:.0f} ₽ @ {odds.team2}. '
                 'Если голов больше не будет — обе ставки проиграют.',
             )
-            await self._settle(page, before)
+            await self._settle(page, after)
             self._completed_match_ids.add(match_id)
             return
         self._completed_match_ids.add(match_id)
