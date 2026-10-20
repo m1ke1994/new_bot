@@ -197,6 +197,15 @@ class ForkStore:
                     status TEXT NOT NULL,
                     payload TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS fork_observations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    match_id TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_fork_obs_session
+                    ON fork_observations(session_id, id);
                 CREATE TABLE IF NOT EXISTS virtual_fork_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_id TEXT NOT NULL,
@@ -230,6 +239,23 @@ class ForkStore:
                 (item["id"], item["session_id"], item["match_id"],
                  item["created_at"], item["status"], json.dumps(item, ensure_ascii=False)),
             )
+
+    def add_observation(self, item: dict[str, Any]) -> None:
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO fork_observations(session_id,match_id,timestamp,payload) "
+                "VALUES(?,?,?,?)",
+                (item["session_id"], item["match_id"], item["timestamp"],
+                 json.dumps(item, ensure_ascii=False)),
+            )
+
+    def observations(self, limit: int = 300) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            items = db.execute(
+                "SELECT payload FROM fork_observations ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [json.loads(item[0]) for item in items]
 
     def add_log(self, session: str, event: str, message: str) -> None:
         with self._connect() as db:
@@ -267,13 +293,19 @@ class VirtualForkObserver:
         self._allocation_pct = Decimal("10")
         self._position: dict[str, Any] | None = None
         self._completed_match_ids: set[str] = set()
+        self._allow_live_handoff = False
+        self._last_market_event: dict[str, float] = {}
+        self._observed_score: Any | None = None
+        self._observed_match_id: str | None = None
         self._state: dict[str, Any] = {
             "running": False, "phase": "STOPPED",
             "message": "Наблюдатель остановлен", "window": "05:00–05:30",
             "initial_budget": 0, "balance": 0, "allocated_percent": 10,
             "session_profit": 0, "match": None, "quote": None,
             "odds_error": None, "odds_status": "WAITING",
+            "market_search": "WAITING", "observations": [],
             "position": None, "scanned": 0, "signals": 0,
+            "market_search": "WAITING", "observations": [],
             "warnings": ["Третий исход «голов больше не будет» не покрыт."],
         }
 
@@ -315,6 +347,10 @@ class VirtualForkObserver:
         self._allocation_pct = share
         self._position = None
         self._completed_match_ids = set()
+        self._allow_live_handoff = False
+        self._last_market_event = {}
+        self._observed_score = None
+        self._observed_match_id = None
         self._stop_event = asyncio.Event()
         self._state.update({
             "phase": "STARTING", "message": "Запуск наблюдателя вилок",
@@ -520,6 +556,89 @@ class VirtualForkObserver:
             )
         return snapshot
 
+    async def _market_logger(self, event: str, message: str) -> None:
+        """Expose the normal Next Goal search/canvas sequence in the live UI."""
+        monitored = {
+            "MARKET_SEARCH_TARGET", "MARKET_SEARCH_OPENED",
+            "MARKET_SEARCH_FILLED", "MARKET_SEARCH_REUSED",
+            "NEXT_GOAL_MARKET_FOUND", "TEAM1_ODDS", "TEAM2_ODDS",
+            "CANVAS_2D_HOOK_INSTALLED_LATE", "CANVAS_2D_NO_DRAW_CALLS",
+            "CANVAS_2D_READ", "ODDS_READY",
+        }
+        if event not in monitored:
+            return
+        if event in {"MARKET_SEARCH_FILLED", "MARKET_SEARCH_OPENED"}:
+            self._update(market_search="FILLED" if event.endswith("FILLED") else "OPENED")
+        if event == "NEXT_GOAL_MARKET_FOUND":
+            self._update(market_search="READY")
+        now = asyncio.get_running_loop().time()
+        if now - self._last_market_event.get(event, -100.0) < (8 if event == "MARKET_SEARCH_REUSED" else 2):
+            return
+        self._last_market_event[event] = now
+        await self._log(event, message)
+
+    async def _record_score(self, match_id: str, snap: ScoreboardSnapshot) -> None:
+        """Persist every observed goal exactly once; do not invent missed goals."""
+        if self._observed_match_id != match_id:
+            self._observed_match_id = match_id
+            self._observed_score = snap.score
+            self._state["observations"] = []
+            item = {
+                "session_id": self._session, "match_id": match_id,
+                "timestamp": utc_time(), "event": "MATCH_JOINED",
+                "match": f"{snap.team1} — {snap.team2}",
+                "timer": snap.timer, "period": snap.period,
+                "score_before": None, "score_after": snap.score.text(),
+                "goal_number": snap.score.team1 + snap.score.team2,
+                "scorer": None, "scorer_team": None,
+                "note": "Начальное наблюдение. Ранее забитые голы не приписываются.",
+            }
+            self.store.add_observation(item)
+            self._state["observations"].append(item)
+            await self._log("SCORE_BASELINE", f'{item["match"]}: счёт при подключении {snap.score.text()}')
+            return
+        previous = self._observed_score
+        if previous == snap.score:
+            return
+        d1 = snap.score.team1 - previous.team1
+        d2 = snap.score.team2 - previous.team2
+        if d1 < 0 or d2 < 0:
+            # A corrected scoreboard is not proof of a new goal.
+            event, scorer, label = "SCORE_CORRECTED", None, None
+        elif d1 + d2 == 1:
+            event = "GOAL"
+            scorer = "TEAM_1" if d1 == 1 else "TEAM_2"
+            label = snap.team1 if d1 == 1 else snap.team2
+        else:
+            event, scorer, label = "AMBIGUOUS_CHANGE", None, None
+        item = {
+            "session_id": self._session, "match_id": match_id,
+            "timestamp": utc_time(), "event": event,
+            "match": f"{snap.team1} — {snap.team2}",
+            "timer": snap.timer, "period": snap.period,
+            "score_before": previous.text(), "score_after": snap.score.text(),
+            "goal_number": snap.score.team1 + snap.score.team2,
+            "scorer": scorer, "scorer_team": label,
+            "note": "" if event == "GOAL" else "Нельзя уверенно определить автора каждого гола по одному изменению счёта",
+        }
+        self._observed_score = snap.score
+        self.store.add_observation(item)
+        history = self._state.setdefault("observations", [])
+        history.append(item)
+        if len(history) > 50:
+            del history[:-50]
+        if event == "GOAL":
+            await self._log(
+                "GOAL_OBSERVED",
+                f'Гол №{item["goal_number"]}: {label}; '
+                f'{item["score_before"]} → {item["score_after"]}; LIVE {snap.timer}',
+            )
+        else:
+            await self._log(
+                event,
+                f'Неоднозначное изменение счёта: {item["score_before"]} → {item["score_after"]}',
+            )
+
     async def _observe_odds(
         self, page: Any, snapshot: ScoreboardSnapshot, *, entry_window: bool,
     ) -> Any | None:
@@ -528,6 +647,7 @@ class VirtualForkObserver:
             odds = await read_next_goal_odds(
                 page, snapshot.team1, snapshot.team2,
                 snapshot.score.team1, snapshot.score.team2,
+                self._market_logger,
                 read_only=True,
             )
         except asyncio.CancelledError:
@@ -860,6 +980,7 @@ class VirtualForkObserver:
             f'{p["match"]}: {outcome} / {score}; результат {pnl:+.2f} ₽',
         )
         self._position = None
+        self._allow_live_handoff = True
 
     async def _review(self, reason: str) -> None:
         if not self._position or self._position.get("status") != "PENDING":
