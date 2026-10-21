@@ -180,6 +180,21 @@ class MatchStartGate:
         return self.started
 
 
+def no_goal_risk_match(goals1: int, goals2: int, odd1: Any, odd2: Any) -> bool:
+    """Historical screening hypothesis, not a proven no-goal predictor.
+
+    Only evaluates a currently readable scoreboard and both next-goal odds.
+    Do not use future goals or the match final score when deciding.
+    """
+    try:
+        return (
+            int(goals1) + int(goals2) >= 10
+            and min(Decimal(str(odd1)), Decimal(str(odd2))) <= Decimal("1.950")
+        )
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+
+
 def split_virtual_stakes(total: Decimal, odd1: Any, odd2: Any) -> dict[str, Any] | None:
     """Allocate whole rubles and re-check both CONDITIONAL payoffs after rounding.
 
@@ -349,6 +364,7 @@ class VirtualForkObserver:
         self._initial = Decimal(0)
         self._allocation_pct = Decimal("10")
         self._placement_mode = "VIRTUAL"
+        self._no_goal_risk_enabled = False
         self._bookmaker_placer: BookmakerDemoPlacer | None = None
         self._position: dict[str, Any] | None = None
         self._position_deadline: float | None = None
@@ -365,6 +381,7 @@ class VirtualForkObserver:
             "odds_error": None, "odds_status": "WAITING",
             "market_search": "WAITING", "observations": [],
             "position": None, "scanned": 0, "signals": 0,
+            "no_goal_risk_enabled": False, "no_goal_risk_skipped": 0,
             "target_pairs": TARGET_VIRTUAL_PAIRS,
             "completed_pairs": 0, "remaining_pairs": TARGET_VIRTUAL_PAIRS,
             "records_total": 0,
@@ -399,7 +416,8 @@ class VirtualForkObserver:
 
     async def start(self, budget: Any, percent: Any = 10, *,
                     placement_mode: str = "VIRTUAL",
-                    confirm_demo: bool = False) -> dict[str, Any]:
+                    confirm_demo: bool = False,
+                    no_goal_risk_enabled: bool = False) -> dict[str, Any]:
         if self.running:
             raise ValueError("Наблюдатель вилок уже запущен")
         placement_mode = str(placement_mode).upper()
@@ -429,6 +447,7 @@ class VirtualForkObserver:
             raise ValueError("Доля бюджета должна быть от 1% до 100%")
         self._session = uuid4().hex
         self._placement_mode = placement_mode
+        self._no_goal_risk_enabled = bool(no_goal_risk_enabled)
         self._bookmaker_placer = BookmakerDemoPlacer(self._log) if placement_mode == "BOOKMAKER_DEMO" else None
         self._initial = cash(amount)
         self._balance = self._initial
@@ -444,6 +463,8 @@ class VirtualForkObserver:
         self._state.update({
             "phase": "STARTING", "message": "Запуск наблюдателя вилок",
             "placement_mode": placement_mode,
+            "no_goal_risk_enabled": self._no_goal_risk_enabled,
+            "no_goal_risk_skipped": 0,
             "session_id": self._session, "initial_budget": float(self._initial),
             "balance": float(self._balance), "allocated_percent": float(share),
             "session_profit": 0, "match": None, "quote": None,
@@ -1124,6 +1145,39 @@ class VirtualForkObserver:
                 self._update(phase="WATCHING_QUOTES")
                 await self.pause(0.35)
                 continue
+
+            # Apply the optional risk filter to a VERIFIED, bettable candidate
+            # BEFORE creating a position or clicking either bookmaker coupon.
+            # The same guard covers VIRTUAL and BOOKMAKER_DEMO.
+            if self._no_goal_risk_enabled and no_goal_risk_match(
+                after.score.team1, after.score.team2, odds.team1, odds.team2,
+            ):
+                goals = after.score.team1 + after.score.team2
+                low_odd = min(odds.team1, odds.team2)
+                self._completed_match_ids.add(match_id)
+                skipped = int(self._state["no_goal_risk_skipped"]) + 1
+                self._update(
+                    phase="FILTER_SKIPPED", no_goal_risk_skipped=skipped,
+                )
+                self.store.add_observation({
+                    "session_id": self._session, "match_id": match_id,
+                    "timestamp": utc_time(), "event": "NO_GOAL_RISK_SKIP",
+                    "team1": after.team1, "team2": after.team2,
+                    "score_before": after.score.text(),
+                    "score_after": after.score.text(), "timer": after.timer,
+                    "goal_number": odds.next_goal_number, "odd1": odds.team1,
+                    "odd2": odds.team2, "min_odd": low_odd,
+                    "total_goals": goals,
+                    "rule": "total_goals >= 10 AND min_odd <= 1.950",
+                })
+                await self._log(
+                    "NO_GOAL_RISK_SKIP",
+                    f"Фильтр NO_GOAL_RISK: пропущен {after.team1} — "
+                    f"{after.team2}, счёт {after.score.text()}, "
+                    f"голов {goals}, меньший кф {low_odd:.3f} ≤ 1.950. "
+                    "Купоны не открываем; переключаемся на следующий матч.",
+                )
+                return
 
             position = {
                 **proposal, "id": uuid4().hex, "session_id": self._session,
