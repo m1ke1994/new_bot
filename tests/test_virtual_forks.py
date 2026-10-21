@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from backend.app.virtual_forks import (
     ForkStore, VirtualForkObserver, cash, clock_seconds, finished,
     split_virtual_stakes, select_nearest_unstarted, MatchStartGate,
-    CLOSE_SECOND, FORK_RESULT_TIMEOUT_SECONDS,
+    CLOSE_SECOND, FORK_RESULT_TIMEOUT_SECONDS, no_goal_risk_match,
 )
 
 
@@ -21,6 +21,13 @@ class VirtualForkCalculationTests(unittest.TestCase):
         self.assertLess(p["inverse_sum"], 1)
         self.assertGreater(p["minimum_conditional_profit"], 0)
         self.assertEqual(p["no_goal_loss"], -250)
+
+    def test_no_goal_risk_condition_uses_confirmed_score_and_lower_odd(self):
+        self.assertFalse(no_goal_risk_match(4, 5, 1.90, 2.20))
+        self.assertTrue(no_goal_risk_match(5, 5, 1.950, 2.20))
+        self.assertTrue(no_goal_risk_match(11, 2, 2.40, 1.90))
+        self.assertFalse(no_goal_risk_match(5, 5, 1.951, 2.20))
+        self.assertFalse(no_goal_risk_match(5, 5, "??", 2.20))
 
     def test_no_signal_when_overround_is_positive(self):
         self.assertIsNone(split_virtual_stakes(500, 1.80, 2.10))
@@ -214,6 +221,25 @@ class VirtualForkLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(state["balance"], 5000)
                     self.assertEqual(state["allocated_percent"], 10)
                     self.assertTrue((await observer.stop())["phase"] == "STOPPED")
+
+    async def test_optional_risk_filter_exposed_in_state_and_reset_per_start(self):
+        with TemporaryDirectory() as tmp:
+            observer = VirtualForkObserver(ForkStore(Path(tmp) / "forks.sqlite3"))
+
+            async def worker():
+                await observer._stop_event.wait()
+
+            with patch.object(observer, "_run", side_effect=worker), \
+                 patch("backend.app.virtual_forks.ENGINE") as engine:
+                engine.task = None
+                state = await observer.start(5000, 10, no_goal_risk_enabled=True)
+                self.assertTrue(state["no_goal_risk_enabled"])
+                self.assertEqual(state["no_goal_risk_skipped"], 0)
+                await observer.stop()
+                state = await observer.start(5000, 10)
+                self.assertFalse(state["no_goal_risk_enabled"])
+                self.assertEqual(state["no_goal_risk_skipped"], 0)
+                await observer.stop()
 
     async def test_start_rejects_concurrent_main_engine_task(self):
         with TemporaryDirectory() as tmp:
@@ -472,6 +498,79 @@ class VirtualForkLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(observer._state["signals"], 1)
                 self.assertEqual(len(observer.store.history()), 1)
                 self.assertEqual(observer._state["balance"], 4500.0)
+
+    async def test_no_goal_risk_skips_bettable_match_before_any_coupon(self):
+        from urllib.parse import urlparse
+        from backend.app.demo.config import CONFIG
+        from backend.app.demo.models import Score
+
+        match = dict(
+            match_id="risk-game", href="/match/risk-game",
+            team1="А", team2="Б", time="00:15", time_seconds=15,
+            period="", score="0:0", is_upcoming=True, finished=False,
+        )
+
+        def snap(timer, period, a=0, b=0):
+            return SimpleNamespace(
+                timer=timer, period=period, score=Score(a, b),
+                team1="А", team2="Б",
+            )
+
+        class FakePage:
+            url = "https://example.test" + urlparse(CONFIG.league_url).path
+
+        for mode in ("VIRTUAL", "BOOKMAKER_DEMO"):
+            with self.subTest(mode=mode), TemporaryDirectory() as tmp:
+                observer = VirtualForkObserver(ForkStore(Path(tmp) / "forks.sqlite3"))
+                observer._session = "risk-test"
+                observer._no_goal_risk_enabled = True
+                observer._placement_mode = mode
+                observer._bookmaker_placer = MagicMock()
+                observer._balance = Decimal("5000")
+                observer._initial = Decimal("5000")
+                observer._allocation_pct = Decimal("10")
+                with patch("backend.app.virtual_forks.LeagueBrowser") as cls, \
+                     patch("backend.app.virtual_forks.read_scoreboard", new_callable=AsyncMock) as scores, \
+                     patch("backend.app.virtual_forks.read_next_goal_odds", new_callable=AsyncMock) as odds, \
+                     patch.object(observer, "pause", new_callable=AsyncMock), \
+                     patch.object(observer, "_settle", new_callable=AsyncMock) as settle:
+                    league = cls.return_value
+                    league.scan = AsyncMock(return_value=[match])
+                    league.revalidate_upcoming = AsyncMock(return_value=match)
+                    league.open = AsyncMock()
+                    league.open_match = AsyncMock()
+                    league.last_scan_stats = {
+                        "total": 1, "upcoming": 1, "started": 0,
+                        "finished": 0, "excluded": 0,
+                        "initial_live_skipped": 0, "unclassified": 0,
+                    }
+                    scores.side_effect = [
+                        snap("05:10", ""),
+                        snap("04:59", ""),
+                        snap("00:01", "1-й тайм"),
+                        snap("04:59", "2-й тайм", 5, 5),
+                        snap("05:00", "2-й тайм", 5, 5),
+                        snap("05:01", "2-й тайм", 5, 5),
+                    ]
+                    odds.return_value = SimpleNamespace(
+                        team1=1.95, team2=2.20, next_goal_number=11,
+                        locked_sides=(), recent_locked_sides=(),
+                        source="MOCK_CANVAS",
+                    )
+                    await observer._scan_one(FakePage())
+                settle.assert_not_awaited()
+                observer._bookmaker_placer.place.assert_not_called()
+                self.assertEqual(observer.store.history(), [])
+                self.assertEqual(observer._state["no_goal_risk_skipped"], 1)
+                self.assertIn("risk-game", observer._completed_match_ids)
+                self.assertTrue(any(
+                    x["event"] == "NO_GOAL_RISK_SKIP"
+                    for x in observer.store.logs()
+                ))
+                self.assertTrue(any(
+                    x["event"] == "NO_GOAL_RISK_SKIP"
+                    for x in observer.store.observations()
+                ))
 
     async def test_missing_timer_recovered_from_scoreboard_header(self):
         from backend.app.demo.models import ScoreboardSnapshot, Score
