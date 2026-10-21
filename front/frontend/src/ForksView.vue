@@ -5,6 +5,7 @@ const budget = ref(5000)
 const fraction = ref(10)
 const placementMode = ref('VIRTUAL')
 const confirmDemo = ref(false)
+const noGoalRiskEnabled = ref(false)
 const state = ref({ running:false, phase:'STOPPED', message:'Остановлен', balance:0, initial_budget:0, session_profit:0, allocated_percent:10, match:null, quote:null, position:null, scanned:0, signals:0 })
 const history = ref([])
 const observations = ref([])
@@ -47,6 +48,7 @@ async function control(mode) {
       ? { method:'POST', body:JSON.stringify({
           budget:Number(budget.value), allocation_percent:Number(fraction.value),
           placement_mode:placementMode.value, confirm_demo:confirmDemo.value,
+          no_goal_risk_enabled:noGoalRiskEnabled.value,
         }) }
       : { method:'POST' }
     await api('/api/forks/' + mode, options)
@@ -94,7 +96,7 @@ const stage = computed(() => ({
   WAITING_TIMER:'Чтение игрового времени', WAITING_WINDOW:'Ожидание LIVE 05:00',
   OBSERVING_ODDS:'Чтение коэффициентов до 05:00 (без ставок)',
   READING_ODDS:'Canvas: чтение коэффициентов', WAITING_MARKET:'Рынок недоступен',
-  WATCHING_QUOTES:'Ожидание вилки', WAITING_RESULT:'Ожидание гола · максимум 60 секунд',
+  WATCHING_QUOTES:'Ожидание вилки', FILTER_SKIPPED:'Пропуск опасной вилки', WAITING_RESULT:'Ожидание гола · максимум 60 секунд',
   SETTLED:'Рассчитано', NEEDS_REVIEW:'Требуется проверка',
   RECOVERING_BROWSER:'Восстановление Chromium', WAITING_AUTH:'Ожидание входа',
   WAITING_CARDS:'Ожидание карточек матчей', NO_MATCH_CARDS:'Карточки отсутствуют',
@@ -144,6 +146,13 @@ onBeforeUnmount(() => { clearInterval(poller) })
         </div>
         <label>Лимит {{ placementMode === 'BOOKMAKER_DEMO' ? 'учебного' : 'виртуального' }} бюджета<input v-model.number="budget" type="number" min="20" step="100" :disabled="state.running"></label>
         <label>Доля доступного бюджета на пару, %<input v-model.number="fraction" type="number" min="1" max="100" :disabled="state.running"></label>
+        <div class="fork-risk-filter">
+          <label class="fork-ack"><input v-model="noGoalRiskEnabled" type="checkbox" :disabled="state.running">
+            <strong>NO_GOAL_RISK — пропускать опасные вилки</strong>
+          </label>
+          <small>Если уже 10+ голов и меньший коэффициент следующего гола ≤ 1,950 — не ставить и перейти к следующему матчу. Экспериментальный фильтр, не гарантия отсутствия гола.</small>
+          <small v-if="state.running">Сейчас: {{ state.no_goal_risk_enabled ? 'ВКЛ' : 'ВЫКЛ' }} · пропущено {{ state.no_goal_risk_skipped || 0 }} матчей</small>
+        </div>
         <button :class="['fork-btn', state.running ? 'stop' : 'start']" :disabled="busy || (!state.running && placementMode === 'BOOKMAKER_DEMO' && !confirmDemo) || (!state.running && placementMode === 'VIRTUAL' && completedCount >= targetCount)" @click="control(state.running ? 'stop' : 'start')">{{ state.running ? '■ Остановить' : placementMode === 'VIRTUAL' && completedCount >= targetCount ? '✓ Цель достигнута' : placementMode === 'BOOKMAKER_DEMO' ? '▶ Запустить БК DEMO' : '▶ Продолжить сбор вилок' }}</button>
         <div v-if="placementMode === 'VIRTUAL'" class="fork-target">
           <div class="fork-target-head"><span>Цель по завершённым виртуальным парам</span><strong>{{ completedCount }} / {{ targetCount }}</strong></div>
@@ -155,6 +164,7 @@ onBeforeUnmount(() => { clearInterval(poller) })
           <div><small>Прибыль сессии</small><strong :class="Number(state.session_profit)<0?'red':'green'">{{ rub(state.session_profit) }}</strong></div>
           <div><small>Матчей проверено</small><strong>{{ state.scanned }}</strong></div>
           <div><small>Виртуальных пар</small><strong>{{ state.signals }}</strong></div>
+          <div><small>Пропущено NO_GOAL_RISK</small><strong>{{ state.no_goal_risk_skipped || 0 }}</strong></div>
         </div>
       </article>
       <article class="fork-card">
@@ -217,9 +227,9 @@ onBeforeUnmount(() => { clearInterval(poller) })
               <td>{{ date(item.timestamp) }}</td>
               <td>{{ item.match }}</td>
               <td>{{ item.period || '—' }} / {{ item.timer || '—' }}</td>
-              <td>{{ item.event === 'GOAL' ? 'ГОЛ' : item.event === 'MATCH_JOINED' ? 'Вход в матч' : 'Изменение счёта' }}</td>
+              <td>{{ item.event === 'GOAL' ? 'ГОЛ' : item.event === 'MATCH_JOINED' ? 'Вход в матч' : item.event === 'NO_GOAL_RISK_SKIP' ? 'Пропуск фильтра' : 'Изменение счёта' }}</td>
               <td>{{ item.goal_number || '—' }}</td>
-              <td :class="{green:item.event === 'GOAL'}">{{ item.scorer_team || 'Не определена' }}</td>
+              <td :class="{green:item.event === 'GOAL'}">{{ item.event === 'NO_GOAL_RISK_SKIP' ? '—' : (item.scorer_team || 'Не определена') }}</td>
               <td>{{ item.score_before || '—' }} → {{ item.score_after || '—' }}</td>
             </tr>
             <tr v-if="!observations.length"><td colspan="7">Ожидаем первый матч.</td></tr>
@@ -280,6 +290,7 @@ onBeforeUnmount(() => { clearInterval(poller) })
 .fork-mode-select{width:100%;margin-top:8px;padding:12px;border:1px solid #334761;border-radius:9px;color:#e7f3ff;background:#101b2c}
 .fork-demo-mode{border:1px solid #795b36;background:#2d241b;color:#ffdbad;border-radius:10px;padding:12px;margin:12px 0;font-size:11px;line-height:1.6}
 .fork-demo-mode p{margin:0 0 8px}
+.fork-risk-filter{margin:12px 0;padding:12px;border:1px solid #385273;border-radius:10px;background:#13243a;color:#e7f3ff}.fork-risk-filter small{display:block;margin:6px 0;color:#b0c6de;line-height:1.5}.fork-risk-filter .fork-ack{display:flex;align-items:center;gap:8px}
 .fork-ack{display:flex!important;align-items:start;gap:9px}
 .fork-ack input{width:auto!important;min-width:16px;flex:none;margin-top:3px}
 .fork-target{margin-top:18px;border:1px solid #30445d;background:#0f2030;padding:15px;border-radius:10px}
