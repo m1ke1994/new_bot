@@ -203,6 +203,8 @@ const backendAvailable = ref(false)
 
 const selectedMode = ref('DEMO')
 
+const showAdvancedFilters = ref(false)
+
 const pendingAction = ref(null)
 
 const actionPending = computed(() => pendingAction.value !== null)
@@ -1107,6 +1109,8 @@ onBeforeUnmount(() => {
 
       <div class="controls">
 
+        <router-link to="/forks" class="button button-start" style="display:inline-flex;align-items:center;text-decoration:none">Вилки 05:00–05:30 ↗</router-link>
+
         <div class="demo-chip">{{ state.running ? state.mode : 'ГОТОВ' }}</div>
 
         <button
@@ -1299,7 +1303,9 @@ onBeforeUnmount(() => {
 
         </div>
 
-        <div class="match-filters">
+        <button type="button" class="button" style="margin:15px 0" @click="showAdvancedFilters = !showAdvancedFilters">{{ showAdvancedFilters ? "Скрыть фильтры матчей" : "Показать дополнительные фильтры матчей" }}</button>
+
+        <div v-show="showAdvancedFilters" class="match-filters">
 
           <div class="match-filters-heading">
 

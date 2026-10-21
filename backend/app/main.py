@@ -23,6 +23,8 @@ ENGINE = demo_engine_module.ENGINE
 from backend.app.routes.browser import router as browser_router
 from backend.app.routes.demo import router as demo_router
 from backend.app.routes.live import router as live_router
+from backend.app.routes.forks import router as forks_router
+from backend.app.virtual_forks import FORKS
 from xbet_config import URL_CONFIG
 
 
@@ -35,6 +37,7 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        await FORKS.stop()
         await ENGINE.stop()
         await BROWSER_MANAGER.stop()
 
@@ -54,6 +57,7 @@ app.add_middleware(
 app.include_router(demo_router)
 app.include_router(browser_router)
 app.include_router(live_router)
+app.include_router(forks_router)
 
 
 @app.get("/api/health")
