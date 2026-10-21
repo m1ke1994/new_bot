@@ -13,6 +13,7 @@ class StartPayload(BaseModel):
     allocation_percent: float = Field(default=10, ge=1, le=100)
     placement_mode: Literal["VIRTUAL", "BOOKMAKER_DEMO"] = "VIRTUAL"
     confirm_demo: bool = False
+    no_goal_risk_enabled: bool = False
 
 
 @router.get("/state")
@@ -27,6 +28,7 @@ async def start(payload: StartPayload):
             payload.budget, payload.allocation_percent,
             placement_mode=payload.placement_mode,
             confirm_demo=payload.confirm_demo,
+            no_goal_risk_enabled=payload.no_goal_risk_enabled,
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
